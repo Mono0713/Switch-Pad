@@ -662,10 +662,7 @@ function Card-Paint($card) {
     $g = $card.Tag; $in = $selected.Contains($g.Dir)
     $act = $card.FindName('Act'); $pend = $card.FindName('Pending'); $pt = $card.FindName('PendingText')
     $act.Style = $win.FindResource([Windows.Controls.Button])
-    $badge = if ($in -and -not $g.Ready -and -not $g.OnPad) { @('待轉換', '#0A84FF') } elseif ($in -and $g.Ready -and -not $g.OnPad) { @('待裝到 iPad', '#0A84FF') }
-             elseif (-not $in -and $g.OnPad) { @('裝到 iPad 時拿掉', '#FF453A') } else { $null }
-    if ($badge) { $pend.Visibility = 'Visible'; $pt.Text = $badge[0]; $pend.Background = Brush $badge[1]; $card.BorderBrush = Brush $badge[1] }
-    else { $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent }
+    $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent   # 狀態只看卡片上那一行「●」
     if ($in) { $act.Content = '移除' } else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary') }
     $act.IsEnabled = -not $state.Running -and ($in -or $g.Base -or $g.Ready)
     $act.ToolTip = if (-not $in -and -not $g.Base -and -not $g.Ready) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
@@ -693,6 +690,7 @@ function Update-SelCount {
     $ui.Start.Content = if ($conv.Count) { "放進遊戲庫（轉換 $($conv.Count) 款）" } else { '放進遊戲庫' }
     $ui.Start.IsEnabled = [bool]$conv.Count
     $ui.Sync.IsEnabled = ($left -gt 0) -and ([bool]$pad.Count -or [bool]$gl.Count)
+    $ui.Sync.Content = if ($add.Count -or $del.Count) { '裝到 iPad（' + (@($(if ($add.Count) { "＋$($add.Count)" }), $(if ($del.Count) { "－$($del.Count)" })) | Where-Object { $_ }) -join ' ' + '）' } else { '裝到 iPad' }
     if (-not $left -and $del.Count) { $ui.SelCount.Text = '遊戲庫至少要留一款轉換好的遊戲，才能裝到 iPad' }
 }
 
@@ -865,27 +863,35 @@ function Build-Library {
         $card.FindName('Title').Text = $g.Name
         $parts = @()
         if (-not $g.Base) { $parts += '缺本體' }
-        $parts += if ($g.Update -and $g.Update -notlike '#*') { "v$($g.Update)" } elseif (-not $g.Update) { 'v1.0.0' } else { '已更新' }
+        if ($g.Update -and $g.Update -notlike '#*') { $parts += "v$($g.Update)" } elseif ($g.Update) { $parts += '已更新' }   # 沒有更新檔就不寫版本，本體的版本號看不出來
         if ($g.Dlc) { $parts += "$($g.Dlc) DLC" }
         $card.FindName('Detail').Text = $parts -join ' · '
         $st = $card.FindName('State')
         $glRec = Join-Path $base "合包\GL著色器\$(Game-Tid $g)"
         $glN = if ((Game-Tid $g) -and (Test-Path -LiteralPath $glRec)) { @(Get-ChildItem -LiteralPath $glRec -File -ErrorAction SilentlyContinue).Count } else { -1 }
         $green = Brush '#30D158'; $blue = Brush '#0A84FF'; $gray = Brush '#8E8E93'; $st.ToolTip = $null
-        if ($g.InLib -and -not $g.Ready -and $addFail.ContainsKey($g.Dir)) { $st.Text = '轉換失敗：' + $addFail[$g.Dir]; $st.Foreground = Brush '#FF453A'; $st.ToolTip = "$($addFail[$g.Dir])。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響" }
-        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '到 iPad 上打開玩一下'; $st.Foreground = Brush '#FF9F0A'; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，接著 iPad 接著電腦按「裝到 iPad」，就會有畫面' }
-        elseif ($g.InLib -and $g.OnPad -and $g.Ready) { $st.Text = '在 iPad 上' + $(if ($glN -gt 0) { " · 著色器 $glN 個" } else { '' }); $st.Foreground = $green }
-        elseif ($g.InLib -and $g.OnPad) { $st.Text = '在 iPad 上 · 遊戲檔有新的，要再轉換'; $st.Foreground = Brush '#FF9F0A' }
-        elseif ($g.InLib -and $g.Ready) { $st.Text = '轉換好了，等裝到 iPad'; $st.Foreground = $blue }
-        elseif ($g.InLib) { $st.Text = '還沒轉換：按「放進遊戲庫」'; $st.Foreground = $gray }
-        elseif ($g.OnPad) { $st.Text = '還在 iPad 上，按「裝到 iPad」拿掉'; $st.Foreground = Brush '#FF453A' }
-        elseif ($addFail.ContainsKey($g.Dir)) { $st.Text = '轉換失敗：' + $addFail[$g.Dir]; $st.Foreground = Brush '#FF453A' }
-        elseif ($g.Ready) { $st.Text = '轉換過了，加入不用再等'; $st.Foreground = $gray }
+        $red = Brush '#FF453A'; $orange = Brush '#FF9F0A'
+        $why = if ($addFail.ContainsKey($g.Dir)) { $addFail[$g.Dir] } else { '' }
+        $g | Add-Member -NotePropertyName Order -NotePropertyValue 9 -Force
+        if ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
+        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
+        elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 遊戲檔有更新，要再轉換'; $st.Foreground = $orange; $g.Order = 1 }
+        elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的 OpenGL 著色器 $glN 個" }; $g.Order = 4 }
+        elseif ($g.InLib -and $g.Ready) { $st.Text = '● 等裝到 iPad'; $st.Foreground = $blue; $st.ToolTip = '轉換好了，iPad 接上後按「裝到 iPad」'; $g.Order = 2 }
+        elseif ($g.InLib) { $st.Text = '● 等轉換'; $st.Foreground = $gray; $st.ToolTip = '按「放進遊戲庫」在電腦上轉換'; $g.Order = 3 }
+        elseif ($g.OnPad) { $st.Text = '● 裝到 iPad 時拿掉'; $st.Foreground = $red; $g.Order = 0 }
+        elseif ($why) { $st.Text = '● 上次轉換失敗'; $st.Foreground = $red; $st.ToolTip = $why; $g.Order = 1 }
+        elseif ($g.Ready) { $st.Text = '● 轉換過了，加入就能裝'; $st.Foreground = $gray; $g.Order = 2 }
         else { $st.Text = '' }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
-        $sup = Support-Of $g
-        $sb = $card.FindName('Support'); $sb.Text = $sup.Text; $sb.Foreground = Brush $sup.Color
-        if ($sup.Tip) { $sb.ToolTip = $sup.Tip }
+        # 支援程度只在「還沒加入」顯示，幫你挑；已經在遊戲庫的看上面那行就好
+        $sb = $card.FindName('Support')
+        if (-not $g.InLib) {
+            $sup = Support-Of $g
+            if ($sup.Text -eq '● 已驗證') { $sb.Text = '✓ 已驗證'; $sb.Foreground = $green }
+            elseif ($sup.Text) { $sb.Text = '未驗證，可能打不開'; $sb.Foreground = $gray }
+            if ($sup.Tip) { $sb.ToolTip = $sup.Tip }
+        } else { $sb.Visibility = 'Collapsed' }
         Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $g (Cover-For $g)
 
         $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#2C2C2E' })
@@ -902,14 +908,17 @@ function Build-Library {
             Add-Files $s.Tag.Dir @($e.Data.GetData([Windows.DataFormats]::FileDrop))
             $e.Handled = $true })
         $card.ContextMenu = New-CardMenu $g
-        [void]$(if ($g.InLib) { $ui.Library } else { $ui.Others }).Children.Add($card)
+        $panel = if ($g.InLib) { $ui.Library } else { $ui.Others }
+        $at = 0; foreach ($c in $panel.Children) { if ($c.Tag.Order -le $g.Order) { $at++ } }   # 要你處理的排前面，在 iPad 上的排後面
+        [void]$panel.Children.Insert($at, $card)
         $cards[$g.Dir] = $card
         Card-Paint $card
     }
     $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
-    $ui.GamesHead.Text = "遊戲庫裡 · $nIn 款"; $ui.OutHead.Text = "還沒加入 · $nOut 款"
+    $onPad = @($ui.Library.Children | Where-Object { $_.Tag.OnPad }).Count
+    $ui.GamesHead.Text = "遊戲庫裡 · $nIn 款" + $(if ($nIn) { "（iPad 上 $onPad、還沒上 iPad $($nIn - $onPad)）" } else { '' }); $ui.OutHead.Text = "還沒加入 · $nOut 款"
     if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「放進遊戲庫」。' }
-    else { $ui.InHint.Text = '兩步：「放進遊戲庫」在電腦上轉換遊戲（不用接 iPad）；iPad 接上後按「裝到 iPad」。按「移除」拿掉。' }
+    else { $ui.InHint.Text = '● 綠 在 iPad 上　● 藍 等裝到 iPad　● 灰 等轉換（按「放進遊戲庫」）　● 紅 有問題，滑鼠移上去看原因' }
     if (-not $nOut) {
         $t = New-Object Windows.Controls.TextBlock
         $t.Text = if ($cards.Count) { '電腦上的遊戲都在遊戲庫裡了。把 NSP / XCI / NSZ 拖進視窗新增遊戲。' } else { '把 NSP / XCI / NSZ 拖進來新增遊戲' }
