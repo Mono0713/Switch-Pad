@@ -24,13 +24,14 @@ param(
     [switch]$Full,                   # 整包裝（遊戲資料也放在 App 裡），不分開傳
     [switch]$SaveBackup,             # 只備份 iPad 上的存檔（要 -Ipa）
     [string]$SaveRestore = '',       # 只把這份存檔備份還原回 iPad（要 -Ipa）
+    [switch]$SaveMigrate,            # 把舊的單款 App、合包的存檔存到電腦，遊戲庫裝好了就放進去（-Ipa 是遊戲庫）
     [switch]$NoSaveBackup,           # 安裝前不自動備份存檔
     [switch]$NoPause
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
-$saveMode = $SaveBackup -or $SaveRestore
+$saveMode = $SaveBackup -or $SaveRestore -or $SaveMigrate
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
@@ -298,6 +299,8 @@ try {
 
         $Ipa = $ipaFile.FullName
         Ok "IPA：$Ipa（$([int]($ipaFile.Length / 1MB)) MB）"
+    } elseif ($SaveMigrate -and -not (Test-Path $Ipa)) {
+        # 遊戲庫還沒合成也能先把舊存檔存到電腦
     } else {
         if (-not (Test-Path $Ipa)) { throw "找不到 IPA：$Ipa" }
         $Ipa = (Resolve-Path $Ipa).Path
@@ -306,7 +309,8 @@ try {
     if ($PackOnly) { Finish "打包完成：$Ipa" Green; return }
 
     # ---- 簽章並安裝 ----
-    if ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
+    if ($SaveMigrate) { Step '搬舊 App 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
+    elseif ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
     elseif ($SaveBackup) { Step '備份 iPad 存檔（iPad 要用 USB 接著並解鎖）' }
     else { Step '簽章並安裝到 iPad（iPad 要用 USB 接著並解鎖；第一次會問要不要信任這台電腦）' }
     # plumesign 的 --udid 其實要的是 Apple 行動裝置服務（usbmuxd）給這次連線的編號（1、2、3…），
@@ -408,6 +412,12 @@ try {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
         $tpy = Transfer-Python
         if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，讀不到 iPad 上的存檔。' }
+        if ($SaveMigrate) {
+            $c = RunExe $tpy @('-I', $saveTool, 'migrate', $Ipa, $saveRoot, '--udid', $dev.Serial)
+            if ($c) { throw "搬存檔失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
+            Finish "舊 App 的存檔在 $saveRoot\舊App存檔" Green
+            return
+        }
         if ($SaveRestore) {
             if (-not (Test-Path -LiteralPath $SaveRestore)) { throw "找不到存檔備份：$SaveRestore" }
             $c = RunExe $tpy @('-I', $saveTool, 'restore', $Ipa, $SaveRestore, $saveRoot, '--udid', $dev.Serial)

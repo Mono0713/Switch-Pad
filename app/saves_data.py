@@ -10,6 +10,14 @@ backed up first, so a copy in the wrong direction loses nothing.
 
   saves_data.py backup  <ipa> <backups folder> [--udid UDID] [--keep N] [--tag TEXT]
   saves_data.py restore <ipa> <one backup folder> <backups folder> [--udid UDID]
+  saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
+
+migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
+packages, org.nxnative.games[.p<hash>]) into the library app, in two halves so the old apps can be deleted before the library
+is installed (a free Apple ID holds 3 apps): every old app still on the iPad is copied as it is to <backups folder>/舊App存檔/
+<time>/; then, when the library is on the iPad, every copy made so far goes into it, a one-game app's save/ becoming the
+library's save/<title ID>/. Only the library's games are written, the save changed last of each; a game that already has a
+save in the library is left alone unless --overwrite. The library is backed up first.
 
 A backup is <backups folder>/<yyyyMMdd-HHmmss>[-tag]/ holding save/ (and save_device/), plus a .digest of its files. A backup
 whose files are the same as the newest one's is not kept again. Exit codes: 0 done (or nothing to back up), 3 the app is not
@@ -17,8 +25,10 @@ on the iPad, 1 anything else.
 """
 import argparse
 import asyncio
+import contextlib
 import datetime
 import hashlib
+import json
 import os
 import plistlib
 import re
@@ -65,6 +75,14 @@ def backups(root):
                   and os.path.isdir(os.path.join(root, d)))
 
 
+def stamp_of(st):
+    """A file's change time from AFC stat, in seconds (pymobiledevice3 gives a datetime; raw AFC gives nanoseconds)."""
+    t = st.get('st_mtime', 0)
+    if isinstance(t, datetime.datetime): return t.timestamp()
+    t = float(t or 0)
+    return t / 1e9 if t > 1e12 else t
+
+
 async def pull_tree(afc, src, dest):
     """Copy the device folder src into dest; returns the number of files."""
     n = 0
@@ -76,6 +94,8 @@ async def pull_tree(afc, src, dest):
             n += await pull_tree(afc, s, d)
         else:
             with open(d, 'wb') as f: f.write(await afc.get_file_contents(s))
+            t = stamp_of(await afc.stat(s))
+            if t: os.utime(d, (t, t))
             n += 1
     return n
 
@@ -119,6 +139,8 @@ async def backup(afc, root, keep=30, tag='', now=None):
                 return None
     with open(os.path.join(part, DIGEST), 'w') as fh: fh.write(dg)
     final = os.path.join(root, stamp)
+    k = 1
+    while os.path.exists(final): k += 1; final = os.path.join(root, '%s-%d' % (stamp, k))
     os.replace(part, final)
     print('存檔備份好了：%s（%d 個檔案）' % (final, n))
     # keep the newest `keep`; a backup made before a restore is kept like any other
@@ -140,6 +162,155 @@ async def restore(afc, src, root, now=None):
     n = 0
     for f in have: n += await push_tree(afc, os.path.join(src, f), base + '/' + f)
     print('存檔還原好了：%s（%d 個檔案）' % (os.path.basename(os.path.normpath(src)), n))
+
+
+SINGLE = re.compile(r'org\.nxnative\.([0-9a-fA-F]{16})(?:\.|$)')
+PACK = re.compile(r'org\.nxnative\.games(?:\.p[0-9a-f]+)?(?:\.|$)')
+OLD_DIR = '舊App存檔'
+APP_JSON = 'app.json'
+LIBRARY = 'org.nxnative.games.library'
+
+
+def library_tids(ipa):
+    with zipfile.ZipFile(ipa) as z:
+        return sorted({m.group(1).upper() for n in z.namelist() for m in [re.match(r'Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/', n)] if m})
+
+
+def old_apps(apps, library):
+    """[(installed bundle ID, its name, the title ID of a one-game app or None for a package)] of the apps made before the library."""
+    out = []
+    for b, info in sorted(apps.items()):
+        if b == library or b.startswith(library + '.'): continue
+        name = info.get('CFBundleDisplayName') or info.get('CFBundleName') or b
+        m = SINGLE.match(b)
+        if m: out.append((b, name, m.group(1).upper()))
+        elif PACK.match(b): out.append((b, name, None))
+    return out
+
+
+def newest(folder):
+    """(number of files, newest change time) under a local folder."""
+    n, t = 0, 0.0
+    for r, _, fs in os.walk(folder):
+        for f in fs: n += 1; t = max(t, os.path.getmtime(os.path.join(r, f)))
+    return n, t
+
+
+async def collect(olds, root, now=None):
+    """Copy every old app's saves, as they are, to <root>/舊App存檔/<time>/<n>-<name>/ with an app.json saying what the app
+    was. olds = [(bundle ID, name, title ID of a one-game app or None, afc)]. Returns the folders made."""
+    keep = os.path.join(root, OLD_DIR, (now or datetime.datetime.now()).strftime('%Y%m%d-%H%M%S'))
+    made = []
+    for i, (bundle, name, single, afc) in enumerate(olds):
+        base = await docs_base(afc)
+        here = os.path.join(keep, '%02d-%s' % (i + 1, re.sub(r'[\\/:*?"<>|]', '_', name)))
+        n = 0
+        for f in FOLDERS:
+            if await afc.exists(base + '/' + f): n += await pull_tree(afc, base + '/' + f, os.path.join(here, f))
+        if not n: print('「%s」裡沒有存檔' % name); continue
+        with open(os.path.join(here, APP_JSON), 'w', encoding='utf-8') as fh:
+            json.dump({'bundle': bundle, 'name': name, 'tid': single}, fh, ensure_ascii=False)
+        print('「%s」的存檔存到電腦了（%d 個檔案）：%s' % (name, n, here))
+        made.append(here)
+    return made
+
+
+def collected(root):
+    """Every old app's saves collected so far, as [(name, local folder holding save/ and save_device/, title ID or None)]."""
+    out = []
+    top = os.path.join(root, OLD_DIR)
+    for t in sorted(os.listdir(top)) if os.path.isdir(top) else []:
+        for d in sorted(os.listdir(os.path.join(top, t))):
+            meta = os.path.join(top, t, d, APP_JSON)
+            if not os.path.isfile(meta): continue
+            with open(meta, encoding='utf-8') as fh: j = json.load(fh)
+            out.append((j.get('name') or d, os.path.join(top, t, d), j.get('tid')))
+    return out
+
+
+def game_saves(folder, tid, single):
+    """{'save': local folder, 'save_device': ...} of one game in a collected app, only those holding files."""
+    if single:
+        paths = {'save': os.path.join(folder, 'save'), 'save_device': os.path.join(folder, 'save_device')}
+    else:
+        sd = os.path.join(folder, 'save')
+        names = {x.upper(): x for x in (os.listdir(sd) if os.path.isdir(sd) else [])}
+        paths = {k: os.path.join(sd, names[v]) for k, v in (('save', tid), ('save_device', tid + '_DEVICE')) if v in names}
+    return {k: p for k, p in paths.items() if os.path.isdir(p) and newest(p)[0]}
+
+
+async def place(lib_afc, sources, tids, root, overwrite=False, now=None):
+    """Put collected saves into the library's save/<title ID>/: the save changed last of each game the library holds; a game
+    that already has a save in the library is left alone unless overwrite. sources = collected(root). Returns the title IDs done."""
+    found = {}    # title ID -> (newest change, app name, {'save': folder, 'save_device': folder})
+    for name, folder, single in sources:
+        for tid in [single] if single else tids:
+            if tid not in tids: continue
+            paths = game_saves(folder, tid, single)
+            if not paths: continue
+            t = max(newest(p)[1] for p in paths.values())
+            if tid not in found or t > found[tid][0]: found[tid] = (t, name, paths)
+    if not found:
+        print('電腦上的舊 App 存檔裡，沒有遊戲庫這些遊戲的存檔')
+        return []
+    await backup(lib_afc, root, keep=0, tag='before-migrate', now=now)
+    base = await docs_base(lib_afc)
+    done = []
+    for tid, (_, name, paths) in sorted(found.items()):
+        dest = base + '/save/' + tid
+        if not overwrite and await lib_afc.exists(dest) and await count_files(lib_afc, dest):
+            print('%s 在遊戲庫裡已經有存檔，沒有蓋掉' % tid); continue
+        for d in (dest, dest + '_device'):
+            for leftover in (d, d + '.work', d + '.new'):
+                if await lib_afc.exists(leftover): await lib_afc.rm(leftover, force=True)
+        n = 0
+        if 'save' in paths: n += await push_tree(lib_afc, paths['save'], dest)
+        if 'save_device' in paths: n += await push_tree(lib_afc, paths['save_device'], dest + '_device')
+        print('%s：用「%s」的存檔（%d 個檔案）' % (tid, name, n))
+        done.append(tid)
+    print('放進遊戲庫 %d 款' % len(done))
+    return done
+
+
+async def count_files(afc, path):
+    n = 0
+    for name in await afc.listdir(path):
+        if name in ('.', '..', '') or skipped(name): continue
+        p = path + '/' + name
+        n += await count_files(afc, p) if (await afc.stat(p)).get('st_ifmt') == 'S_IFDIR' else 1
+    return n
+
+
+async def migrate_on_device(a):
+    """Collect the old apps' saves to the computer; when the library is on the iPad, put every collected save into it."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+    from pymobiledevice3.services.house_arrest import HouseArrestService
+
+    lib = bundle_of(a.ipa) if os.path.isfile(a.ipa) else LIBRARY   # not made yet: the old saves can still be collected
+    ld = await create_using_usbmux(serial=a.udid or None)
+    async with ld:
+        async with InstallationProxyService(lockdown=ld) as ip:
+            apps = await ip.get_apps(application_type='User')
+        ids = [b for b in apps if b == lib or b.startswith(lib + '.')]
+        olds = old_apps(apps, lib)
+        async with contextlib.AsyncExitStack() as stack:
+            async def afc(b): return await stack.enter_async_context(await HouseArrestService.create(lockdown=ld, bundle_id=b, documents_only=True))
+            if olds:
+                print('iPad 上的舊 App：' + '、'.join(n for _, n, _ in olds))
+                await collect([(b, n, t, await afc(b)) for b, n, t in olds], a.root)
+            else:
+                print('iPad 上沒有舊的單款 App 或合包')
+            if not ids:
+                print('遊戲庫還沒裝到 iPad：舊存檔都在電腦上了，可以從 iPad 刪掉舊 App。裝好遊戲庫後再按一次「搬舊 App 存檔」放進去')
+                return 0
+            sources = collected(a.root)
+            if not sources:
+                print('電腦上還沒有舊 App 的存檔')
+                return 0
+            if not os.path.isfile(a.ipa) or not library_tids(a.ipa): raise SystemExit('讀不到遊戲庫裡有哪些遊戲：%s' % a.ipa)
+            await place(await afc(ids[0]), sources, library_tids(a.ipa), a.root, a.overwrite)
+    return 0
 
 
 async def on_device(a, work):
@@ -168,10 +339,12 @@ def main():
     p = sub.add_parser('backup'); p.add_argument('ipa'); p.add_argument('root')
     p.add_argument('--keep', type=int, default=30); p.add_argument('--tag', default='')
     p = sub.add_parser('restore'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root')
+    p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
     try: import pymobiledevice3  # noqa: F401
     except ImportError: raise SystemExit('pymobiledevice3 is not installed')
+    if a.cmd == 'migrate': return asyncio.run(migrate_on_device(a))
     if a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
     else: work = lambda afc: restore(afc, a.src, a.root)
     return asyncio.run(on_device(a, work))
