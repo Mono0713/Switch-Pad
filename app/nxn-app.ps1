@@ -1764,7 +1764,24 @@ function Game-Tid($g) {
     if ("$($g.BaseFile)" -match '(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])') { return $Matches[1].ToUpper() }
     return ''
 }
-function Multi-Id($ms) { if ($ms.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { 'multi' } }
+function Shell-Sha($ms) { if ($ms.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { 'multi' } }
+# 遊戲包的名字用殼的 PACK_ABI（遊戲包格式，ns2ios-shell dm/tools/pack_abi.py）：只改了殼本身的新殼格式一樣，轉換好的遊戲包照用，
+# 換殼不用整個遊戲庫重轉。殼裡沒有 PACK_ABI（舊殼）就退回用殼的版本號
+$abiCache = @{}
+function Multi-Id($ms) {
+    $k = "$($ms.FullName)|$($ms.LastWriteTimeUtc.Ticks)"
+    if ($abiCache.ContainsKey($k)) { return $abiCache[$k] }
+    $id = Shell-Sha $ms
+    try {
+        $z = [IO.Compression.ZipFile]::OpenRead($ms.FullName)
+        try {
+            $e = $z.Entries | Where-Object { $_.FullName -match '^Payload/[^/]+\.app/dm/shell_info\.txt$' } | Select-Object -First 1
+            if ($e) { $sr = New-Object IO.StreamReader($e.Open()); try { $t = $sr.ReadToEnd() } finally { $sr.Dispose() }
+                      if ($t -match '(?m)^PACK_ABI=([0-9a-f]+)') { $id = "f$($Matches[1])" } }
+        } finally { $z.Dispose() }
+    } catch { }
+    $abiCache[$k] = $id; $id
+}
 # 遊戲包還能用嗎：同一個多遊戲殼做的，而且比資料夾裡所有遊戲檔都新（加了更新檔或 DLC 就要重做）
 function Part-For($g, $id) {
     $o = Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")
@@ -2132,7 +2149,7 @@ $ui.Settings.Add_Click({
     $lib = Library-Ipa; $ms = Get-MultiShell
     $have = Test-Path -LiteralPath $lib
     $sw.FindName('LibText').Text = $(if ($have) { "$lib（$(@(Library-Tids).Count) 款）" } else { '還沒有遊戲庫：加入遊戲，按「放進遊戲庫」再按「裝到 iPad」' }) +
-        "`n" + $(if ($ms) { "多遊戲殼 $(Multi-Id $ms)（$($ms.LastWriteTime.ToString('MM/dd'))）" } else { '還沒有多遊戲殼（放進 work\multigame）' })
+        "`n" + $(if ($ms) { "多遊戲殼 $(Shell-Sha $ms)（$($ms.LastWriteTime.ToString('MM/dd'))）" } else { '還沒有多遊戲殼（放進 work\multigame）' })
     $idle = -not $state.Running
     $sw.FindName('SaveBackup').IsEnabled = $have -and $idle
     $sw.FindName('SaveRestore').IsEnabled = $have -and $idle -and [bool]@(Save-Backups (Save-Root $lib)).Count
