@@ -312,8 +312,12 @@ $xamlText = @'
     <!-- 遊戲庫 -->
     <ScrollViewer x:Name="LibraryView" Grid.Row="2" VerticalScrollBarVisibility="Auto">
       <StackPanel>
-        <TextBlock x:Name="GamesHead" Text="遊戲" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,4" Visibility="Collapsed"/>
+        <TextBlock x:Name="GamesHead" Text="遊戲庫裡" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,2"/>
+        <TextBlock x:Name="InHint" Foreground="#8E8E93" Margin="0,0,0,6" Text="iPad 上「遊戲庫」App 裡現在有的遊戲。按「移除」拿掉。"/>
         <UniformGrid x:Name="Library" Columns="5" VerticalAlignment="Top" Margin="-8,0,4,12"/>
+        <TextBlock x:Name="OutHead" Text="還沒加入" FontSize="20" FontWeight="SemiBold" Margin="0,12,0,2"/>
+        <TextBlock x:Name="OutHint" Foreground="#8E8E93" Margin="0,0,0,6" Text="電腦上有、但還不在遊戲庫的遊戲。按「加入」放進去；把 NSP / XCI / NSZ 拖進視窗新增遊戲。"/>
+        <UniformGrid x:Name="Others" Columns="5" VerticalAlignment="Top" Margin="-8,0,4,12"/>
         <TextBlock x:Name="PacksHead" Text="合包" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4" Visibility="Collapsed"
                    ToolTip="好幾款遊戲合成的一個 App。點一下看裡面有哪些遊戲"/>
         <UniformGrid x:Name="Packs" Visibility="Collapsed" Columns="5" VerticalAlignment="Top" Margin="-8,0,4,12"/>
@@ -340,8 +344,8 @@ $xamlText = @'
           <Button x:Name="Stop" Content="停止" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="Back" Content="返回" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="RenewBtn" Margin="0,0,10,0" Visibility="Collapsed"/>
-          <Button x:Name="Start" Content="更新遊戲庫" Style="{StaticResource Primary}" ToolTipService.ShowOnDisabled="True"
-                  ToolTip="打包新勾的遊戲，合成遊戲庫再裝到 iPad；取消勾選的會從 iPad 上的遊戲庫拿掉（存檔留著）"/>
+          <Button x:Name="Start" Content="套用變更" Style="{StaticResource Primary}" ToolTipService.ShowOnDisabled="True"
+                  ToolTip="把「待加入」的遊戲打包放進遊戲庫、「待移除」的拿掉，再更新 iPad 上的遊戲庫（存檔都留著）"/>
         </StackPanel>
         <StackPanel x:Name="Options" Orientation="Horizontal" VerticalAlignment="Center">
           <TextBlock x:Name="SelCount" Text="" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
@@ -399,7 +403,7 @@ if (Test-Path $appIcon) {
     } catch { }
 }
 $ui = @{}
-foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks',
+foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
                'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Options','SelCount',
                'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel') { $ui[$n] = $win.FindName($n) }
 
@@ -619,8 +623,8 @@ function Paint-Icon($border, $letterBlock, $g, $bmp) {
 # ---------------------------------------------------------------- 遊戲卡
 $cardXaml = @'
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Height="300" Margin="8" CornerRadius="20" Background="#1C1C1E" BorderThickness="3" BorderBrush="Transparent"
-        Cursor="Hand" AllowDrop="True">
+        Height="340" Margin="8" CornerRadius="20" Background="#1C1C1E" BorderThickness="3" BorderBrush="Transparent"
+        AllowDrop="True">
   <Grid>
     <StackPanel Margin="16,18,16,12">
       <Border x:Name="Icon" Width="132" Height="132" CornerRadius="30" HorizontalAlignment="Center" Background="#2C2C2E">
@@ -632,6 +636,10 @@ $cardXaml = @'
       <TextBlock x:Name="State" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"/>
       <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"/>
     </StackPanel>
+    <Button x:Name="Act" VerticalAlignment="Bottom" HorizontalAlignment="Stretch" Margin="16,0,16,14" FontWeight="SemiBold"/>
+    <Border x:Name="Pending" CornerRadius="9" Padding="10,3" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" Visibility="Collapsed">
+      <TextBlock x:Name="PendingText" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
+    </Border>
     <Border x:Name="Check" Width="30" Height="30" CornerRadius="15" Background="#0A84FF" HorizontalAlignment="Right"
             VerticalAlignment="Top" Margin="0,10,10,0" Visibility="Collapsed">
       <TextBlock Text="✓" Foreground="White" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -645,10 +653,17 @@ $cardXaml = @'
 $cards = @{}          # 資料夾路徑 → 卡片
 $selected = New-Object System.Collections.Generic.List[string]
 
+# 卡片四種樣子：在遊戲庫（移除）、待移除（取消）、不在（加入）、待加入（取消）
 function Card-Paint($card) {
-    $on = $selected.Contains($card.Tag.Dir)
-    $card.BorderBrush = if ($on) { Brush '#0A84FF' } else { [Windows.Media.Brushes]::Transparent }
-    $card.FindName('Check').Visibility = if ($on) { 'Visible' } else { 'Collapsed' }
+    $want = $selected.Contains($card.Tag.Dir); $in = [bool]$card.Tag.InLib
+    $act = $card.FindName('Act'); $pend = $card.FindName('Pending')
+    $act.Style = $win.FindResource([Windows.Controls.Button])
+    if ($in -and $want) { $act.Content = '移除'; $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent; $card.Opacity = 1 }
+    elseif ($in) { $act.Content = '取消移除'; $pend.Visibility = 'Visible'; $pend.Background = Brush '#FF453A'; $card.FindName('PendingText').Text = '待移除'; $card.BorderBrush = Brush '#FF453A'; $card.Opacity = 0.6 }
+    elseif ($want) { $act.Content = '取消加入'; $pend.Visibility = 'Visible'; $pend.Background = Brush '#0A84FF'; $card.FindName('PendingText').Text = '待加入'; $card.BorderBrush = Brush '#0A84FF'; $card.Opacity = 1 }
+    else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary'); $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent; $card.Opacity = 1 }
+    $act.IsEnabled = -not $state.Running -and ($in -or $want -or $card.Tag.Base)
+    $act.ToolTip = if (-not $in -and -not $card.Tag.Base) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
 }
 $addTo = $null      # 合包卡片選「加入遊戲」時：要加進去的那包，勾好按開始就合進它
 # 勾的遊戲就是遊戲庫裡要有的：顯示幾款，和按「更新遊戲庫」會加進、拿掉幾款
@@ -659,12 +674,18 @@ function Update-SelCount {
     }
     $before = @(Library-Tids)
     $now = @($selected | ForEach-Object { Game-Tid $cards[$_].Tag })
+    $addN = @($cards.Values | Where-Object { -not $_.Tag.InLib -and $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag.Name })
+    $delN = @($cards.Values | Where-Object { $_.Tag.InLib -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag.Name })
     $add = @($now | Where-Object { $_ -and $before -notcontains $_ }).Count
     $del = @($before | Where-Object { $now -notcontains $_ }).Count
-    $chg = @(); if ($add) { $chg += "加進 $add 款" }; if ($del) { $chg += "拿掉 $del 款" }
-    $ui.SelCount.Text = if ($n) { "遊戲庫 $n 款" + $(if ($chg) { '（' + ($chg -join '、') + '）' } else { '' }) } else { '勾要放進遊戲庫的遊戲' }
+    $names = { param($l) (@($l | Select-Object -First 3) -join '、') + $(if ($l.Count -gt 3) { " 等 $($l.Count) 款" } else { '' }) }
+    $chg = @(); if ($add) { $chg += "加入：$(& $names $addN)" }; if ($del) { $chg += "移除：$(& $names $delN)" }
+    $ui.SelCount.Text = if (-not $n -and $del) { '遊戲庫至少要留一款' } elseif ($chg) { ($chg -join '　') + "　→ 遊戲庫 $n 款" } else { "遊戲庫 $($before.Count) 款 · 沒有要改的" }
     $ui.SelCount.ToolTip = $null
-    $ui.Start.IsEnabled = ($n -gt 0)
+    # OpenGL 遊戲在 iPad 上記下的著色器要拿回來重包，沒有加減遊戲也要能按
+    $gl = @($cards.Values | Where-Object { $_.Tag.InLib -and (Game-Tid $_.Tag) -and (Test-Path -LiteralPath (Join-Path $base "合包\GL著色器\$(Game-Tid $_.Tag)")) })
+    if (-not $chg -and $gl.Count -and $n) { $ui.SelCount.Text = "遊戲庫 $($before.Count) 款 · 按「套用變更」拿回 iPad 上記下的 OpenGL 著色器" }
+    $ui.Start.IsEnabled = ($n -gt 0) -and ([bool]$chg -or [bool]$gl.Count)
 }
 
 # ---------------------------------------------------------------- 右鍵選單
@@ -821,7 +842,7 @@ function Card-Action($action, $dir) {
 
 function Build-Library {
     $keep = @($selected)
-    $ui.Library.Children.Clear(); $cards.Clear(); $selected.Clear()
+    $ui.Library.Children.Clear(); $ui.Others.Children.Clear(); $cards.Clear(); $selected.Clear()
     $inst = @(Get-Installed)
     $libTids = @(Library-Tids)
     $ms = Get-MultiShell; $partId = if ($ms) { Multi-Id $ms } else { '' }
@@ -829,6 +850,7 @@ function Build-Library {
     foreach ($d in $dirs) {
         $g = Scan-Game $d
         if (-not $g.Base -and -not $g.Ipas.Count) { continue }   # 不是遊戲資料夾
+        $g | Add-Member -NotePropertyName InLib -NotePropertyValue ($libTids -contains (Game-Tid $g)) -Force
         $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
         $card.Tag = $g
         $card.FindName('Title').Text = $g.Name
@@ -838,7 +860,10 @@ function Build-Library {
         if ($g.Dlc) { $parts += "$($g.Dlc) DLC" }
         $card.FindName('Detail').Text = $parts -join ' · '
         $st = $card.FindName('State')
-        if ($libTids -contains (Game-Tid $g)) { $st.Text = '在遊戲庫'; $st.Foreground = Brush '#0A84FF' }
+        $glRec = Join-Path $base "合包\GL著色器\$(Game-Tid $g)"
+        $glN = if ((Game-Tid $g) -and (Test-Path -LiteralPath $glRec)) { @(Get-ChildItem -LiteralPath $glRec -File -ErrorAction SilentlyContinue).Count } else { -1 }
+        if ($g.InLib -and $glN -eq 0) { $st.Text = '到 iPad 上打開玩一下'; $st.Foreground = Brush '#FF9F0A'; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，接著 iPad 接著電腦按「套用變更」，就會有畫面' }
+        elseif ($libTids -contains (Game-Tid $g)) { $st.Text = '在遊戲庫' + $(if ($glN -gt 0) { " · 著色器 $glN 個" } else { '' }); $st.Foreground = Brush '#30D158' }
         elseif ($partId -and (Part-For $g $partId).Fresh) { $st.Text = '已打包'; $st.Foreground = Brush '#8E8E93'; $st.ToolTip = '勾起來按「更新遊戲庫」就會放進去，不用再打包' }
         else { $st.Text = '' }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
@@ -849,10 +874,11 @@ function Build-Library {
 
         $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#2C2C2E' })
         $card.Add_MouseLeave({ param($s, $e) $s.Background = Brush '#1C1C1E' })
-        $card.Add_MouseLeftButtonUp({ param($s, $e)
-            $dir = $s.Tag.Dir
+        $act = $card.FindName('Act'); $act.Tag = $card
+        $act.Add_Click({ param($s, $e)
+            $c = $s.Tag; $dir = $c.Tag.Dir
             if ($selected.Contains($dir)) { [void]$selected.Remove($dir) } else { $selected.Add($dir) }
-            Card-Paint $s; Update-SelCount })
+            Card-Paint $c; Update-SelCount })
         $card.Add_DragEnter({ param($s, $e) if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $s.FindName('DropHint').Visibility = 'Visible' } })
         $card.Add_DragLeave({ param($s, $e) $s.FindName('DropHint').Visibility = 'Collapsed' })
         $card.Add_Drop({ param($s, $e)
@@ -860,16 +886,21 @@ function Build-Library {
             Add-Files $s.Tag.Dir @($e.Data.GetData([Windows.DataFormats]::FileDrop))
             $e.Handled = $true })
         $card.ContextMenu = New-CardMenu $g
-        [void]$ui.Library.Children.Add($card)
+        [void]$(if ($g.InLib) { $ui.Library } else { $ui.Others }).Children.Add($card)
         $cards[$g.Dir] = $card
-        if ($keep -contains $g.Dir) { $selected.Add($g.Dir); Card-Paint $card }
+        if ($keep -contains $g.Dir) { $selected.Add($g.Dir) }
+        Card-Paint $card
     }
-    if (-not $cards.Count) {
+    $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
+    $ui.GamesHead.Text = "遊戲庫裡 · $nIn 款"; $ui.OutHead.Text = "還沒加入 · $nOut 款"
+    if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「套用變更」。' }
+    else { $ui.InHint.Text = 'iPad 上「遊戲庫」App 裡現在有的遊戲。按「移除」拿掉。' }
+    if (-not $nOut) {
         $t = New-Object Windows.Controls.TextBlock
-        $t.Text = '把 NSP / XCI / NSZ 拖進來新增遊戲'
+        $t.Text = if ($cards.Count) { '電腦上的遊戲都在遊戲庫裡了。把 NSP / XCI / NSZ 拖進視窗新增遊戲。' } else { '把 NSP / XCI / NSZ 拖進來新增遊戲' }
         $t.ToolTip = "遊戲會放在 $gamesDir"
-        $t.Foreground = Brush '#8E8E93'; $t.Margin = '8,40,8,0'; $t.FontSize = 16
-        [void]$ui.Library.Children.Add($t)
+        $t.Foreground = Brush '#8E8E93'; $t.Margin = '8,16,8,0'; $t.FontSize = 15; $t.TextWrapping = 'Wrap'
+        [void]$ui.Others.Children.Add($t)
     }
     Build-Packs $inst
     Update-SelCount
@@ -1418,6 +1449,7 @@ $stepDefs = @(
     @{ Name = '傳資料';   Re = '==> 傳遊戲資料' },
     @{ Name = '存檔';     Re = '==> (備份 iPad|還原 iPad|搬舊 App) 存檔' },
     @{ Name = '記錄';     Re = '==> 讀 iPad 記錄' },
+    @{ Name = '同步';     Re = '==> 同步 OpenGL 著色器' },
     @{ Name = '合成';     Re = '==> 合成一包' },
     @{ Name = 'Python';   Re = '==> 檢查 Python' },
     @{ Name = '套件';     Re = '==> 安裝 Python 套件' },
@@ -1450,7 +1482,8 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     $names = switch ($mode) {
         'setup'   { @('Python', '套件', '打包器', '簽章工具', 'Switch Pad') }
         'pack'    { @('解包', '轉換程式', '著色器', '打包') }
-        'mergepart' { @('解包', '轉換程式', '著色器', '準備合包') }
+        { $_ -in 'mergepart', 'mergepart-reuse' } { @('解包', '轉換程式', '著色器', '準備合包') }
+        'glsync'  { @('同步') }
         'merge'   { @('合成') }
         'merge+install' { @('合成', '檢查帳號', '簽章安裝', '傳資料') }
         'install' { @('檢查帳號', '簽章安裝', '傳資料') }
@@ -1474,10 +1507,12 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         'saverestore' { $a += @('-Ipa', (Quote $ipa), '-SaveRestore', (Quote $out)) }
         'savemigrate' { $a += @('-Ipa', (Quote $ipa), '-SaveMigrate') }
         'pulllogs'    { $a += @('-Ipa', (Quote $ipa), '-PullLogs') }
+        'glsync'      { $a += @('-Ipa', (Quote $ipa), '-GlSync') }
         { $_ -in 'merge', 'merge+install', 'setup' } { }   # 這幾種只跑 Call；mergepart 是一般打包，要走下面
         default {
             $a += @('-GameDir', (Quote $g.Dir))
-            if ($mode -in 'pack', 'mergepart') { $a += '-PackOnly' }
+            if ($mode -in 'pack', 'mergepart', 'mergepart-reuse') { $a += '-PackOnly' }
+            if ($mode -eq 'mergepart-reuse') { $a += '-ReuseIfFresh' }
             if ($cfg.Overwrite) { $a += '-Overwrite' }
             if ($shellPath) { $a += @('-Shell', (Quote $shellPath)) }
             else { $sh = Current-Shell; if ($sh) { $a += @('-Shell', (Quote $sh.Path)) } }
@@ -1601,7 +1636,7 @@ $timer.Add_Tick({
         if ($code -eq 0) {
             $state.Ok++
             Set-Step $job $job.StepNames.Count 'done'
-            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
+            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '同步') { '著色器同步好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
         } else {
             $state.Fail += $job.Game.Name
@@ -1704,7 +1739,7 @@ function Part-For($g, $id) {
 function Select-Library {
     $tids = @(Library-Tids)
     $selected.Clear()
-    foreach ($c in $cards.Values) { if ($tids -contains (Game-Tid $c.Tag)) { $selected.Add($c.Tag.Dir) }; Card-Paint $c }
+    foreach ($c in $cards.Values) { if ($tids -contains (Game-Tid $c.Tag)) { $selected.Add($c.Tag.Dir) }; Card-Paint $c }   # 一開始：要的就是現在有的
     Update-SelCount
 }
 # mode：both = 做缺的遊戲包、合成、安裝；pack = 勾的遊戲包全部重做再合成，不安裝；install = 把現在的遊戲庫裝到 iPad
@@ -1731,10 +1766,15 @@ function Run-Library($dirs, $mode) {
     if (-not $ms -or -not $mg) { [void][Windows.MessageBox]::Show($ui.Merge.ToolTip, $libName); return }
     $id = Multi-Id $ms
     $jobs = @(); $outs = @()
+    # OpenGL 遊戲（Roof Rage）在 iPad 上記下的著色器：先拿回來，那幾款的遊戲包有新的著色器才重包（nxn.ps1 -ReuseIfFresh）
+    $glGames = @($dirs | Where-Object { $t = Game-Tid $cards[$_].Tag; $t -and (Test-Path -LiteralPath (Join-Path (Split-Path $lib -Parent) "GL著色器\$t")) })
+    if ($glGames.Count -and (Test-Path -LiteralPath $lib)) { $jobs += @{ Game = $libGame; Mode = 'glsync'; Ipa = $lib } }
     foreach ($dir in $dirs) {
         $g = $cards[$dir].Tag
         $part = Part-For $g $id
-        if ($mode -eq 'pack' -or -not $part.Fresh) {
+        if ($mode -ne 'pack' -and $part.Fresh -and $glGames -contains $dir) {
+            $jobs += @{ Game = $g; Mode = 'mergepart-reuse'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
+        } elseif ($mode -eq 'pack' -or -not $part.Fresh) {
             if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI/NSZ）。", '缺本體'); return }
             $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
         }
@@ -2074,7 +2114,7 @@ $win.Add_Closing({ param($s, $e)
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
     $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 236))
-    if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Packs.Columns = $cols } })
+    if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel
 Build-Library

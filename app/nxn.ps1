@@ -25,14 +25,16 @@ param(
     [switch]$SaveBackup,             # 只備份 iPad 上的存檔（要 -Ipa）
     [string]$SaveRestore = '',       # 只把這份存檔備份還原回 iPad（要 -Ipa）
     [switch]$SaveMigrate,            # 把舊的單款 App、合包的存檔存到電腦，遊戲庫裝好了就放進去（-Ipa 是遊戲庫）
-    [switch]$PullLogs,               # 把 App 在 iPad 上的記錄拿回電腦，列出殼還沒做的功能（紅字）
+    [switch]$PullLogs,
+    [switch]$GlSync,                 # OpenGL 遊戲：在 iPad 上建好記錄著色器的資料夾，把記下的拿回電腦（-Ipa 是遊戲庫）
+    [switch]$ReuseIfFresh,           # 有 -Out 而且它比遊戲檔和記下的著色器都新，就沿用、不重新打包               # 把 App 在 iPad 上的記錄拿回電腦，列出殼還沒做的功能（紅字）
     [switch]$NoSaveBackup,           # 安裝前不自動備份存檔
     [switch]$NoPause
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
-$saveMode = $SaveBackup -or $SaveRestore -or $SaveMigrate -or $PullLogs
+$saveMode = $SaveBackup -or $SaveRestore -or $SaveMigrate -or $PullLogs -or $GlSync
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
@@ -191,6 +193,22 @@ try {
         $nx = Get-ChildItem (Join-Path $root 'tools') -Recurse -Filter 'nx_extract.exe' | Select-Object -First 1
         if (-not $nx) { throw "在 $root\tools 找不到 nx_extract.exe，請先在 Switch Pad 按「安裝」。" }
 
+        # OpenGL 遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
+        $glArg = @(); $glDir = $null
+        $tidGuess = Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Name -match '\[(01[0-9A-Fa-f]{11}000)\]' } | Sort-Object Length -Descending | Select-Object -First 1
+        if ($tidGuess -and $tidGuess.Name -match '\[(01[0-9A-Fa-f]{11}000)\]') {
+            $glDir = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
+            $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
+            if ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
+        }
+        if ($ReuseIfFresh -and $Out -and (Test-Path -LiteralPath $Out)) {
+            $part = Get-Item -LiteralPath $Out
+            $newest = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci|nsz|xcz)$' }) +
+                      @(if ($glDir) { Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue }) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $newest -or $part.LastWriteTime -ge $newest.LastWriteTime) { Finish "沿用打包好的 $($part.Name)（沒有新的遊戲檔或著色器）" Green; return }
+            Write-Host '有新的遊戲檔或 iPad 上新記下的著色器，重新打包'
+        }
+
         $outArg = @()
         $existing = @(Get-ChildItem $GameDir -Filter '*.ipa' -ErrorAction SilentlyContinue)
         if ($Out) {
@@ -279,7 +297,7 @@ try {
         Push-Location $srcDir
         try {
             $env:PYTHONUTF8 = '1'
-            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg)
+            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
             # 上游沒有這款的設定檔（迴旋鏢當初也是）：用 make_provisional.py 從遊戲檔猜一份暫定的，再打包一次
             if ($code) {
                 $nsps = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci)$' })
@@ -300,7 +318,7 @@ try {
                     $code = RunExe $pyExe @($prov, $srcDir, $nx.DirectoryName, $Keys, $baseFile.FullName, $(if ($upd) { $upd.FullName } else { '-' }), $ver, $tid)
                     if ($code) { throw "做不出暫定設定檔（結束碼 $code）" }
                     Step "用暫定設定檔重新打包 $(Split-Path $GameDir -Leaf)"
-                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg)
+                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
                 }
             }
         } finally { Pop-Location }
@@ -333,7 +351,8 @@ try {
     if ($PackOnly) { Finish "打包完成：$Ipa" Green; return }
 
     # ---- 簽章並安裝 ----
-    if ($PullLogs) { Step '讀 iPad 記錄（iPad 要用 USB 接著並解鎖）' }
+    if ($GlSync) { Step '同步 OpenGL 著色器（iPad 要用 USB 接著並解鎖）' }
+    elseif ($PullLogs) { Step '讀 iPad 記錄（iPad 要用 USB 接著並解鎖）' }
     elseif ($SaveMigrate) { Step '搬舊 App 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
     elseif ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
     elseif ($SaveBackup) { Step '備份 iPad 存檔（iPad 要用 USB 接著並解鎖）' }
@@ -437,6 +456,12 @@ try {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
         $tpy = Transfer-Python
         if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，讀不到 iPad 上的存檔。' }
+        if ($GlSync) {
+            $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial)
+            if ($c -and $c -ne 3) { Warn "沒拿到 iPad 上記下的著色器（結束碼 $c），照舊打包" }
+            Finish '著色器同步好了' Green
+            return
+        }
         if ($PullLogs) {
             $logRoot = Join-Path $ipaDir 'iPad記錄'
             $c = RunExe $tpy @('-I', $saveTool, 'logs', $Ipa, $logRoot, '--udid', $dev.Serial)
@@ -542,6 +567,11 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         $map | ConvertTo-Json -Depth 3 | Set-Content $db -Encoding UTF8
     } catch { Warn "記錄安裝紀錄失敗：$($_.Exception.Message)" }
 
+    # OpenGL 遊戲：先在 iPad 上建好記錄著色器的資料夾（殼只寫進已經有的資料夾），順便拿回上次記下的
+    if (Test-Path $saveTool) {
+        $tpy = Transfer-Python
+        if ($tpy) { $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial) }
+    }
     Finish "裝好了：$Ipa 已經在 iPad 上，可以直接開。（免費帳號 7 天後要重簽）" Green
 } catch {
     Finish "出錯了：$($_.Exception.Message)" Red

@@ -12,6 +12,12 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py restore <ipa> <one backup folder> <backups folder> [--udid UDID]
   saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
   saves_data.py logs    <ipa> <logs folder> [--udid UDID]
+  saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
+
+glsync is for OpenGL games whose shaders exist only while they run (Roof Rage): their package records each GLSL shader the
+game compiles to Documents/<DM_GL_CAPTURE> (gl_capture/<title ID>, set in the game's dm/env.txt). It makes those folders on
+the iPad (the host only writes files into one that exists) and copies what was recorded to <shaders folder>/<title ID>/,
+which the next pack of that game takes with --gl-capture.
 
 logs copies the app's own logs (Documents/log.txt, log.prev.txt and the other top-level .txt / .log files) to
 <logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
@@ -318,6 +324,39 @@ async def migrate_on_device(a):
     return 0
 
 
+def gl_games(ipa):
+    """{title ID: Documents-relative folder} of the games in a package that record their GLSL (DM_GL_CAPTURE in dm/env.txt)."""
+    out = {}
+    with zipfile.ZipFile(ipa) as z:
+        for n in z.namelist():
+            m = re.match(r'Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/dm/env\.txt$', n)
+            if not m: continue
+            for line in z.read(n).decode('utf-8', 'replace').splitlines():
+                k, _, v = line.partition('=')
+                if k.strip() == 'DM_GL_CAPTURE' and v.strip() and not v.strip().startswith('/'): out[m.group(1).upper()] = v.strip()
+    return out
+
+
+async def gl_sync(afc, games, root):
+    """Make each recording folder on the iPad and copy the shaders not yet on the computer. Returns {title ID: total}."""
+    base = await docs_base(afc)
+    totals = {}
+    for tid, rel in sorted(games.items()):
+        d = base + '/' + rel
+        await afc.makedirs(d)
+        dest = os.path.join(root, tid)
+        os.makedirs(dest, exist_ok=True)
+        new = 0
+        for name in await afc.listdir(d):
+            if not re.fullmatch(r'[0-9a-f]{16}\.(vert|frag)', name) or os.path.isfile(os.path.join(dest, name)): continue
+            with open(os.path.join(dest, name), 'wb') as f: f.write(await afc.get_file_contents(d + '/' + name))
+            new += 1
+        totals[tid] = len([n for n in os.listdir(dest) if re.fullmatch(r'[0-9a-f]{16}\.(vert|frag)', n)])
+        print('%s：OpenGL 著色器 %d 個（這次新拿回 %d 個）' % (tid, totals[tid], new) if totals[tid]
+              else '%s：還沒記下 OpenGL 著色器，在 iPad 上打開這款玩一下' % tid)
+    return totals
+
+
 LOG_FILES = re.compile(r'.+\.(txt|log)$', re.I)
 
 
@@ -388,12 +427,17 @@ def main():
     p = sub.add_parser('restore'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root')
     p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
     p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
+    p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
     try: import pymobiledevice3  # noqa: F401
     except ImportError: raise SystemExit('pymobiledevice3 is not installed')
     if a.cmd == 'migrate': return asyncio.run(migrate_on_device(a))
-    if a.cmd == 'logs': work = lambda afc: pull_logs(afc, a.root)
+    if a.cmd == 'glsync':
+        games = gl_games(a.ipa)
+        if not games: return 0
+        work = lambda afc: gl_sync(afc, games, a.root)
+    elif a.cmd == 'logs': work = lambda afc: pull_logs(afc, a.root)
     elif a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
     else: work = lambda afc: restore(afc, a.src, a.root)
     return asyncio.run(on_device(a, work))

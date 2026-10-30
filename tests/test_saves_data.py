@@ -190,5 +190,29 @@ class Logs(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+class GlSync(unittest.TestCase):
+    def test_games_and_sync(self):
+        import zipfile
+        tmp = tempfile.mkdtemp()
+        try:
+            ipa = os.path.join(tmp, 'lib.ipa')
+            with zipfile.ZipFile(ipa, 'w') as z:
+                z.writestr('Payload/DmIOS.app/games/010088100DD42000/dm/env.txt', 'DM_MEM=1\nDM_GL_CAPTURE=gl_capture/010088100DD42000\n')
+                z.writestr('Payload/DmIOS.app/games/0100000000010000/dm/env.txt', 'DM_MEM=1\n')
+            games = sd.gl_games(ipa)
+            self.assertEqual(games, {'010088100DD42000': 'gl_capture/010088100DD42000'})
+            dev = os.path.join(tmp, 'dev'); os.makedirs(os.path.join(dev, 'Documents'))
+            out = os.path.join(tmp, 'out')
+            self.assertEqual(asyncio.run(sd.gl_sync(FakeAfc(dev), games, out)), {'010088100DD42000': 0})
+            rec = os.path.join(dev, 'Documents', 'gl_capture', '010088100DD42000')
+            self.assertTrue(os.path.isdir(rec))   # made for the host to write into
+            write(os.path.join(rec, '0123456789abcdef.vert'), b'#version 330')
+            write(os.path.join(rec, '0123456789abcdef.vert.12.tmp'), b'partial')
+            self.assertEqual(asyncio.run(sd.gl_sync(FakeAfc(dev), games, out)), {'010088100DD42000': 1})
+            self.assertEqual(os.listdir(os.path.join(out, '010088100DD42000')), ['0123456789abcdef.vert'])
+        finally:
+            shutil.rmtree(tmp)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -124,4 +124,18 @@ if not any(l.partition('\t')[0] == 'mem_used' for l in rows):
         print('mem_used 0x%X (modules of about %d MB)' % (used, est >> 20))
 gt.write_text('\n'.join(rows) + '\n', encoding='utf-8')
 print('profile installed:', dest)
+# An OpenGL game whose shaders exist only while it runs (Roof Rage: main imports EGL and compiles GLSL, and neither main
+# nor the RomFS holds a source): profile_guess calls it gl_capture. The packer takes the GL route only for a profile with
+# a gl_capture.tsv (upstream's lists what its Mac run captured); with none it splits NVN shaders, finds none and fails.
+# A table with no rows says "GL route, nothing captured yet": the packer then builds a package that records the shaders
+# on the phone (Documents/gl_capture/<title ID>), which Switch Pad brings back for the next pack.
+imp = F['mods'].get('main', {}).get('imports', set())
+try:
+    files = (ex / 'romfs_manifest.tsv').read_text(encoding='utf-8', errors='replace').lower()
+except OSError:
+    files = ''
+if ('eglCreateWindowSurface' in imp and 'nvnBootstrapLoader' not in imp and F['gl_names'] and not F['gl_src']
+        and not re.search(r'\.(vert|frag|glsl|fs|vs)\b', files)):
+    (dest / 'gl_capture.tsv').write_text('# OpenGL game: shaders recorded on the phone (Documents/gl_capture/<title ID>), none yet\n', encoding='utf-8')
+    print('OpenGL game with run-time shaders: gl_capture.tsv (empty) -> the package records them on the phone')
 print((dest / 'game.tsv').read_text(encoding='utf-8'))
