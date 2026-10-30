@@ -957,7 +957,7 @@ function Build-Packs($inst) {
     $ipas = @(Get-ChildItem -LiteralPath $mdir -Filter '*.ipa' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
         if (-not $ipas.Count) {
         $t = New-Object Windows.Controls.TextBlock
-        $t.Text = '還沒有合包：在「遊戲」勾幾款，選「合成一包」再按開始'
+        $t.Text = '還沒有遊戲庫：在「還沒加入」按「＋ 加入」，再按「套用變更」'
         $t.Foreground = Brush '#8E8E93'; $t.Margin = '8,40,8,0'; $t.FontSize = 16
         [void]$ui.Packs.Children.Add($t)
     }
