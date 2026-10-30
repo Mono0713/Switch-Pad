@@ -66,6 +66,14 @@ if r.returncode:
     print('\n'.join(err[:8] + (['...'] if len(err) > 16 else []) + err[max(8, len(err) - 8):]))
     sys.exit('nx_extract failed')
 print(r.stdout[-2000:], r.stderr[-2000:])
+# 32-bit games (AArch32, New Super Mario Bros. U Deluxe): the rewriter and the shell's host are AArch64 only, and such a game
+# fails much later with an error that says nothing (patch_nso.py reads its .ARM.exidx as an eh_frame_hdr). main.npdm's flags
+# byte, bit 0, is Is64BitInstruction.
+npdm = ex / 'ExeFS' / 'main.npdm'
+if npdm.is_file():
+    meta = npdm.read_bytes()
+    if meta[:4] == b'META' and not meta[0xC] & 1:
+        sys.exit('這款是 32 位元（AArch32）的遊戲，打包器和殼目前只支援 64 位元的 Switch 遊戲，所以沒辦法打包。')
 F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv')
 dv = re.search(r'display version (\S+)', r.stdout)
 # the title ID: given (Switch Pad passes the one the packer asked for), else from the file name's [0100…]
