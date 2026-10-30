@@ -516,6 +516,8 @@ function Support-Of($g) {
         return @{ Text = '● 版本不同'; Color = '#FF9F0A'; Tip = "上游驗證過的是 $vv，$have。版本不同時可能對不上，最好換成驗證過的版本" }
     }
     if (Test-Path (Join-Path $work "src\dm\games\$($g.Tid)\game.tsv")) { return @{ Text = '● 自訂設定'; Color = '#64D2FF'; Tip = '用本機的設定檔打包（非官方支援）' } }
+    # 打包器自動推導的暫定設定檔放在多遊戲殼那版的打包器裡（work\multigame\art*\src-<sha>\dm\games）
+    if (@(Get-ChildItem -Path (Join-Path $work "multigame\*\src-*\dm\games\$($g.Tid)\game.tsv") -ErrorAction SilentlyContinue).Count) { return @{ Text = '● 暫定設定'; Color = '#64D2FF'; Tip = '不在上游的支援清單，用打包器自動推導的設定檔：轉換過了，能不能玩要在 iPad 上試' } }
     return @{ Text = '● 不支援'; Color = '#FF453A'; Tip = '不在上游的支援清單，打包器會試著自動推導，但大多需要在 Mac 上調整才打得開' }
 }
 
