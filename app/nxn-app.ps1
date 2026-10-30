@@ -500,6 +500,11 @@ function Scan-Game($dir) {
     $g.Stray = @(Get-ChildItem -LiteralPath $dir.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci' } }).Count
     $g.Ipas = @($g.Ipas | Sort-Object LastWriteTime -Descending)
+    # 檔名裡沒有 [0100…] 的本體（例如「Tricky Towers.nsp」）：打包器讀檔案內容認出的編號，留在它的工作資料夾 <編號>_pack
+    if ($g.Base -and -not $g.Tid) {
+        $pk = Get-ChildItem -LiteralPath $dir.FullName -Directory -Filter '01*_pack' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(01[0-9A-Fa-f]{14})_pack$' } | Select-Object -First 1
+        if ($pk -and $pk.Name -match '^(01[0-9A-Fa-f]{14})_pack$') { $g.Tid = $Matches[1].ToUpper() }
+    }
     return $g
 }
 
