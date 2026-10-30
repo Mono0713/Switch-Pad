@@ -1416,7 +1416,7 @@ $stepDefs = @(
     @{ Name = '準備合包'; Re = 'packing the IPA' },
     @{ Name = '簽章安裝'; Re = '==> 簽章並安裝' },
     @{ Name = '傳資料';   Re = '==> 傳遊戲資料' },
-    @{ Name = '存檔';     Re = '==> (備份|還原) iPad 存檔' },
+    @{ Name = '存檔';     Re = '==> (備份 iPad|還原 iPad|搬舊 App) 存檔' },
     @{ Name = '合成';     Re = '==> 合成一包' },
     @{ Name = 'Python';   Re = '==> 檢查 Python' },
     @{ Name = '套件';     Re = '==> 安裝 Python 套件' },

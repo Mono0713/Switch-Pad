@@ -160,6 +160,29 @@ try {
             $shellZip = $Shell
         }
         Write-Host "殼：$shellZip"
+        # 測試殼（例如多遊戲殼）要用同一版的打包器：殼和打包器改寫遊戲程式、翻譯著色器的方式要對得上，
+        # 用正式版的打包器配新殼會缺新版的修正（Boomerang Fu 的 DLC 被當成另一款）。原始碼下載一次，放在殼旁邊的 src-<版本>\
+        if ($customShell -and (Split-Path $shellZip -Leaf) -match '^shell-\d+-([0-9a-f]{7,40})') {
+            $sha = $Matches[1]
+            $match = Join-Path (Split-Path $shellZip -Parent) "src-$sha"
+            if (-not (Test-Path (Join-Path $match 'scripts\nxn_pack.py'))) {
+                Write-Host "下載跟這個殼同一版（$sha）的打包器原始碼（只要一次）"
+                $zip = "$match.zip"; $tmp = "$match.new"
+                Invoke-WebRequest -Uri "https://codeload.github.com/Mono0713/ns2ios-shell/zip/$sha" -OutFile $zip -UseBasicParsing
+                if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+                Expand-Archive $zip $tmp; Remove-Item $zip
+                $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
+                if (Test-Path $match) { Remove-Item -Recurse -Force $match }
+                Move-Item $inner.FullName $match; Remove-Item -Recurse -Force $tmp
+            }
+            # 正式版打包器裡自己做的暫定設定檔（這一版沒有的 dm\games\<title ID>）也拿過來用
+            foreach ($d in Get-ChildItem (Join-Path $srcDir 'dm\games') -Directory -ErrorAction SilentlyContinue) {
+                $dst = Join-Path $match "dm\games\$($d.Name)"
+                if ($d.Name -match '^[0-9A-Fa-f]{16}$' -and -not (Test-Path $dst)) { Copy-Item -Recurse $d.FullName $dst }
+            }
+            $srcDir = $match
+            Write-Host "打包器：$sha（跟殼同一版）"
+        }
         $packer = Join-Path $srcDir 'scripts\nxn_pack.py'
         foreach ($p in @($srcDir, $shellZip, $packer)) {
             if (-not (Test-Path $p)) { throw "還沒準備好打包器（缺 $p），請先在 Switch Pad 按「安裝」。" }
