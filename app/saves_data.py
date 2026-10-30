@@ -11,6 +11,11 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py backup  <ipa> <backups folder> [--udid UDID] [--keep N] [--tag TEXT]
   saves_data.py restore <ipa> <one backup folder> <backups folder> [--udid UDID]
   saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
+  saves_data.py logs    <ipa> <logs folder> [--udid UDID]
+
+logs copies the app's own logs (Documents/log.txt, log.prev.txt and the other top-level .txt / .log files) to
+<logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
+does not have yet are what a game stops on, and this is the list to implement next (Ryujinx's HLE, MIT, is the reference).
 
 migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
 packages, org.nxnative.games[.p<hash>]) into the library app, in two halves so the old apps can be deleted before the library
@@ -313,6 +318,48 @@ async def migrate_on_device(a):
     return 0
 
 
+LOG_FILES = re.compile(r'.+\.(txt|log)$', re.I)
+
+
+def red_summary(text, top=40):
+    """The [RED] lines of a host log, grouped by their wording with numbers and addresses taken out, most frequent first."""
+    groups = {}
+    for line in text.splitlines():
+        i = line.find('[RED]')
+        if i < 0: continue
+        msg = line[i + 5:].strip()
+        key = re.sub(r'0x[0-9a-fA-F]+|\b[0-9a-fA-F]{8,}\b|\d+', '#', msg)[:160]
+        n, first = groups.get(key, (0, msg))
+        groups[key] = (n + 1, first)
+    return sorted(groups.values(), key=lambda g: -g[0])[:top], len(groups)
+
+
+async def pull_logs(afc, root, now=None):
+    base = await docs_base(afc)
+    dest = os.path.join(root, (now or datetime.datetime.now()).strftime('%Y%m%d-%H%M%S'))
+    got = []
+    for name in await afc.listdir(base or '/'):
+        if not LOG_FILES.match(name): continue
+        p = base + '/' + name
+        if (await afc.stat(p)).get('st_ifmt') == 'S_IFDIR': continue
+        os.makedirs(dest, exist_ok=True)
+        with open(os.path.join(dest, name), 'wb') as f: f.write(await afc.get_file_contents(p))
+        got.append(name)
+    if not got:
+        print('iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
+        return None
+    print('記錄存到 %s：%s' % (dest, '、'.join(got)))
+    for name in ('log.txt', 'log.prev.txt'):
+        f = os.path.join(dest, name)
+        if not os.path.isfile(f): continue
+        with open(f, encoding='utf-8', errors='replace') as fh: text = fh.read()
+        games = re.findall(r'boot: game (\S+) \(([^)]*)\)', text)
+        groups, total = red_summary(text)
+        print('\n== %s%s：%d 種紅字' % (name, '（%s）' % '、'.join(g[1] for g in games[-1:]) if games else '', total))
+        for n, msg in groups: print('%5d  %s' % (n, msg[:200]))
+    return dest
+
+
 async def on_device(a, work):
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
@@ -340,12 +387,14 @@ def main():
     p.add_argument('--keep', type=int, default=30); p.add_argument('--tag', default='')
     p = sub.add_parser('restore'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root')
     p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
+    p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
     try: import pymobiledevice3  # noqa: F401
     except ImportError: raise SystemExit('pymobiledevice3 is not installed')
     if a.cmd == 'migrate': return asyncio.run(migrate_on_device(a))
-    if a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
+    if a.cmd == 'logs': work = lambda afc: pull_logs(afc, a.root)
+    elif a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
     else: work = lambda afc: restore(afc, a.src, a.root)
     return asyncio.run(on_device(a, work))
 

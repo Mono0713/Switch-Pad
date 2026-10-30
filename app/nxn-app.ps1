@@ -1417,6 +1417,7 @@ $stepDefs = @(
     @{ Name = '簽章安裝'; Re = '==> 簽章並安裝' },
     @{ Name = '傳資料';   Re = '==> 傳遊戲資料' },
     @{ Name = '存檔';     Re = '==> (備份 iPad|還原 iPad|搬舊 App) 存檔' },
+    @{ Name = '記錄';     Re = '==> 讀 iPad 記錄' },
     @{ Name = '合成';     Re = '==> 合成一包' },
     @{ Name = 'Python';   Re = '==> 檢查 Python' },
     @{ Name = '套件';     Re = '==> 安裝 Python 套件' },
@@ -1454,6 +1455,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         'merge+install' { @('合成', '檢查帳號', '簽章安裝', '傳資料') }
         'install' { @('檢查帳號', '簽章安裝', '傳資料') }
         { $_ -in 'savebackup', 'saverestore', 'savemigrate' } { @('存檔') }
+        'pulllogs' { @('記錄') }
         default   { @('檢查帳號', '解包', '轉換程式', '著色器', '打包', '簽章安裝', '傳資料') }
     }
     $pills = @()
@@ -1471,6 +1473,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         'savebackup'  { $a += @('-Ipa', (Quote $ipa), '-SaveBackup') }
         'saverestore' { $a += @('-Ipa', (Quote $ipa), '-SaveRestore', (Quote $out)) }
         'savemigrate' { $a += @('-Ipa', (Quote $ipa), '-SaveMigrate') }
+        'pulllogs'    { $a += @('-Ipa', (Quote $ipa), '-PullLogs') }
         { $_ -in 'merge', 'merge+install', 'setup' } { }   # 這幾種只跑 Call；mergepart 是一般打包，要走下面
         default {
             $a += @('-GameDir', (Quote $g.Dir))
@@ -1598,7 +1601,7 @@ $timer.Add_Tick({
         if ($code -eq 0) {
             $state.Ok++
             Set-Step $job $job.StepNames.Count 'done'
-            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } else { '打包完成' }
+            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
         } else {
             $state.Fail += $job.Game.Name
@@ -1959,6 +1962,7 @@ $ui.Settings.Add_Click({
           <Button x:Name="SaveRestore" Content="還原存檔…" Margin="0,0,8,8"/>
           <Button x:Name="SaveFolder" Content="存檔備份資料夾" Margin="0,0,8,8"/>
           <Button x:Name="Migrate" Content="搬舊 App 存檔…" Margin="0,0,8,8"/>
+          <Button x:Name="PullLogs" Content="讀 iPad 記錄" Margin="0,0,8,8" ToolTip="遊戲在 iPad 上打不開或卡住時按：把記錄拿回電腦，列出殼還沒做的功能"/>
         </WrapPanel>
         <TextBlock Foreground="#8E8E93" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"
                    Text="每次更新遊戲庫前都會自動備份存檔。「搬舊 App 存檔」是換到遊戲庫時用的：先按一次把舊 App 的存檔存到電腦，刪掉舊 App、裝好遊戲庫後再按一次放進去。多遊戲殼的 .zip 放進 work\multigame，用最新的那個。"/>
@@ -2016,6 +2020,8 @@ $ui.Settings.Add_Click({
     $sw.FindName('SaveBackup').IsEnabled = $have -and $idle
     $sw.FindName('SaveRestore').IsEnabled = $have -and $idle -and [bool]@(Save-Backups (Save-Root $lib)).Count
     $sw.FindName('Migrate').IsEnabled = $idle
+    $sw.FindName('PullLogs').IsEnabled = $have -and $idle
+    $sw.FindName('PullLogs').Add_Click({ $sw.DialogResult = $false; Start-Run @(@{ Game = (Library-Game); Mode = 'pulllogs'; Ipa = (Library-Ipa) }) })
     $sw.FindName('SaveBackup').Add_Click({ $sw.DialogResult = $false; Run-Saves (Library-Game) (Library-Ipa) $false })
     $sw.FindName('SaveRestore').Add_Click({ $sw.DialogResult = $false; Run-Saves (Library-Game) (Library-Ipa) $true })
     $sw.FindName('SaveFolder').Add_Click({ Open-Folder (Save-Root (Library-Ipa)) })

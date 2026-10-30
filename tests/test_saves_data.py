@@ -170,5 +170,25 @@ class Migrate(unittest.TestCase):
                           ('org.nxnative.games.p1a2b3c4d.T1', '合包', None)])
 
 
+class Logs(unittest.TestCase):
+    def test_pull_and_group(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            docs = os.path.join(tmp, 'dev', 'Documents')
+            write(os.path.join(docs, 'log.txt'), ('boot: game 010088100DD42000 (Roof Rage) of the games in this package\n'
+                  '[RED] sf: SendSyncRequest on 0x1f (24 bytes), not a host session\n'
+                  '[RED] sf: SendSyncRequest on 0x2a (32 bytes), not a host session\n'
+                  '[RED] NVN unimplemented function called: nvnFoo\nordinary line\n').encode())
+            write(os.path.join(docs, 'save', 'x.bin'))
+            dest = asyncio.run(sd.pull_logs(FakeAfc(os.path.join(tmp, 'dev')), os.path.join(tmp, 'out'), now=at(0)))
+            self.assertEqual(os.listdir(dest), ['log.txt'])
+            with open(os.path.join(dest, 'log.txt'), encoding='utf-8') as f: groups, total = sd.red_summary(f.read())
+            self.assertEqual(total, 2)
+            self.assertEqual(groups[0][0], 2)
+            self.assertIn('SendSyncRequest', groups[0][1])
+        finally:
+            shutil.rmtree(tmp)
+
+
 if __name__ == '__main__':
     unittest.main()
