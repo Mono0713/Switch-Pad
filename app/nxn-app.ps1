@@ -503,6 +503,11 @@ function Load-Supported {
     }
 }
 Load-Supported
+function Precheck-Of($g) {
+    $f = Join-Path $g.Dir 'precheck.json'
+    if (-not (Test-Path -LiteralPath $f)) { return @() }
+    try { @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).items) } catch { @() }
+}
 function Support-Of($g) {
     if (-not $g.Tid) { return @{ Text = ''; Color = '#8E8E93' } }
     $mine = if ($g.Update -and $g.Update -notlike '#*') { $g.Update } elseif (-not $g.Update) { '1.0.0' } else { '' }
@@ -872,6 +877,11 @@ function Build-Library {
         $green = Brush '#30D158'; $blue = Brush '#0A84FF'; $gray = Brush '#8E8E93'; $st.ToolTip = $null
         $red = Brush '#FF453A'; $orange = Brush '#FF9F0A'
         $why = if ($addFail.ContainsKey($g.Dir)) { $addFail[$g.Dir] } else { '' }
+        # 體檢（打包器解包完先看一下，寫在遊戲資料夾的 precheck.json）：不能玩的原因，和要注意的事
+        $pre = Precheck-Of $g
+        $preBad = @($pre | Where-Object { $_.level -eq 'bad' } | ForEach-Object { $_.text })
+        $preWarn = @($pre | Where-Object { $_.level -eq 'warn' } | ForEach-Object { $_.text })
+        if (-not $why -and $preBad.Count -and -not $g.Ready) { $why = $preBad -join '；' }
         $g | Add-Member -NotePropertyName Order -NotePropertyValue 9 -Force
         if ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
         elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
@@ -884,6 +894,10 @@ function Build-Library {
         elseif ($g.Ready) { $st.Text = '● 轉換過了，加入就能裝'; $st.Foreground = $gray; $g.Order = 2 }
         else { $st.Text = '' }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
+        if ($preWarn.Count -and -not $why) {
+            if ($st.Text -and $st.Text -notlike '*⚠') { $st.Text += ' · ⚠' } elseif (-not $st.Text) { $st.Text = '⚠ 要注意'; $st.Foreground = $orange }
+            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + @($preWarn | ForEach-Object { "⚠ $_" })) -join "`n"
+        }
         # 支援程度只在「還沒加入」顯示，幫你挑；已經在遊戲庫的看上面那行就好
         $sb = $card.FindName('Support')
         if (-not $g.InLib) {
@@ -1888,6 +1902,8 @@ function Fail-Reason($log) {
     $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
     if ($lines -match 'without type trees') { return 'Unity 舊版的著色器格式還不支援' }
     if ($lines -match '32-bit|32 位元') { return '32 位元的遊戲，還不支援' }
+    $l = @($lines | Where-Object { $_ -match '\[x\] precheck: ' }) | Select-Object -Last 1
+    if ($l) { return ($l -replace '^.*precheck:\s*', '').Trim() }
     $l = @($lines | Where-Object { $_ -match '\[RED\]|\[x\]|Error|出錯了' -and $_ -notmatch '出錯了：打包失敗' }) | Select-Object -Last 1
     if ($l) { return ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
     return '打包失敗'
