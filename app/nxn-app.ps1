@@ -442,7 +442,7 @@ function Current-Shell {
 }
 function Update-ShellLabel {
     if ($ui.Merge.IsChecked) {
-        # 合成一包一律用 work\multigame 裡最新的多遊戲殼
+        # 合成一包用 work\multigame 裡最新的多遊戲殼，設定裡退回或鎖定過就用那一版
         $ms = Get-MultiShell
         $id = if ($ms -and $ms.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { '' }
         $ui.ShellLabel.Text = "多遊戲殼 $id"
@@ -1266,7 +1266,14 @@ function Get-Python {
     if (Test-Path $saved) { $p = (Get-Content $saved -Raw).Trim(); if ($p) { return $p } }
     return 'python'
 }
-function Get-MultiShell { Get-ChildItem -Path (Join-Path $work 'multigame') -Recurse -Filter 'shell-*.zip' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
+# 多遊戲殼：預設用最新的；設定裡「退回上一版」或「鎖定這一版」會記在 ShellPin，新殼出了問題可以一鍵退回，換回來也不用重轉
+function Get-MultiShells { @(Get-ChildItem -Path (Join-Path $work 'multigame') -Recurse -Filter 'shell-*.zip' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending) }
+function Get-MultiShell {
+    if ($cfg.ShellPin -and (Test-Path -LiteralPath $cfg.ShellPin)) { return Get-Item -LiteralPath $cfg.ShellPin }
+    Get-MultiShells | Select-Object -First 1
+}
+# 清理空間時留著的殼：正在用的，加上可以退回的另一個（最新的或上一版）
+function Keep-Shells { $cur = Get-MultiShell; @(@($cur) + @(Get-MultiShells | Where-Object { -not $cur -or $_.FullName -ne $cur.FullName } | Select-Object -First 1) | Where-Object { $_ }) }
 function Get-MergeScript {
     foreach ($p in (Join-Path $here 'nxn_merge.py'), (Join-Path $work 'multigame\nxn_merge.py'), (Join-Path $work 'src\scripts\nxn_merge.py')) { if (Test-Path $p) { return $p } }
     $f = Get-ChildItem -Path (Join-Path $work 'multigame') -Recurse -Filter 'nxn_merge.py' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1998,10 +2005,10 @@ function Free-Space($owner) {
                 $found += @{ Item = $x; What = "$($gd.Name) 的打包暫存" }
             }
         }
-        # 遊戲包（<名稱>-multi-<殼版本>.ipa）：現在的多遊戲殼做的留著（遊戲庫加減遊戲要用），舊殼做的已經用不到
-        $curId = if ($ms = Get-MultiShell) { Multi-Id $ms } else { '' }
+        # 遊戲包（<名稱>-multi-<格式>.ipa）：留著的殼（正在用的和可以退回的）做的要留，其他的用不到
+        $keepIds = @(Keep-Shells | ForEach-Object { Multi-Id $_ })
         foreach ($x in Get-ChildItem -LiteralPath $gd.FullName -File -Filter '*-multi-*.ipa' -ErrorAction SilentlyContinue) {
-            if ($curId -and $x.Name -like "*-multi-$curId.ipa") { continue }
+            if (@($keepIds | Where-Object { $x.Name -like "*-multi-$_.ipa" }).Count) { continue }
             $found += @{ Item = $x; What = "$($gd.Name) 舊殼做的遊戲包" }
         }
         # 一款一個 App 時打包的 IPA：現在只用遊戲庫，用不到了
@@ -2009,15 +2016,15 @@ function Free-Space($owner) {
             $found += @{ Item = $x; What = '以前單款安裝的 IPA（遊戲庫用不到）' }
         }
     }
-    # 只用最新的多遊戲殼：其他測試殼、舊殼和它們的打包器原始碼（src-<版本>），以及換打包器時留的備份
-    $keepShell = Get-MultiShell
+    # 留正在用的多遊戲殼和可以退回的那一個：其他測試殼、舊殼和它們的打包器原始碼（src-<版本>），以及換打包器時留的備份
+    $keepShells = @(Keep-Shells)
     foreach ($sub in 'multigame', 'phonepads', 'dl') {
         foreach ($x in Get-ChildItem -Path (Join-Path $work $sub) -Recurse -Filter 'shell-*.zip' -File -ErrorAction SilentlyContinue) {
-            if ($keepShell -and $x.FullName -eq $keepShell.FullName) { continue }
+            if (@($keepShells | Where-Object { $x.FullName -eq $_.FullName }).Count) { continue }
             $found += @{ Item = $x; What = '用不到的舊殼' }
         }
         foreach ($x in Get-ChildItem -Path (Join-Path $work $sub) -Recurse -Directory -Filter 'src-*' -ErrorAction SilentlyContinue) {
-            if ($keepShell -and $x.Parent.FullName -eq $keepShell.DirectoryName -and $keepShell.Name -like "shell-*-$($x.Name.Substring(4))*") { continue }
+            if (@($keepShells | Where-Object { $x.Parent.FullName -eq $_.DirectoryName -and $_.Name -like "shell-*-$($x.Name.Substring(4))*" }).Count) { continue }
             $found += @{ Item = $x; What = '用不到的舊殼' }
         }
     }
@@ -2098,8 +2105,16 @@ $ui.Settings.Add_Click({
           <Button x:Name="Migrate" Content="搬舊 App 存檔…" Margin="0,0,8,8"/>
           <Button x:Name="PullLogs" Content="讀 iPad 記錄" Margin="0,0,8,8" ToolTip="遊戲在 iPad 上打不開或卡住時按：把記錄拿回電腦，列出殼還沒做的功能"/>
         </WrapPanel>
+        <DockPanel Margin="0,6,0,0">
+          <WrapPanel DockPanel.Dock="Right">
+            <Button x:Name="ShellBack" Content="退回上一版" Margin="8,0,0,0" ToolTip="新殼裝到 iPad 後有遊戲變差：改用上一版殼，再按「裝到 iPad」"/>
+            <Button x:Name="ShellLock" Content="鎖定這一版" Margin="8,0,0,0" ToolTip="之後有新殼也先不換，等你解除鎖定"/>
+            <Button x:Name="ShellLatest" Content="改用最新殼" Margin="8,0,0,0"/>
+          </WrapPanel>
+          <TextBlock x:Name="ShellText" VerticalAlignment="Center" TextWrapping="Wrap"/>
+        </DockPanel>
         <TextBlock Foreground="#8E8E93" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"
-                   Text="每次更新遊戲庫前都會自動備份存檔。「搬舊 App 存檔」是換到遊戲庫時用的：先按一次把舊 App 的存檔存到電腦，刪掉舊 App、裝好遊戲庫後再按一次放進去。多遊戲殼的 .zip 放進 work\multigame，用最新的那個。"/>
+                   Text="每次更新遊戲庫前都會自動備份存檔。「搬舊 App 存檔」是換到遊戲庫時用的：先按一次把舊 App 的存檔存到電腦，刪掉舊 App、裝好遊戲庫後再按一次放進去。多遊戲殼的 .zip 放進 work\multigame，預設用最新的；新殼裝到 iPad 後有遊戲變差，按「退回上一版」再「裝到 iPad」，遊戲格式一樣就不用重新轉換。"/>
       </StackPanel>
     </Border>
     <TextBlock Text="iPad" Foreground="#8E8E93" Margin="4,16,0,6"/>
@@ -2148,9 +2163,28 @@ $ui.Settings.Add_Click({
     $sw.Owner = $win
     $lib = Library-Ipa; $ms = Get-MultiShell
     $have = Test-Path -LiteralPath $lib
-    $sw.FindName('LibText').Text = $(if ($have) { "$lib（$(@(Library-Tids).Count) 款）" } else { '還沒有遊戲庫：加入遊戲，按「放進遊戲庫」再按「裝到 iPad」' }) +
-        "`n" + $(if ($ms) { "多遊戲殼 $(Shell-Sha $ms)（$($ms.LastWriteTime.ToString('MM/dd'))）" } else { '還沒有多遊戲殼（放進 work\multigame）' })
+    $sw.FindName('LibText').Text = $(if ($have) { "$lib（$(@(Library-Tids).Count) 款）" } else { '還沒有遊戲庫：加入遊戲，按「放進遊戲庫」再按「裝到 iPad」' })
     $idle = -not $state.Running
+    # 殼：正在用哪一版、是不是最新、能不能退回
+    $showShell = {
+        $cur = Get-MultiShell; $all = @(Get-MultiShells); $newest = $all | Select-Object -First 1
+        $pinned = [bool]($cfg.ShellPin -and $cur -and $cur.FullName -eq $cfg.ShellPin)
+        $older = if ($cur) { $all | Where-Object { $_.LastWriteTime -lt $cur.LastWriteTime } | Select-Object -First 1 }
+        $sw.FindName('ShellText').Text = if (-not $cur) { '還沒有多遊戲殼（放進 work\multigame）' } else {
+            "多遊戲殼 $(Shell-Sha $cur)（$($cur.LastWriteTime.ToString('MM/dd'))）" +
+            $(if ($pinned -and $newest.FullName -ne $cur.FullName) { "`n鎖定中，最新的是 $(Shell-Sha $newest)" + $(if ((Multi-Id $newest) -ne (Multi-Id $cur)) { '（換過去要重新轉換）' } else { '（換過去不用重新轉換）' }) }
+              elseif ($pinned) { "`n鎖定中" } else { "`n最新的" }) }
+        $sw.FindName('ShellBack').IsEnabled = $idle -and [bool]$older
+        $sw.FindName('ShellBack').ToolTip = if ($older) { "改用 $(Shell-Sha $older)（$($older.LastWriteTime.ToString('MM/dd'))），再按「裝到 iPad」" + $(if ((Multi-Id $older) -ne (Multi-Id $cur)) { '。遊戲格式不同，沒留著舊遊戲包的遊戲要重新轉換' } else { '。遊戲格式一樣，不用重新轉換' }) } else { '沒有上一版殼可以退回' }
+        $sw.FindName('ShellLock').Visibility = if ($pinned -or -not $cur) { 'Collapsed' } else { 'Visible' }
+        $sw.FindName('ShellLatest').Visibility = if ($pinned) { 'Visible' } else { 'Collapsed' }
+        $sw.FindName('ShellLatest').IsEnabled = $idle
+    }
+    & $showShell
+    $sw.FindName('ShellBack').Add_Click({ $cur = Get-MultiShell; $older = Get-MultiShells | Where-Object { $_.LastWriteTime -lt $cur.LastWriteTime } | Select-Object -First 1
+        if ($older) { $cfg.ShellPin = $older.FullName; Save-Settings; & $showShell; Update-MergeOption; Build-Library } })
+    $sw.FindName('ShellLock').Add_Click({ if ($cur = Get-MultiShell) { $cfg.ShellPin = $cur.FullName; Save-Settings; & $showShell } })
+    $sw.FindName('ShellLatest').Add_Click({ $cfg.ShellPin = ''; Save-Settings; & $showShell; Update-MergeOption; Build-Library })
     $sw.FindName('SaveBackup').IsEnabled = $have -and $idle
     $sw.FindName('SaveRestore').IsEnabled = $have -and $idle -and [bool]@(Save-Backups (Save-Root $lib)).Count
     $sw.FindName('Migrate').IsEnabled = $idle
