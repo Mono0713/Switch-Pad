@@ -1,0 +1,43 @@
+name: Release
+
+# Every change to app/ on main becomes a new release with app/ zipped as SwitchPad.zip. Switch Pad's updater
+# (app/nxn-update.ps1) downloads SwitchPad.zip from this repository's latest release; the shell, the packer and their
+# tools still come from Mono0713/ns2ios-shell.
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write           # creating the release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zip app/ and publish it as the latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          TAG="v$(date -u +%Y.%m.%d)-$SHA"
+          mkdir -p dist
+          (cd app && zip -q -r ../dist/SwitchPad.zip .)
+          cat > notes.md <<NOTES
+          下載 **SwitchPad.zip**，解壓後打開 \`Switch Pad.cmd\`。使用說明見 [README](https://github.com/$GITHUB_REPOSITORY#readme)。
+          已經裝好的 Switch Pad 會自己發現這個新版本（設定裡按「更新」）。
+
+          Download **SwitchPad.zip**, unzip it and open \`Switch Pad.cmd\`. See the [README](https://github.com/$GITHUB_REPOSITORY#readme).
+
+          Commit: $GITHUB_SHA
+          NOTES
+          gh release create "$TAG" dist/SwitchPad.zip --repo "$GITHUB_REPOSITORY" --title "Switch Pad $TAG" --notes-file notes.md --latest
+          echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"

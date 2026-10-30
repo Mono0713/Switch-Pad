@@ -1,0 +1,1825 @@
+﻿# nxn-app.ps1 - Switch Pad：Switch 遊戲打包到 iPad 的正式版視窗：遊戲用卡片選單挑，選好按「開始」就自動打包、簽章、裝到 iPad。
+# 真正做事的是 nxn.ps1（每款一個 powershell 子程序），這裡只負責畫面、排隊和讀進度。
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.IO.Compression.FileSystem
+# 從 .cmd 開時命令列視窗是隱藏的，出錯要用對話框才看得到
+trap { [void][Windows.MessageBox]::Show($_.ToString(), 'Switch Pad 出錯'); break }
+
+$here = $PSScriptRoot
+# 程式檔都在 nxn\程式\，遊戲、合包和 Switch Pad.exe 在上一層 nxn\（舊版全部攤在 nxn\ 最上層，開起來會自己搬）
+$appDirName = '程式'
+$base = if ((Split-Path $here -Leaf) -eq $appDirName) { Split-Path $here -Parent } else { $here }
+
+# ---------------------------------------------------------------- 搬家：最上層只留 Switch Pad.exe、遊戲、合包，其他收進 程式\
+# 搬到一半失敗也沒關係：每次開都會把還留在最上層的搬過去。正在打包或安裝（另一個 Switch Pad 在跑）就等下次再搬。
+function Build-Launcher($exe, $ico) {
+    # Switch Pad.exe：只是用隱藏視窗的 PowerShell 開 程式\nxn-app.ps1，讓最上層有一個帶圖示的程式可以點
+    $src = @'
+using System; using System.Diagnostics; using System.IO; using System.Runtime.InteropServices;
+static class SwitchPadLauncher {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int MessageBoxW(IntPtr h, string text, string caption, uint type);
+    static int Main() {
+        string dir = AppDomain.CurrentDomain.BaseDirectory;
+        string ps1 = Path.Combine(Path.Combine(dir, "程式"), "nxn-app.ps1");
+        if (!File.Exists(ps1)) ps1 = Path.Combine(dir, "nxn-app.ps1");
+        if (!File.Exists(ps1)) { MessageBoxW(IntPtr.Zero, "找不到 " + ps1, "Switch Pad", 0x10); return 1; }
+        var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"),
+            "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File \"" + ps1 + "\"");
+        psi.UseShellExecute = false; psi.CreateNoWindow = true; psi.WorkingDirectory = Path.GetDirectoryName(ps1);
+        Process.Start(psi);
+        return 0;
+    }
+}
+'@
+    # 編譯器的命令列不一定認得中文路徑，先在暫存資料夾用英文檔名做好再搬過去
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "switchpad-$PID"
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    try {
+        $cp = New-Object CodeDom.Compiler.CompilerParameters
+        $cp.GenerateExecutable = $true
+        $cp.OutputAssembly = Join-Path $tmp 'SwitchPad.exe'
+        $cp.CompilerOptions = '/target:winexe /optimize'
+        if (Test-Path -LiteralPath $ico) {
+            Copy-Item -LiteralPath $ico -Destination (Join-Path $tmp 'icon.ico')
+            $cp.CompilerOptions += " /win32icon:`"$(Join-Path $tmp 'icon.ico')`""
+        }
+        [void]$cp.ReferencedAssemblies.Add('System.dll')
+        $r = (New-Object Microsoft.CSharp.CSharpCodeProvider).CompileAssemblyFromSource($cp, $src)
+        if ($r.Errors.HasErrors) { throw "做不出 Switch Pad.exe：$(@($r.Errors | ForEach-Object { $_.ErrorText }) -join '; ')" }
+        Move-Item -LiteralPath $cp.OutputAssembly -Destination $exe -Force
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+function Move-ToAppDir {
+    $appDir = Join-Path $base $appDirName
+    $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'nxn[\w-]*\.ps1' })
+    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
+        ForEach-Object { Get-ChildItem -LiteralPath $base -File -Filter $_ -ErrorAction SilentlyContinue }
+    $dirs = @('work', '工具') | ForEach-Object { Join-Path $base $_ } | Where-Object { Test-Path -LiteralPath $_ }
+    if (-not ($plain.Count + @($dirs).Count)) { return }
+    # 剛按完「更新」時舊的視窗還在關，等它一下
+    for ($i = 0; $others.Count -and $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        $others = @($others | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+    }
+    if ($others.Count) { return }
+    New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+    foreach ($d in $dirs) {
+        $dst = Join-Path $appDir (Split-Path $d -Leaf)
+        if (Test-Path -LiteralPath $dst) { throw "$dst 已經存在，$d 沒辦法搬過去" }
+        Move-Item -LiteralPath $d -Destination $dst
+    }
+    foreach ($f in $plain) {
+        $dst = Join-Path $appDir $f.Name
+        # 兩邊都有：留新的（舊版的「更新」會把新檔放在最上層）
+        if ((Test-Path -LiteralPath $dst) -and (Get-Item -LiteralPath $dst).LastWriteTime -gt $f.LastWriteTime) { Remove-Item -LiteralPath $f.FullName; continue }
+        Move-Item -LiteralPath $f.FullName -Destination $dst -Force
+    }
+    # 設定裡的殼是完整路徑，跟著 work\ 搬
+    $sf = Join-Path $appDir 'work\app-settings.json'
+    if (Test-Path $sf) {
+        $old = (Join-Path $base 'work\').ToLower(); $new = Join-Path $appDir 'work\'
+        $j = Get-Content $sf -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($j.Shell -and ([string]$j.Shell).ToLower().StartsWith($old)) {
+            $j.Shell = $new + ([string]$j.Shell).Substring($old.Length)
+            $j | ConvertTo-Json | Set-Content $sf -Encoding UTF8
+        }
+    }
+    # 舊版放在最上層的捷徑指向舊位置，Switch Pad.exe 取代它
+    $lnk = Join-Path $base 'Switch Pad.lnk'
+    if (Test-Path -LiteralPath $lnk) {
+        try { if ((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).Arguments -like '*nxn-app.ps1*') { Remove-Item -LiteralPath $lnk } } catch { }
+    }
+}
+try {
+    Move-ToAppDir
+    $appDir = Join-Path $base $appDirName
+    $exe = Join-Path $base 'Switch Pad.exe'
+    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path -LiteralPath $exe)) {
+        $ico = Join-Path $appDir '工具\SwitchPad.ico'
+        if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
+        Build-Launcher $exe $ico
+    }
+    # 這次是從最上層開的，搬好了就從 程式\ 重開
+    if ($here -eq $base -and (Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path (Join-Path $base 'nxn-app.ps1'))) {
+        if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }
+        else { Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $appDir 'nxn-app.ps1')`"") }
+        exit
+    }
+} catch {
+    [void][Windows.MessageBox]::Show("整理資料夾沒完成，下次打開會再試一次：`n$($_.Exception.Message)", 'Switch Pad')
+    if ($here -eq $base -and -not (Test-Path (Join-Path $base 'work'))) { exit }   # work\ 已經搬走，從這裡跑不起來
+}
+
+$gamesDir = Join-Path $base '遊戲'
+$script = Join-Path $here 'nxn.ps1'
+$work = Join-Path $here 'work'
+$logDir = Join-Path $work 'gui-logs'
+$coverDir = Join-Path $work 'covers'
+$settingsFile = Join-Path $work 'app-settings.json'
+$installedDb = Join-Path $work 'installed.json'
+$plume = Join-Path $here '工具\plumesign.exe'
+$updater = Join-Path $here 'nxn-update.ps1'
+# 圖示：更新後放在 工具\，剛解壓的下載檔在最上層
+$appIcon = Join-Path $here '工具\SwitchPad.ico'
+if (-not (Test-Path $appIcon)) { $appIcon = Join-Path $here 'SwitchPad.ico' }
+$repo = 'Mono0713/ns2ios-shell'      # 殼和打包器的新版從這個 repo 的 release 拿
+$appRepo = 'Mono0713/Switch-Pad'     # Switch Pad 自己的新版從這個 repo 的 release 拿
+New-Item -ItemType Directory -Force -Path $logDir, $coverDir, $gamesDir | Out-Null
+
+# ---------------------------------------------------------------- 設定（殼、UDID、要不要蓋舊 IPA），存在 work\app-settings.json
+$cfg = @{ Shell = ''; Udid = ''; Overwrite = $false; Mode = 'both' }
+try { (Get-Content $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
+function Save-Settings { try { [pscustomobject]$cfg | ConvertTo-Json | Set-Content $settingsFile -Encoding UTF8 } catch { } }
+
+# ---------------------------------------------------------------- 樣式：照殼的設定頁（深色、iOS 分組卡片、藍色主按鈕）
+$styles = @'
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="Bg" Color="#000000"/>
+  <SolidColorBrush x:Key="Card" Color="#1C1C1E"/>
+  <SolidColorBrush x:Key="Card2" Color="#2C2C2E"/>
+  <SolidColorBrush x:Key="Sub" Color="#8E8E93"/>
+  <SolidColorBrush x:Key="Accent" Color="#0A84FF"/>
+  <Style TargetType="Button">
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="Background" Value="#2C2C2E"/>
+    <Setter Property="Padding" Value="16,8"/>
+    <Setter Property="FontSize" Value="14"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
+            <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="Background" Value="#0A84FF"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="17"/>
+    <Setter Property="Padding" Value="34,11"/>
+  </Style>
+  <!-- 分段選擇（像 iOS 的 segmented control） -->
+  <Style x:Key="Seg" TargetType="RadioButton">
+    <Setter Property="Foreground" Value="#C7C7CC"/>
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RadioButton">
+          <Border x:Name="b" Background="Transparent" CornerRadius="8" Padding="14,6" Margin="2">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="b" Property="Background" Value="#636366"/>
+              <Setter Property="Foreground" Value="White"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="ContextMenu">
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="FontSize" Value="14"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ContextMenu">
+          <Border Background="#2C2C2E" CornerRadius="12" Padding="6" BorderBrush="#3A3A3C" BorderThickness="1">
+            <StackPanel IsItemsHost="True"/>
+          </Border>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="MenuItem">
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="MenuItem">
+          <Border x:Name="b" Background="Transparent" CornerRadius="7" Padding="12,7" MinWidth="220">
+            <ContentPresenter ContentSource="Header"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="b" Property="Background" Value="#0A84FF"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="Separator">
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Separator"><Border Height="1" Background="#3A3A3C" Margin="4,5"/></ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- 細的深色捲軸（像 iOS 的捲動指示），沒有上下箭頭 -->
+  <ControlTemplate x:Key="VBar" TargetType="ScrollBar">
+    <Track x:Name="PART_Track" IsDirectionReversed="True">
+      <Track.Thumb>
+        <Thumb><Thumb.Template><ControlTemplate TargetType="Thumb"><Border CornerRadius="4" Background="#48484A" Margin="2,0"/></ControlTemplate></Thumb.Template></Thumb>
+      </Track.Thumb>
+    </Track>
+  </ControlTemplate>
+  <ControlTemplate x:Key="HBar" TargetType="ScrollBar">
+    <Track x:Name="PART_Track" IsDirectionReversed="False">
+      <Track.Thumb>
+        <Thumb><Thumb.Template><ControlTemplate TargetType="Thumb"><Border CornerRadius="4" Background="#48484A" Margin="0,2"/></ControlTemplate></Thumb.Template></Thumb>
+      </Track.Thumb>
+    </Track>
+  </ControlTemplate>
+  <Style TargetType="ScrollBar">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Width" Value="10"/>
+    <Setter Property="MinWidth" Value="10"/>
+    <Setter Property="Template" Value="{StaticResource VBar}"/>
+    <Style.Triggers>
+      <Trigger Property="Orientation" Value="Horizontal">
+        <Setter Property="Width" Value="Auto"/>
+        <Setter Property="MinWidth" Value="0"/>
+        <Setter Property="Height" Value="10"/>
+        <Setter Property="MinHeight" Value="10"/>
+        <Setter Property="Template" Value="{StaticResource HBar}"/>
+      </Trigger>
+    </Style.Triggers>
+  </Style>
+  <Style TargetType="ToolTip">
+    <Setter Property="Background" Value="#2C2C2E"/><Setter Property="Foreground" Value="White"/><Setter Property="BorderThickness" Value="0"/>
+  </Style>
+</ResourceDictionary>
+'@
+
+$xamlText = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Switch Pad" Width="1220" Height="820" MinWidth="820" MinHeight="560"
+        Background="#000000" Foreground="White" AllowDrop="True"
+        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterScreen">
+  <Window.Resources>__RES__</Window.Resources>
+  <Grid Margin="28,20,28,0">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- 標題列 -->
+    <DockPanel Grid.Row="0" Margin="0,0,0,14">
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+        <Ellipse x:Name="AcctDot" Width="9" Height="9" Fill="#8E8E93" Margin="0,0,8,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="Account" Text="…" Foreground="#8E8E93" VerticalAlignment="Center" Margin="0,0,14,0"/>
+        <Button x:Name="Login" Content="登入 Apple ID" Margin="0,0,8,0"/>
+        <Button x:Name="Refresh" Content="⟳" ToolTip="重新整理" Margin="0,0,8,0" Padding="13,8"/>
+        <Button x:Name="Settings" Content="⚙" ToolTip="設定" Padding="13,8"/>
+      </StackPanel>
+      <StackPanel>
+        <StackPanel Orientation="Horizontal">
+          <TextBlock Text="Switch Pad" FontSize="30" FontWeight="Bold" ToolTip="點遊戲來選取；把 NSP / XCI 拖到遊戲上加進那款，拖到空白處新增一款"/>
+          <Border Background="#1C1C1E" CornerRadius="10" Margin="24,0,0,0" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal">
+              <RadioButton x:Name="TabGames" GroupName="tab" Style="{StaticResource Seg}" Content="遊戲" IsChecked="True"/>
+              <RadioButton x:Name="TabPacks" GroupName="tab" Style="{StaticResource Seg}" Content="合包"/>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+        <TextBlock x:Name="Subtitle" Foreground="#8E8E93" Margin="0,2,0,0" Visibility="Collapsed"/>
+      </StackPanel>
+    </DockPanel>
+
+    <StackPanel Grid.Row="1">
+      <!-- 第一次安裝、找不到 prod.keys（更新和續期是標題列的小按鈕） -->
+      <Border x:Name="Notice" Background="#1C1C1E" CornerRadius="14" Padding="16,12" Margin="0,0,0,14" Visibility="Collapsed">
+        <DockPanel>
+          <Button x:Name="NoticeBtn" DockPanel.Dock="Right" Background="#0A84FF" FontWeight="SemiBold"/>
+          <TextBlock x:Name="NoticeText" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+        </DockPanel>
+      </Border>
+    </StackPanel>
+
+    <!-- 遊戲庫 -->
+    <ScrollViewer x:Name="LibraryView" Grid.Row="2" VerticalScrollBarVisibility="Auto">
+      <StackPanel>
+        <TextBlock x:Name="GamesHead" Text="遊戲" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,4" Visibility="Collapsed"/>
+        <UniformGrid x:Name="Library" Columns="5" VerticalAlignment="Top" Margin="-8,0,4,12"/>
+        <TextBlock x:Name="PacksHead" Text="合包" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4" Visibility="Collapsed"
+                   ToolTip="好幾款遊戲合成的一個 App。點一下看裡面有哪些遊戲"/>
+        <UniformGrid x:Name="Packs" Visibility="Collapsed" Columns="5" VerticalAlignment="Top" Margin="-8,0,4,12"/>
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- 進度 -->
+    <DockPanel x:Name="ProgressView" Grid.Row="2" Visibility="Collapsed">
+      <DockPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+        <TextBlock x:Name="ProgTotal" DockPanel.Dock="Right" Foreground="#8E8E93" VerticalAlignment="Center"/>
+        <TextBlock x:Name="ProgTitle" Text="執行中" FontSize="20" FontWeight="SemiBold"/>
+      </DockPanel>
+      <ProgressBar x:Name="Busy" DockPanel.Dock="Top" Height="4" IsIndeterminate="True" Margin="0,0,0,12"
+                   Background="#1C1C1E" Foreground="#0A84FF" BorderThickness="0"/>
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="Jobs" Margin="0,0,0,12"/>
+      </ScrollViewer>
+    </DockPanel>
+
+    <!-- 底部列 -->
+    <Border Grid.Row="3" Background="#1C1C1E" CornerRadius="18,18,0,0" Padding="22,14" Margin="-28,0,-28,0">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <Button x:Name="Stop" Content="停止" Margin="0,0,10,0" Visibility="Collapsed"/>
+          <Button x:Name="Back" Content="返回遊戲庫" Margin="0,0,10,0" Visibility="Collapsed"/>
+          <Button x:Name="RenewBtn" Margin="0,0,10,0" Visibility="Collapsed"/>
+          <Button x:Name="Start" Content="開始" Style="{StaticResource Primary}"/>
+        </StackPanel>
+        <StackPanel x:Name="Options" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock x:Name="SelCount" Text="未選擇" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" Width="100"/>
+          <Border Background="#2C2C2E" CornerRadius="10" Margin="8,0,0,0">
+            <StackPanel Orientation="Horizontal">
+              <RadioButton x:Name="ModeBoth" GroupName="mode" Style="{StaticResource Seg}" Content="打包並安裝" IsChecked="True"/>
+              <RadioButton x:Name="ModePack" GroupName="mode" Style="{StaticResource Seg}" Content="只打包"/>
+              <RadioButton x:Name="ModeInstall" GroupName="mode" Style="{StaticResource Seg}" Content="只安裝" ToolTip="把現有的 IPA 重新簽章裝到 iPad"/>
+            </StackPanel>
+          </Border>
+          <Border Background="#2C2C2E" CornerRadius="10" Margin="12,0,0,0">
+            <StackPanel Orientation="Horizontal">
+              <RadioButton x:Name="Separate" GroupName="pack" Style="{StaticResource Seg}" Content="各自安裝" ToolTip="每款遊戲各是一個 App" IsChecked="True"/>
+              <RadioButton x:Name="Merge" GroupName="pack" Style="{StaticResource Seg}" Content="合成一包" IsEnabled="False"
+                           ToolTipService.ShowOnDisabled="True" ToolTip="多款合成一個 App（要等多遊戲殼做好）"/>
+            </StackPanel>
+          </Border>
+          <TextBlock x:Name="ShellLabel" Foreground="#8E8E93" VerticalAlignment="Center" Margin="14,0,0,0"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>
+'@
+# 樣式要在載入前就放進 Window.Resources，StaticResource 才找得到
+function Load-Window([string]$text) { [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)) }
+# 自己的工作列身分，工作列才會用 Switch Pad 的圖示，不是 PowerShell 的
+try {
+    Add-Type -Namespace SwitchPad -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);'
+    [void][SwitchPad.Shell]::SetCurrentProcessExplicitAppUserModelID('SwitchPad.App')
+} catch { }
+$win = Load-Window $xamlText
+if (Test-Path $appIcon) {
+    # 讀進記憶體再用：BitmapFrame::Create(Uri) 會一直鎖住檔案，更新時就蓋不過去（"另一個處理程序正在使用檔案 ...\SwitchPad.ico"）
+    try {
+        $fs = [IO.File]::OpenRead($appIcon)
+        try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create($fs, 'None', 'OnLoad') } finally { $fs.Dispose() }
+    } catch { }
+    # 桌面捷徑指向 Switch Pad.exe；舊版建的是 PowerShell 開 nxn-app.ps1 的捷徑，換掉
+    try {
+        $exe = Join-Path $base 'Switch Pad.exe'
+        $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Switch Pad.lnk'
+        $wsh = New-Object -ComObject WScript.Shell
+        $lnk = $wsh.CreateShortcut($lnkPath)
+        if ((Test-Path -LiteralPath $exe) -and (-not (Test-Path -LiteralPath $lnkPath) -or $lnk.Arguments -like '*nxn-app.ps1*')) {
+            $lnk.TargetPath = $exe
+            $lnk.Arguments = ''
+            $lnk.WorkingDirectory = $base
+            $lnk.IconLocation = "$exe,0"
+            $lnk.WindowStyle = 1
+            $lnk.Description = 'Switch Pad'
+            $lnk.Save()
+        }
+    } catch { }
+}
+$ui = @{}
+foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks',
+               'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Options','SelCount',
+               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel') { $ui[$n] = $win.FindName($n) }
+switch ($cfg.Mode) { 'pack' { $ui.ModePack.IsChecked = $true } 'install' { $ui.ModeInstall.IsChecked = $true } }
+
+function Brush($hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
+function Esc($s) { [Security.SecurityElement]::Escape([string]$s) }
+
+# ---------------------------------------------------------------- 殼：預設正式殼 work\shell.zip，設定裡可以換
+function Get-Shells {
+    $list = @()
+    $main = Join-Path $work 'shell.zip'
+    if (Test-Path $main) {
+        $rel = Join-Path $work 'release.txt'
+        $tag = if (Test-Path $rel) { (Get-Content $rel -Raw).Trim() } else { '' }
+        $id = if ($tag -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { '' }
+        $list += [pscustomobject]@{ Path = $main; Label = "正式殼 $id"; Tag = $tag }
+    }
+    foreach ($sub in 'multigame', 'phonepads', 'dl') {
+        Get-ChildItem -Path (Join-Path $work $sub) -Recurse -Filter 'shell-*.zip' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | ForEach-Object {
+                $f = $_
+                if ($list | Where-Object { $_.Tag -eq $f.BaseName }) { return }   # 跟正式殼同一個版本的下載檔不重複列
+                $id = if ($f.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { $f.BaseName }
+                $kind = @{ multigame = '多遊戲測試殼'; phonepads = '手機搖桿測試殼'; dl = '舊殼' }[$sub]
+                $list += [pscustomobject]@{ Path = $f.FullName; Label = "$kind $id（$($f.LastWriteTime.ToString('MM/dd HH:mm'))）"; Tag = $f.BaseName }
+            }
+    }
+    return $list
+}
+function Current-Shell {
+    $all = @(Get-Shells)
+    $pick = $all | Where-Object { $_.Path -eq $cfg.Shell } | Select-Object -First 1
+    if (-not $pick) { $pick = $all | Select-Object -First 1 }
+    return $pick
+}
+function Update-ShellLabel {
+    if ($ui.Merge.IsChecked) {
+        # 合成一包一律用 work\multigame 裡最新的多遊戲殼
+        $ms = Get-MultiShell
+        $id = if ($ms -and $ms.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { '' }
+        $ui.ShellLabel.Text = "多遊戲殼 $id"
+        $ui.ShellLabel.ToolTip = if ($ms) { "合成一包用的殼：$($ms.FullName)" } else { '' }
+        return
+    }
+    $s = Current-Shell
+    $ui.ShellLabel.Text = if ($s) { ($s.Label -replace '（.*$', '') } else { '找不到殼' }
+    $ui.ShellLabel.ToolTip = if ($s) { "打包用的殼：$($s.Label)（在設定裡換）" } else { '請先執行 nxn-setup.ps1 -SetupOnly' }
+}
+
+# ---------------------------------------------------------------- 安裝紀錄（nxn.ps1 每次裝好會寫 work\installed.json）
+function Get-Installed {
+    if (-not (Test-Path $installedDb)) { return @() }
+    try {
+        $j = Get-Content $installedDb -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($j.PSObject.Properties | ForEach-Object {
+            $t = [datetime]$_.Value.time
+            [pscustomobject]@{ Dir = $_.Name; Ipa = $_.Value.ipa; Time = $t; Left = 7 - [int][math]::Floor(((Get-Date) - $t).TotalDays) }
+        })
+    } catch { return @() }
+}
+
+# ---------------------------------------------------------------- 掃遊戲資料夾：從檔名看出本體、更新、DLC（打包器自己也會挑最新的）
+function Scan-Game($dir) {
+    $g = [pscustomobject]@{ Dir = $dir.FullName; Name = $dir.Name; Base = $false; BaseFile = ''; Update = ''; UpdateN = -1; Dlc = 0; Ipas = @(); Stray = 0; Tid = '' }
+    foreach ($f in Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue) {
+        if ($f.Extension -eq '.ipa') { if ($f.Name -notlike '*-multi-*') { $g.Ipas += $f }; continue }   # -multi- 是合包的半成品，不能單獨裝
+        if ($f.Extension -notin '.nsp', '.xci') { continue }
+        $tid = if ($f.Name -match '(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])') { $Matches[1].ToUpper() } else { '' }
+        $low = if ($tid) { [Convert]::ToInt32($tid.Substring(13), 16) } else { 0 }
+        if (-not $tid -or $low -eq 0) { $g.Base = $true; $g.BaseFile = $f.FullName; if ($tid) { $g.Tid = $tid } }
+        elseif ($low -eq 0x800) {
+            $n = if ($f.Name -match '\[v(\d+)\]') { [int64]$Matches[1] } else { 0 }
+            if ($n -ge $g.UpdateN) {
+                $g.UpdateN = $n
+                $g.Update = if ($f.Name -match '(?:^|[\s\[v])(\d+\.\d+(?:\.\d+)?)(?=[\s\]\[]|$)') { $Matches[1] } else { "#$($n -shr 16)" }
+            }
+        }
+        else { $g.Dlc++ }
+    }
+    # 打包器只看資料夾第一層，子資料夾裡的檔案不會被用到
+    $g.Stray = @(Get-ChildItem -LiteralPath $dir.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci' } }).Count
+    $g.Ipas = @($g.Ipas | Sort-Object LastWriteTime -Descending)
+    return $g
+}
+
+# ---------------------------------------------------------------- 支援狀態：殼附的 supported.tsv（上游驗證過的遊戲和版本）＋打包器裡的設定檔
+$supported = @{}
+function Load-Supported {
+    $supported.Clear()
+    $supTsv = Get-ChildItem -Path $work -Recurse -Filter '*supported.tsv' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $supTsv) { return }
+    foreach ($line in (Get-Content -LiteralPath $supTsv.FullName -Encoding UTF8 | Select-Object -Skip 1)) {
+        $c = $line -split "`t"
+        if ($c.Count -ge 3 -and $c[0] -match '^[0-9A-Fa-f]{16}$') { $supported[$c[0].ToUpper()] = $c[2] }
+    }
+}
+Load-Supported
+function Support-Of($g) {
+    if (-not $g.Tid) { return @{ Text = ''; Color = '#8E8E93' } }
+    $mine = if ($g.Update -and $g.Update -notlike '#*') { $g.Update } elseif (-not $g.Update) { '1.0.0' } else { '' }
+    if ($supported.ContainsKey($g.Tid)) {
+        $v = $supported[$g.Tid]
+        $vv = ($v -split '[（( ]')[0]
+        $same = $false
+        try { $same = ([version]$mine) -eq ([version]$vv) } catch { $same = ($mine -eq $vv) }
+        if ($mine -and ($same -or $v -match [regex]::Escape($mine))) { return @{ Text = '● 已驗證'; Color = '#30D158'; Tip = "上游驗證過這個版本（$mine）" } }
+        $have = if ($mine) { "你的是 $mine" } else { '你的版本看不出來' }
+        return @{ Text = '● 版本不同'; Color = '#FF9F0A'; Tip = "上游驗證過的是 $vv，$have。版本不同時可能對不上，最好換成驗證過的版本" }
+    }
+    if (Test-Path (Join-Path $work "src\dm\games\$($g.Tid)\game.tsv")) { return @{ Text = '● 自訂設定'; Color = '#64D2FF'; Tip = '用本機的設定檔打包（非官方支援）' } }
+    return @{ Text = '● 不支援'; Color = '#FF453A'; Tip = '不在上游的支援清單，打包器會試著自動推導，但大多需要在 Mac 上調整才打得開' }
+}
+
+# ---------------------------------------------------------------- 遊戲圖示：一律用遊戲檔案裡的圖示（自己換的 cover.* 優先）
+# 快取在 work\covers\<名稱>.png：先從資料夾裡的 IPA 拿（就是遊戲圖示），沒有 IPA 就在背景用 nx_extract 從本體讀出來
+function Load-Bitmap($path) {
+    try {
+        $fs = [IO.File]::OpenRead($path)
+        try {
+            $dec = [Windows.Media.Imaging.BitmapDecoder]::Create($fs, 'PreservePixelFormat', 'OnLoad')
+            $best = $dec.Frames | Sort-Object PixelWidth -Descending | Select-Object -First 1
+            $best.Freeze(); return $best
+        } finally { $fs.Dispose() }
+    } catch { return $null }
+}
+function Cover-For($g) {
+    if ($g.PSObject.Properties['Icon'] -and $g.Icon) { return Load-Bitmap $g.Icon }
+    $key = ($g.Name -replace '[^\w.-]', '_')
+    $cache = Join-Path $coverDir "$key.png"
+    foreach ($n in 'cover.png', 'cover.jpg', 'cover.jpeg', 'cover.ico') { $p = Join-Path $g.Dir $n; if (Test-Path -LiteralPath $p) { return Load-Bitmap $p } }
+    if (Test-Path -LiteralPath $cache) { return Load-Bitmap $cache }
+    $jpg = Join-Path $coverDir "$key.jpg"
+    if (Test-Path -LiteralPath $jpg) { return Load-Bitmap $jpg }
+    foreach ($ipa in $g.Ipas) {
+        try {
+            $z = [IO.Compression.ZipFile]::OpenRead($ipa.FullName)
+            try {
+                $e = $z.Entries | Where-Object { $_.FullName -match '^Payload/[^/]+\.app/AppIcon60x60@3x\.png$' } | Select-Object -First 1
+                if ($e) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $cache, $true); return Load-Bitmap $cache }
+            } finally { $z.Dispose() }
+        } catch { }
+    }
+    if ($g.BaseFile -and -not (Test-Path -LiteralPath (Join-Path $coverDir "$key.none"))) { Queue-Icon $g $jpg }
+    return $null
+}
+
+# 從本體讀圖示：nx_extract 會先寫 control.nacp 和 icon.jpg 再解程式，看到 icon.jpg 就把它停掉（--manifest 不解 RomFS）
+$iconQueue = New-Object System.Collections.Queue
+$iconJob = $null
+$nxExtract = Join-Path $work 'tools\nx_extract.exe'
+# prod.keys：Switch Pad 自己的（拖進視窗的會放在 work\）→ Ryujinx → yuzu 系的模擬器（跟 nxn.ps1 的 Find-Keys 一樣）
+function Find-Keys {
+    $c = @((Join-Path $work 'prod.keys'), (Join-Path $base 'prod.keys'), "$env:APPDATA\Ryujinx\system\prod.keys")
+    foreach ($emu in 'yuzu', 'suyu', 'sudachi', 'citron', 'eden', 'torzu') { $c += "$env:APPDATA\$emu\keys\prod.keys" }
+    foreach ($p in $c) { if (Test-Path -LiteralPath $p) { return $p } }
+    return ''
+}
+function Queue-Icon($g, $dest) {
+    $prodKeys = Find-Keys
+    if (-not (Test-Path $nxExtract) -or -not $prodKeys) { return }
+    if ($iconJob -and $iconJob.Dest -eq $dest) { return }
+    foreach ($q in $iconQueue) { if ($q.Dest -eq $dest) { return } }
+    $iconQueue.Enqueue(@{ Dir = $g.Dir; File = $g.BaseFile; Dest = $dest; Keys = $prodKeys })
+    $iconTimer.Start()
+}
+$iconTimer = New-Object Windows.Threading.DispatcherTimer
+$iconTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+$iconTimer.Add_Tick({
+    if ($script:iconJob) {
+        $j = $script:iconJob
+        $got = Join-Path $j.Tmp 'icon.jpg'
+        $done = $j.Proc.HasExited
+        if ((Test-Path $got) -or $done -or ((Get-Date) - $j.Start).TotalSeconds -gt 120) {
+            Start-Sleep -Milliseconds 300   # 等它寫完
+            if (-not $j.Proc.HasExited) { try { $j.Proc.Kill() } catch { } }
+            if (Test-Path $got) {
+                Copy-Item -LiteralPath $got -Destination $j.Dest -Force
+                $card = $cards[$j.Dir]
+                if ($card) { Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $card.Tag (Load-Bitmap $j.Dest) }
+            } else {
+                # 讀不到（缺金鑰、檔案壞了）就記下來，不要每次開都重試
+                Set-Content -LiteralPath ([IO.Path]::ChangeExtension($j.Dest, '.none')) -Value (Get-Date).ToString('s')
+            }
+            Start-Sleep -Milliseconds 200
+            Remove-Item -LiteralPath $j.Tmp -Recurse -Force -ErrorAction SilentlyContinue
+            $script:iconJob = $null
+        }
+        return
+    }
+    if ($iconQueue.Count -eq 0) { $iconTimer.Stop(); return }
+    $q = $iconQueue.Dequeue()
+    $tmp = Join-Path $env:TEMP ('switchpad-icon-' + [guid]::NewGuid().ToString('N'))
+    $psi = New-Object Diagnostics.ProcessStartInfo $nxExtract
+    $psi.Arguments = "`"$($q.Keys)`" `"$($q.File)`" - `"$tmp`" --manifest"
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    try {
+        $p = [Diagnostics.Process]::Start($psi)
+        $p.BeginOutputReadLine(); $p.BeginErrorReadLine()   # 不讀會塞住
+        $script:iconJob = @{ Proc = $p; Tmp = $tmp; Dest = $q.Dest; Dir = $q.Dir; Start = Get-Date }
+    } catch { }
+})
+$tileColors = '#FF453A', '#FF9F0A', '#30D158', '#0A84FF', '#BF5AF2', '#FF375F', '#64D2FF', '#FFD60A'
+function Paint-Icon($border, $letterBlock, $g, $bmp) {
+    if ($bmp) {
+        $b = New-Object Windows.Media.ImageBrush $bmp
+        $b.Stretch = 'UniformToFill'
+        $border.Background = $b
+        $letterBlock.Text = ''
+    } else {
+        $i = [math]::Abs($g.Name.GetHashCode()) % $tileColors.Count
+        $border.Background = Brush $tileColors[$i]
+        $letterBlock.Text = $g.Name.Substring(0, 1).ToUpper()
+    }
+}
+
+# ---------------------------------------------------------------- 遊戲卡
+$cardXaml = @'
+<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Height="300" Margin="8" CornerRadius="20" Background="#1C1C1E" BorderThickness="3" BorderBrush="Transparent"
+        Cursor="Hand" AllowDrop="True">
+  <Grid>
+    <StackPanel Margin="16,18,16,12">
+      <Border x:Name="Icon" Width="132" Height="132" CornerRadius="30" HorizontalAlignment="Center" Background="#2C2C2E">
+        <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="60" FontWeight="Bold" Foreground="White"/>
+      </Border>
+      <TextBlock x:Name="Title" Margin="0,14,0,0" FontSize="16" FontWeight="SemiBold" Foreground="White" TextWrapping="Wrap"
+                 TextAlignment="Center" MaxHeight="44" TextTrimming="CharacterEllipsis"/>
+      <TextBlock x:Name="Detail" Margin="0,6,0,0" FontSize="12" Foreground="#8E8E93" TextWrapping="Wrap" TextAlignment="Center"/>
+      <TextBlock x:Name="State" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"/>
+      <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"/>
+    </StackPanel>
+    <Border x:Name="Check" Width="30" Height="30" CornerRadius="15" Background="#0A84FF" HorizontalAlignment="Right"
+            VerticalAlignment="Top" Margin="0,10,10,0" Visibility="Collapsed">
+      <TextBlock Text="✓" Foreground="White" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Border>
+    <Border x:Name="DropHint" CornerRadius="17" Background="#D90A84FF" Visibility="Collapsed">
+      <TextBlock Text="放開就加進這款" Foreground="White" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Border>
+  </Grid>
+</Border>
+'@
+$cards = @{}          # 資料夾路徑 → 卡片
+$selected = New-Object System.Collections.Generic.List[string]
+
+function Card-Paint($card) {
+    $on = $selected.Contains($card.Tag.Dir)
+    $card.BorderBrush = if ($on) { Brush '#0A84FF' } else { [Windows.Media.Brushes]::Transparent }
+    $card.FindName('Check').Visibility = if ($on) { 'Visible' } else { 'Collapsed' }
+}
+$addTo = $null      # 合包卡片選「加入遊戲」時：要加進去的那包，勾好按開始就合進它
+function Update-SelCount {
+    $n = $selected.Count
+    $ui.SelCount.Text = if ($n) { "已選 $n 款" } else { '未選擇' }
+    if ($script:addTo) {
+        $ui.SelCount.Text = "加進「$($script:addTo.Name)」：" + $(if ($n) { "已選 $n 款" } else { '勾要加的遊戲' })
+        $ui.SelCount.Width = [double]::NaN
+    } else { $ui.SelCount.Width = 100 }
+    $ui.Start.IsEnabled = ($n -gt 0)
+}
+
+# ---------------------------------------------------------------- 右鍵選單
+function Open-Folder($p) { New-Item -ItemType Directory -Force -Path $p | Out-Null; Start-Process explorer.exe "`"$p`"" }
+# 選單文字「圖示  文字」：圖示放固定寬度的欄，文字才會對齊
+function Menu-Header($text) {
+    $icon, $label = $text -split '  ', 2
+    $sp = New-Object Windows.Controls.StackPanel; $sp.Orientation = 'Horizontal'
+    $i = New-Object Windows.Controls.TextBlock; $i.Text = $icon.Trim(); $i.Width = 28; $i.TextAlignment = 'Center'
+    $i.FontFamily = 'Segoe UI Emoji'; $i.Margin = '0,0,8,0'
+    $t = New-Object Windows.Controls.TextBlock; $t.Text = $label
+    [void]$sp.Children.Add($i); [void]$sp.Children.Add($t)
+    $sp
+}
+# ContextMenu 裡的分隔線會用系統的選單樣式（左邊縮排），要自己指定
+function New-Sep { $sp = New-Object Windows.Controls.Separator; $sp.Style = $win.FindResource([Windows.Controls.Separator]); $sp }
+function Menu-Item($cm, $text, $tag, $action, $enabled = $true) {
+    $mi = New-Object Windows.Controls.MenuItem
+    $mi.Header = Menu-Header $text; $mi.Tag = @{ Dir = $tag; Action = $action }; $mi.IsEnabled = $enabled
+    $mi.Add_Click({ param($s, $e) Card-Action $s.Tag.Action $s.Tag.Dir })
+    [void]$cm.Items.Add($mi)
+}
+function New-CardMenu($g) {
+    $cm = New-Object Windows.Controls.ContextMenu
+    # 選單是另一個彈出視窗，吃不到主視窗的樣式，要自己帶
+    $cm.Style = $win.FindResource([Windows.Controls.ContextMenu])
+    $cm.Resources.Add([Windows.Controls.MenuItem], $win.FindResource([Windows.Controls.MenuItem]))
+    $cm.Resources.Add([Windows.Controls.Separator], $win.FindResource([Windows.Controls.Separator]))
+    $hasLog = [bool](Latest-Log $g)
+    Menu-Item $cm '📂  遊戲資料夾' $g.Dir 'folder'
+    Menu-Item $cm '💾  存檔資料夾' $g.Dir 'save'
+    Menu-Item $cm '📄  最近的記錄' $g.Dir 'log' $hasLog
+    [void]$cm.Items.Add((New-Sep))
+    Menu-Item $cm '▶  打包並安裝' $g.Dir 'both' $g.Base
+    Menu-Item $cm '📦  只打包' $g.Dir 'pack' $g.Base
+    Menu-Item $cm '📲  只安裝' $g.Dir 'install' ($g.Ipas.Count -gt 0)
+    [void]$cm.Items.Add((New-Sep))
+    Menu-Item $cm '🖼  換圖示…' $g.Dir 'cover'
+    Menu-Item $cm '🔄  用遊戲原本的圖示' $g.Dir 'uncover' ([bool](Get-ChildItem -LiteralPath $g.Dir -Filter 'cover.*' -File -ErrorAction SilentlyContinue))
+    [void]$cm.Items.Add((New-Sep))
+    Menu-Item $cm '🗑  刪除…' $g.Dir 'delete' (-not $state.Running)
+    return $cm
+}
+function Latest-Log($g) {
+    $key = ($g.Name -replace '[^\w.-]', '_')
+    Get-ChildItem -Path $logDir -Filter "*-$key.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
+# 刪除都是丟到資源回收筒，按錯還救得回來
+function Recycle($path, $isDir) {
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        if ($isDir) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($path, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+        else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($path, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+        return $true
+    } catch [OperationCanceledException] { return $false }
+    catch { [void][Windows.MessageBox]::Show($win, "刪不掉：$($_.Exception.Message)", '刪除'); return $false }
+}
+# 從安裝紀錄拿掉符合的項目（續期才不會去找已經刪掉的 IPA）
+function Forget-Installed($match) {
+    if (-not (Test-Path $installedDb)) { return }
+    try {
+        $j = Get-Content $installedDb -Raw -Encoding UTF8 | ConvertFrom-Json
+        $map = [ordered]@{}
+        foreach ($pr in $j.PSObject.Properties) { if (-not (& $match $pr.Name $pr.Value)) { $map[$pr.Name] = $pr.Value } }
+        $map | ConvertTo-Json -Depth 3 | Set-Content $installedDb -Encoding UTF8
+    } catch { }
+}
+function Card-Action($action, $dir) {
+    $card = $cards[$dir]; if (-not $card) { return }
+    $g = $card.Tag
+    switch ($action) {
+        'folder' { Open-Folder $g.Dir }
+        'save'   { Open-Folder (Join-Path $g.Dir 'Save') }
+        'log'    { $l = Latest-Log $g; if ($l) { Start-Process notepad.exe "`"$($l.FullName)`"" } }
+        'cover'  {
+            $dlg = New-Object Microsoft.Win32.OpenFileDialog
+            $dlg.Title = "選 $($g.Name) 的圖示"
+            $dlg.Filter = '圖片|*.png;*.jpg;*.jpeg;*.ico'
+            if ($dlg.ShowDialog($win)) {
+                foreach ($old in Get-ChildItem -LiteralPath $g.Dir -Filter 'cover.*' -File -ErrorAction SilentlyContinue) { Remove-Item -LiteralPath $old.FullName -ErrorAction SilentlyContinue }
+                Copy-Item -LiteralPath $dlg.FileName -Destination (Join-Path $g.Dir ('cover' + [IO.Path]::GetExtension($dlg.FileName).ToLower()))
+                Build-Library
+            }
+        }
+        'uncover' {
+            foreach ($old in Get-ChildItem -LiteralPath $g.Dir -Filter 'cover.*' -File -ErrorAction SilentlyContinue) { Remove-Item -LiteralPath $old.FullName -ErrorAction SilentlyContinue }
+            Build-Library
+        }
+        'delete' {
+            $ok = [Windows.MessageBox]::Show($win, "把「$($g.Name)」整個資料夾（遊戲檔和打包好的 IPA）移到資源回收筒？`n`n要救回可以從資源回收筒還原。iPad 上已經裝好的不會被刪。", '刪除遊戲', 'YesNo', 'Warning')
+            if ($ok -ne 'Yes') { return }
+            if (Recycle $g.Dir $true) { Forget-Installed { param($k, $v) $k -eq $g.Dir }; Build-Library }
+        }
+        default  { Run-Games @($dir) $action $false }
+    }
+}
+
+function Build-Library {
+    $keep = @($selected)
+    $ui.Library.Children.Clear(); $cards.Clear(); $selected.Clear()
+    $inst = @(Get-Installed)
+    $dirs = @(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+    foreach ($d in $dirs) {
+        $g = Scan-Game $d
+        if (-not $g.Base -and -not $g.Ipas.Count) { continue }   # 不是遊戲資料夾
+        $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
+        $card.Tag = $g
+        $card.FindName('Title').Text = $g.Name
+        $parts = @()
+        if (-not $g.Base) { $parts += '缺本體' }
+        $parts += if ($g.Update -and $g.Update -notlike '#*') { "v$($g.Update)" } elseif (-not $g.Update) { 'v1.0.0' } else { '已更新' }
+        if ($g.Dlc) { $parts += "$($g.Dlc) DLC" }
+        $card.FindName('Detail').Text = $parts -join ' · '
+        $st = $card.FindName('State')
+        $mine = $inst | Where-Object { $_.Dir -eq $g.Dir } | Select-Object -First 1
+        if ($mine) {
+            $st.Text = if ($mine.Left -le 0) { '已過期' } else { "已安裝 · 剩 $($mine.Left) 天" }
+            $st.Foreground = Brush $(if ($mine.Left -le 2) { '#FF9F0A' } else { '#30D158' })
+            $st.ToolTip = "上次安裝：$($mine.Time.ToString('MM/dd HH:mm'))"
+        } elseif ($g.Ipas.Count) {
+            $st.Text = '已打包'; $st.Foreground = Brush '#8E8E93'; $st.ToolTip = "最近打包：$($g.Ipas[0].LastWriteTime.ToString('MM/dd HH:mm'))"
+        } else { $st.Text = '' }
+        if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
+        $sup = Support-Of $g
+        $sb = $card.FindName('Support'); $sb.Text = $sup.Text; $sb.Foreground = Brush $sup.Color
+        if ($sup.Tip) { $sb.ToolTip = $sup.Tip }
+        Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $g (Cover-For $g)
+
+        $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#2C2C2E' })
+        $card.Add_MouseLeave({ param($s, $e) $s.Background = Brush '#1C1C1E' })
+        $card.Add_MouseLeftButtonUp({ param($s, $e)
+            $dir = $s.Tag.Dir
+            if ($selected.Contains($dir)) { [void]$selected.Remove($dir) } else { $selected.Add($dir) }
+            Card-Paint $s; Update-SelCount })
+        $card.Add_DragEnter({ param($s, $e) if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $s.FindName('DropHint').Visibility = 'Visible' } })
+        $card.Add_DragLeave({ param($s, $e) $s.FindName('DropHint').Visibility = 'Collapsed' })
+        $card.Add_Drop({ param($s, $e)
+            $s.FindName('DropHint').Visibility = 'Collapsed'
+            Add-Files $s.Tag.Dir @($e.Data.GetData([Windows.DataFormats]::FileDrop))
+            $e.Handled = $true })
+        $card.ContextMenu = New-CardMenu $g
+        [void]$ui.Library.Children.Add($card)
+        $cards[$g.Dir] = $card
+        if ($keep -contains $g.Dir) { $selected.Add($g.Dir); Card-Paint $card }
+    }
+    if (-not $cards.Count) {
+        $t = New-Object Windows.Controls.TextBlock
+        $t.Text = '把 NSP / XCI 拖進來新增遊戲'
+        $t.ToolTip = "遊戲會放在 $gamesDir"
+        $t.Foreground = Brush '#8E8E93'; $t.Margin = '8,40,8,0'; $t.FontSize = 16
+        [void]$ui.Library.Children.Add($t)
+    }
+    Build-Packs $inst
+    Update-SelCount
+    Update-Banner $inst
+    Update-MergeOption
+    Update-Notice
+}
+
+# ---------------------------------------------------------------- 合包：nxn\合包 裡每個 IPA 一張卡，點進去看裡面的遊戲
+# 合包裡每款在 Payload/<App>.app/games/<title ID>/：game.json（id、name、version…）和 icon.png
+$packCache = @{}      # IPA 路徑|修改時間 → 讀到的遊戲清單（讀 zip 目錄要一點時間，不要每次重畫都讀）
+function Read-Pack($ipa) {
+    $key = "$($ipa.FullName)|$($ipa.LastWriteTimeUtc.Ticks)"
+    if ($packCache.ContainsKey($key)) { return $packCache[$key] }
+    $games = @()
+    try {
+        $z = [IO.Compression.ZipFile]::OpenRead($ipa.FullName)
+        try {
+            foreach ($e in $z.Entries) {
+                if ($e.FullName -notmatch '^Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/game\.json$') { continue }
+                $tid = $Matches[1].ToUpper()
+                $sr = New-Object IO.StreamReader($e.Open(), [Text.Encoding]::UTF8)
+                try { $j = $sr.ReadToEnd() | ConvertFrom-Json } finally { $sr.Dispose() }
+                $icon = Join-Path $coverDir "pack-$tid.png"
+                $ie = $z.GetEntry(($e.FullName -replace 'game\.json$', 'icon.png'))
+                if ($ie -and -not (Test-Path -LiteralPath $icon)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($ie, $icon, $true) }
+                $games += [pscustomobject]@{ Tid = $tid; Name = $(if ($j.name) { $j.name } else { $tid }); Version = [string]$j.version
+                                            Icon = $(if (Test-Path -LiteralPath $icon) { $icon } else { '' }) }
+            }
+        } finally { $z.Dispose() }
+    } catch { }
+    $games = @($games | Sort-Object Name)
+    $packCache[$key] = $games
+    return $games
+}
+# 合包在 iPad 上的圖示（nxn_merge.py 把幾款的圖示拼成一張），跟著檔案的修改時間快取
+function Pack-Icon($ipa) {
+    $md5 = [Security.Cryptography.MD5]::Create()
+    $h = -join ($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes("$($ipa.FullName)|$($ipa.LastWriteTimeUtc.Ticks)"))[0..5] | ForEach-Object { $_.ToString('x2') })
+    $out = Join-Path $coverDir "packapp-$h.png"
+    if (Test-Path -LiteralPath $out) { return $out }
+    try {
+        $z = [IO.Compression.ZipFile]::OpenRead($ipa.FullName)
+        try {
+            $e = $z.Entries | Where-Object { $_.FullName -match '^Payload/[^/]+\.app/AppIcon60x60@3x\.png$' } | Select-Object -First 1
+            if ($e) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $out, $true); return $out }
+        } finally { $z.Dispose() }
+    } catch { }
+    return ''
+}
+function Build-Packs($inst) {
+    $ui.Packs.Children.Clear()
+    $mdir = Join-Path $base '合包'
+    $ipas = @(Get-ChildItem -LiteralPath $mdir -Filter '*.ipa' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        if (-not $ipas.Count) {
+        $t = New-Object Windows.Controls.TextBlock
+        $t.Text = '還沒有合包：在「遊戲」勾幾款，選「合成一包」再按開始'
+        $t.Foreground = Brush '#8E8E93'; $t.Margin = '8,40,8,0'; $t.FontSize = 16
+        [void]$ui.Packs.Children.Add($t)
+    }
+    foreach ($ipa in $ipas) {
+        $mine = $inst | Where-Object { $_.Ipa -eq $ipa.FullName } | Select-Object -First 1
+        $games = @(Read-Pack $ipa)
+        $p = [pscustomobject]@{ Dir = $mdir; Name = $ipa.BaseName; Ipas = @($ipa); Base = $false; BaseFile = ''; Games = $games
+                               Icon = $(if ($pi = Pack-Icon $ipa) { $pi } elseif ($games.Count -and $games[0].Icon) { $games[0].Icon } else { $appIcon }) }
+        $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
+        $card.Tag = $p
+        $card.FindName('Title').Text = $p.Name
+        $card.FindName('Detail').Text = if ($games.Count) { "$($games.Count) 款 · $($ipa.LastWriteTime.ToString('MM/dd'))" } else { $ipa.LastWriteTime.ToString('MM/dd') }
+        $card.FindName('Detail').ToolTip = ($games | ForEach-Object { $_.Name }) -join "`n"
+        $st = $card.FindName('State')
+        if ($mine) {
+            $st.Text = if ($mine.Left -le 0) { '已過期' } else { "已安裝 · 剩 $($mine.Left) 天" }
+            $st.Foreground = Brush $(if ($mine.Left -le 2) { '#FF9F0A' } else { '#30D158' })
+        }
+        Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $p (Cover-For $p)
+        $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#2C2C2E' })
+        $card.Add_MouseLeave({ param($s, $e) $s.Background = Brush '#1C1C1E' })
+        $card.Add_MouseLeftButtonUp({ param($s, $e) Show-Pack $s.Tag })
+        $cm = New-Object Windows.Controls.ContextMenu
+        $cm.Style = $win.FindResource([Windows.Controls.ContextMenu])
+        $cm.Resources.Add([Windows.Controls.MenuItem], $win.FindResource([Windows.Controls.MenuItem]))
+        foreach ($it in @(@('🎮  看裡面的遊戲', 'show'), @('➕  加入遊戲…', 'add'), @('➖  移除遊戲…', 'show'), @('📲  安裝到 iPad', 'install'), @('✏  改名…', 'rename'), @('📂  打開資料夾', 'folder'), @('🗑  刪除…', 'delete'))) {
+            $mi = New-Object Windows.Controls.MenuItem
+            $mi.Header = Menu-Header $it[0]; $mi.Tag = @{ Pack = $p; Action = $it[1] }
+            $mi.Add_Click({ param($s, $e) Pack-Action $s.Tag.Pack $s.Tag.Action })
+            [void]$cm.Items.Add($mi)
+        }
+        $card.ContextMenu = $cm
+        [void]$ui.Packs.Children.Add($card)
+    }
+}
+function Pack-Action($p, $action) {
+    switch ($action) {
+        'show'    { Show-Pack $p }
+        'add'     {
+            if ($state.Running) { return }
+            if (-not $ui.Merge.IsEnabled) { [void][Windows.MessageBox]::Show($ui.Merge.ToolTip, '加入遊戲'); return }
+            # 換到遊戲頁、切成合成一包，勾好要加的遊戲按開始；切回「各自安裝」就取消
+            $script:addTo = $p
+            $selected.Clear(); foreach ($c in $cards.Values) { Card-Paint $c }
+            $ui.Merge.IsChecked = $true; $ui.TabGames.IsChecked = $true
+            Update-SelCount
+        }
+        'install' { Start-Run @(@{ Game = $p; Mode = 'install'; Ipa = $p.Ipas[0].FullName }) }
+        'folder'  { Start-Process explorer.exe "/select,`"$($p.Ipas[0].FullName)`"" }
+        'delete'  {
+            if ($state.Running) { return }
+            $f = $p.Ipas[0].FullName
+            $ok = [Windows.MessageBox]::Show($win, "把合包「$($p.Name)」移到資源回收筒？`n`n裡面的遊戲在「遊戲」分頁的資料夾還在，不受影響。iPad 上已經裝好的不會被刪。", '刪除合包', 'YesNo', 'Warning')
+            if ($ok -ne 'Yes') { return }
+            if (Recycle $f $false) { Forget-Installed { param($k, $v) $v.ipa -eq $f }; Build-Library }
+        }
+        'rename'  {
+            $n = Ask-Text '合包改名' 'iPad 主畫面上顯示的名稱（也是檔名）。iPad 上要重新安裝才會變。' $p.Name
+            if ($n -and $n -ne $p.Name) { Rename-Pack $p $n }
+        }
+    }
+}
+# 合包的名稱就是它的檔名，也是 iPad 主畫面上的名稱（nxn_merge.py --name）
+function Pack-Path($name) {
+    $safe = ($name -replace '[\\/:*?"<>|]', '_').Trim()
+    if (-not $safe) { $safe = '遊戲合包' }
+    $p = Join-Path (Join-Path $base '合包') "$safe.ipa"
+    if (Test-Path -LiteralPath $p) { $p = Join-Path (Join-Path $base '合包') ("$safe-" + (Get-Date -Format 'MMdd-HHmm') + '.ipa') }
+    return $p
+}
+# 改名：用 nxn_merge.py 拿舊的合包當輸入重新寫一份（原樣複製壓縮資料，很快），成功才刪掉舊的
+function Rename-Pack($p, $name) {
+    $mg = Get-MergeScript
+    if (-not $mg) { [void][Windows.MessageBox]::Show('找不到 nxn_merge.py，沒辦法改 iPad 上的名稱。', '改名'); return }
+    $old = $p.Ipas[0].FullName
+    $new = Pack-Path $name
+    $db = $installedDb
+    $call = "Write-Host '==> 合成一包：改名成 $($name -replace "'", "''")'; & $(Quote (Get-Python)) $(Quote $mg) -o $(Quote $new) --name $(Quote $name) $(Quote $old); " +
+            "if (`$LASTEXITCODE) { Write-Host '出錯了：改名失敗'; `$global:LASTEXITCODE = 1; return }; Remove-Item -LiteralPath $(Quote $old); " +
+            # 安裝紀錄指向舊檔名的話跟著改，續期才找得到
+            "if (Test-Path $(Quote $db)) { `$t = Get-Content $(Quote $db) -Raw -Encoding UTF8; `$t.Replace($(Quote ($old -replace '\\', '\\')), $(Quote ($new -replace '\\', '\\'))) | Set-Content $(Quote $db) -Encoding UTF8 }; " +
+            "Write-Host '改好了'"
+    $g = [pscustomobject]@{ Dir = $p.Dir; Name = "改名：$name"; Ipas = @(); Base = $false; BaseFile = ''; Icon = $p.Icon }
+    Start-Run @(@{ Game = $g; Mode = 'merge'; Ipa = ''; Call = $call })
+}
+# 問一行字的小視窗：取消回傳 $null
+function Ask-Text($title, $prompt, $default) {
+    $ax = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="440" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
+        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+  <Window.Resources>__RES__</Window.Resources>
+  <StackPanel Margin="22">
+    <TextBlock x:Name="Prompt" Foreground="#8E8E93" TextWrapping="Wrap" Margin="0,0,0,10"/>
+    <TextBox x:Name="Text" Background="#2C2C2E" Foreground="White" BorderThickness="0" Padding="8,6" FontSize="16" CaretBrush="White"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="Cancel" Content="取消" IsCancel="True" Margin="0,0,8,0"/>
+      <Button x:Name="Ok" Content="好" Style="{StaticResource Primary}" IsDefault="True"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+'@
+    $aw = Load-Window $ax
+    $aw.Owner = $win; $aw.Title = $title
+    $aw.FindName('Prompt').Text = $prompt
+    $tb = $aw.FindName('Text'); $tb.Text = $default
+    $aw.FindName('Ok').Add_Click({ $aw.DialogResult = $true })
+    $aw.Add_ContentRendered({ $tb.Focus(); $tb.SelectAll() })
+    if ($aw.ShowDialog()) { return $tb.Text.Trim() }
+    return $null
+}
+function Show-Pack($p) {
+    $px = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="520" SizeToContent="Height" MaxHeight="760" Background="#000000" Foreground="White" ResizeMode="NoResize"
+        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+  <Window.Resources>__RES__</Window.Resources>
+  <DockPanel Margin="22">
+    <TextBlock x:Name="Head" DockPanel.Dock="Top" FontSize="22" FontWeight="Bold"/>
+    <TextBlock x:Name="Sub" DockPanel.Dock="Top" Foreground="#8E8E93" Margin="0,4,0,14"/>
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="Rename" Content="改名" Margin="0,0,8,0"/>
+      <Button x:Name="Folder" Content="打開資料夾" Margin="0,0,8,0"/>
+      <Button x:Name="Install" Content="安裝到 iPad" Style="{StaticResource Primary}" Margin="0,0,8,0"/>
+      <Button x:Name="Close" Content="關閉" IsCancel="True"/>
+    </StackPanel>
+    <Border Background="#1C1C1E" CornerRadius="12" Padding="6">
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="List"/>
+      </ScrollViewer>
+    </Border>
+  </DockPanel>
+</Window>
+'@
+    $pw = Load-Window $px
+    $pw.Owner = $win
+    $pw.Title = $p.Name
+    $pw.FindName('Head').Text = $p.Name
+    $ipa = $p.Ipas[0]
+    $pw.FindName('Sub').Text = "$($p.Games.Count) 款遊戲 · $([math]::Round($ipa.Length / 1GB, 2)) GB · $($ipa.LastWriteTime.ToString('yyyy/MM/dd HH:mm'))"
+    $list = $pw.FindName('List')
+    if (-not $p.Games.Count) {
+        $t = New-Object Windows.Controls.TextBlock
+        $t.Text = '讀不到這包裡的遊戲清單（可能不是合包，或是舊格式）'; $t.Foreground = Brush '#8E8E93'; $t.Margin = '10'
+        [void]$list.Children.Add($t)
+    }
+    foreach ($gm in $p.Games) {
+        $row = New-Object Windows.Controls.DockPanel
+        $row.Margin = '8,6'
+        $ic = New-Object Windows.Controls.Border
+        $ic.Width = 48; $ic.Height = 48; $ic.CornerRadius = '11'; $ic.Margin = '0,0,12,0'; $ic.Background = Brush '#2C2C2E'
+        $bmp = if ($gm.Icon) { Load-Bitmap $gm.Icon } else { $null }
+        if ($bmp) { $b = New-Object Windows.Media.ImageBrush $bmp; $b.Stretch = 'UniformToFill'; $ic.Background = $b }
+        [Windows.Controls.DockPanel]::SetDock($ic, 'Left')
+        [void]$row.Children.Add($ic)
+        $sp = New-Object Windows.Controls.StackPanel; $sp.VerticalAlignment = 'Center'
+        $n = New-Object Windows.Controls.TextBlock; $n.Text = $gm.Name; $n.FontSize = 15; $n.FontWeight = 'SemiBold'
+        $v = New-Object Windows.Controls.TextBlock; $v.Foreground = Brush '#8E8E93'; $v.FontSize = 12
+        $v.Text = (@($(if ($gm.Version) { "v$($gm.Version)" }), $gm.Tid) | Where-Object { $_ }) -join ' · '
+        [void]$sp.Children.Add($n); [void]$sp.Children.Add($v)
+        if ($p.Games.Count -gt 1 -and -not $state.Running) {
+            $rm = New-Object Windows.Controls.Button
+            $rm.Content = '移除'; $rm.VerticalAlignment = 'Center'; $rm.Tag = $gm
+            [Windows.Controls.DockPanel]::SetDock($rm, 'Right')
+            $rm.Add_Click({ param($s, $e)
+                $ok = [Windows.MessageBox]::Show($pw, "從「$($p.Name)」拿掉「$($s.Tag.Name)」？`n`n遊戲資料夾裡的檔案不受影響，之後還能再加回來。要重新安裝到 iPad 才會生效。", '移除遊戲', 'YesNo', 'Question')
+                if ($ok -eq 'Yes') { $pw.DialogResult = $false; Remove-FromPack $p $s.Tag } })
+            [void]$row.Children.Add($rm)
+        }
+        [void]$row.Children.Add($sp)
+        [void]$list.Children.Add($row)
+    }
+    $pw.FindName('Folder').Add_Click({ Pack-Action $p 'folder' })
+    $pw.FindName('Rename').Add_Click({ $pw.DialogResult = $false; Pack-Action $p 'rename' })
+    $pw.FindName('Install').Add_Click({ $pw.DialogResult = $true })
+    $pw.FindName('Close').Add_Click({ $pw.DialogResult = $false })
+    if ($pw.ShowDialog()) { Pack-Action $p 'install' }
+}
+
+# ---------------------------------------------------------------- 安裝和更新（nxn-update.ps1 做事；這裡只看缺什麼、問 GitHub 有沒有新版）
+$latest = $null       # GitHub 上最新的殼 release（背景問到之後才有）
+$latestApp = $null    # Switch Pad 最新的 release
+function Setup-Missing {
+    $m = @()
+    if (-not (Test-Path (Join-Path $work 'shell.zip'))) { $m += '殼' }
+    if (-not (Test-Path (Join-Path $work 'tools\nx_extract.exe'))) { $m += '打包工具' }
+    if (-not (Test-Path (Join-Path $work 'src\scripts\nxn_pack.py'))) { $m += '打包器' }
+    if (-not (Test-Path $plume)) { $m += '簽章工具' }
+    return $m
+}
+function Update-Available {
+    if (-not $latest) { return '' }
+    $rel = Join-Path $work 'release.txt'
+    $have = if (Test-Path $rel) { (Get-Content $rel -Raw).Trim() } else { '' }
+    $what = @()
+    if ($have -and $have -ne $latest.tag_name) { $what += '殼和打包器' }
+    $app = $null
+    if ($latestApp) { $app = $latestApp.assets | Where-Object { $_.name -eq 'SwitchPad.zip' } | Select-Object -First 1 }
+    if (-not $app) { $app = $latest.assets | Where-Object { $_.name -eq 'SwitchPad.zip' } | Select-Object -First 1 }
+    $ver = Join-Path $work 'app-version.txt'
+    $appHave = if (Test-Path $ver) { (Get-Content $ver -Raw).Trim() } else { '' }
+    if ($app -and $appHave -ne $app.updated_at) { $what += 'Switch Pad' }
+    return ($what -join '、')
+}
+function Update-Notice {
+    if (-not (Test-Path $updater)) { $ui.Notice.Visibility = 'Collapsed'; return }
+    $miss = @(Setup-Missing)
+    $ui.NoticeBtn.Visibility = 'Visible'
+    if ($miss.Count) {
+        $ui.NoticeText.Text = '第一次使用，要先下載打包和簽章工具'
+        $ui.NoticeText.ToolTip = "缺：$($miss -join '、')。會自動安裝 Python（沒有的話）、Python 套件、殼、打包器和 plumesign。"
+        $ui.NoticeBtn.Content = '安裝'; $ui.NoticeBtn.Tag = 'setup'
+    } elseif (-not (Find-Keys)) {
+        $ui.NoticeText.Text = '找不到 prod.keys，把它拖進這個視窗'
+        $ui.NoticeText.ToolTip = '打包要用你自己 Switch 的 prod.keys。拖進來會複製一份到 work 資料夾，只留在這台電腦。'
+        $ui.NoticeBtn.Content = '選擇檔案…'; $ui.NoticeBtn.Tag = 'keys'
+    } else { $ui.Notice.Visibility = 'Collapsed'; Update-UpdateBtn; return }
+    $ui.Notice.Visibility = 'Visible'
+}
+# 程式更新放在設定裡；有新版時齒輪變藍色提醒
+function Update-UpdateBtn {
+    $upd = Update-Available
+    $ui.Settings.Foreground = Brush $(if ($upd) { '#0A84FF' } else { '#FFFFFF' })
+    $ui.Settings.ToolTip = if ($upd) { "設定（有新版本：$upd）" } else { '設定' }
+}
+# 背景問 GitHub（不卡住畫面）；問不到就算了，下次開再問
+$checkTask = $null
+$checkAppTask = $null
+function Check-Updates {
+    try {
+        $wc = New-Object Net.WebClient
+        $wc.Headers.Add('User-Agent', 'SwitchPad')
+        $wc.Encoding = [Text.Encoding]::UTF8
+        $script:checkTask = $wc.DownloadStringTaskAsync("https://api.github.com/repos/$repo/releases/latest")
+        # 一個 WebClient 同時只能下載一個，Switch Pad 自己的 release 另開一個問
+        $wa = New-Object Net.WebClient
+        $wa.Headers.Add('User-Agent', 'SwitchPad')
+        $wa.Encoding = [Text.Encoding]::UTF8
+        $script:checkAppTask = $wa.DownloadStringTaskAsync("https://api.github.com/repos/$appRepo/releases/latest")
+        $checkTimer.Start()
+    } catch { }
+}
+$checkTimer = New-Object Windows.Threading.DispatcherTimer
+$checkTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+$checkTimer.Add_Tick({
+    if (-not $checkTask -or -not $checkTask.IsCompleted) { return }
+    if ($checkAppTask -and -not $checkAppTask.IsCompleted) { return }
+    $checkTimer.Stop()
+    if ($checkTask.Status -eq 'RanToCompletion') { try { $script:latest = $checkTask.Result | ConvertFrom-Json } catch { } }
+    if ($checkAppTask -and $checkAppTask.Status -eq 'RanToCompletion') { try { $script:latestApp = $checkAppTask.Result | ConvertFrom-Json } catch { } }
+    $script:checkTask = $null
+    $script:checkAppTask = $null
+    if (-not $state.Running) { Update-Notice }
+})
+function Set-Keys($path) {
+    $dst = Join-Path $work 'prod.keys'
+    if ((Resolve-Path -LiteralPath $path).Path -ne $dst) { Copy-Item -LiteralPath $path -Destination $dst -Force }
+    Get-ChildItem -Path $coverDir -Filter '*.none' -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+    Build-Library
+}
+function Run-Setup {
+    $g = [pscustomobject]@{ Dir = $here; Name = 'Switch Pad'; Ipas = @(); Base = $false; BaseFile = ''; Icon = $appIcon }
+    Start-Run @(@{ Game = $g; Mode = 'setup'; Call = "& $(Quote $updater)" })
+}
+$ui.NoticeBtn.Add_Click({
+    switch ($ui.NoticeBtn.Tag) {
+        'setup' { Run-Setup }
+        'keys'  {
+            $dlg = New-Object Microsoft.Win32.OpenFileDialog
+            $dlg.Title = '選擇 prod.keys'; $dlg.Filter = 'prod.keys|*.keys|所有檔案|*.*'
+            if ($dlg.ShowDialog($win)) { Set-Keys $dlg.FileName }
+        }
+    } })
+
+# ---------------------------------------------------------------- 合成一包：要有多遊戲殼（work\multigame）和 nxn_merge.py
+# nxn-update.ps1 記下的 Python，沒有就用 PATH 上的
+function Get-Python {
+    $saved = Join-Path $work 'python.txt'
+    if (Test-Path $saved) { $p = (Get-Content $saved -Raw).Trim(); if ($p) { return $p } }
+    return 'python'
+}
+function Get-MultiShell { Get-ChildItem -Path (Join-Path $work 'multigame') -Recurse -Filter 'shell-*.zip' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
+function Get-MergeScript {
+    foreach ($p in (Join-Path $here 'nxn_merge.py'), (Join-Path $work 'multigame\nxn_merge.py'), (Join-Path $work 'src\scripts\nxn_merge.py')) { if (Test-Path $p) { return $p } }
+    $f = Get-ChildItem -Path (Join-Path $work 'multigame') -Recurse -Filter 'nxn_merge.py' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { return $f.FullName }
+    return $null
+}
+function Update-MergeOption {
+    $ms = Get-MultiShell; $mg = Get-MergeScript
+    $ui.Merge.IsEnabled = [bool]($ms -and $mg)
+    $ui.Merge.ToolTip = if ($ms -and $mg) { "用多遊戲殼 $($ms.BaseName) 把選的遊戲合成一個 App，iPad 上開起來先選遊戲" }
+                        elseif (-not $ms) { '還沒有多遊戲殼：做好後放進 work\multigame 就能用' }
+                        else { '找不到 nxn_merge.py：放在 nxn 資料夾或 work\multigame' }
+    if (-not $ui.Merge.IsEnabled -and $ui.Merge.IsChecked) { $ui.Separate.IsChecked = $true }
+    Update-ShellLabel
+}
+# 上面的分頁：遊戲 / 合包。合包頁沒有底下的選項，動作都在卡片上
+function Set-Tab {
+    $packs = [bool]$ui.TabPacks.IsChecked
+    $ui.Library.Visibility = if ($packs) { 'Collapsed' } else { 'Visible' }
+    $ui.Packs.Visibility = if ($packs) { 'Visible' } else { 'Collapsed' }
+    if (-not $state.Running -and $ui.ProgressView.Visibility -ne 'Visible') {
+        $ui.Options.Visibility = if ($packs) { 'Hidden' } else { 'Visible' }
+        $ui.Start.Visibility = if ($packs) { 'Collapsed' } else { 'Visible' }
+    }
+}
+
+# 續期：標題列的小按鈕，顯示最快幾天到期；3 天內變橘色。滑鼠移上去列出每一個
+function Update-Banner($inst) {
+    $live = @($inst | Where-Object { Test-Path -LiteralPath $_.Ipa } | Sort-Object Left)
+    if (-not $live.Count) { $ui.RenewBtn.Visibility = 'Collapsed'; return }
+    $name = { param($x) if ($x.Dir -like '*.ipa') { [IO.Path]::GetFileNameWithoutExtension($x.Ipa) } else { Split-Path $x.Dir -Leaf } }
+    $min = $live[0].Left
+    $ui.RenewBtn.Content = '重簽'
+    $ui.RenewBtn.Foreground = Brush $(if ($min -le 3) { '#FF9F0A' } else { '#EBEBF5' })
+    $ui.RenewBtn.ToolTip = (($live | ForEach-Object { "$(& $name $_)：$(if ($_.Left -le 0) { '已過期' } else { "剩 $($_.Left) 天" })" }) -join "`n") +
+                           "`n`n免費 Apple ID 簽的 App 7 天後就打不開，按這裡把上面全部重簽一次（時間大約是各自重簽加起來，大的遊戲比較久）"
+    $ui.RenewBtn.Visibility = 'Visible'
+}
+
+# ---------------------------------------------------------------- 丟新檔：用 Windows 自己的複製（有進度視窗、不會卡住這裡），原檔不動
+function Add-Files($dir, $paths) {
+    $files = @($paths | Where-Object { $_ -match '\.(nsp|xci)$' -and (Test-Path -LiteralPath $_ -PathType Leaf) })
+    if (-not $files.Count) { [void][Windows.MessageBox]::Show('只能加 .nsp 或 .xci 檔。', '加入遊戲檔'); return }
+    $shell = New-Object -ComObject Shell.Application
+    $ns = $shell.Namespace($dir)
+    foreach ($f in $files) {
+        if (Test-Path -LiteralPath (Join-Path $dir (Split-Path $f -Leaf))) { continue }
+        $ns.CopyHere($f, 0)
+    }
+}
+function New-GameFolder($file) {
+    $leaf = [IO.Path]::GetFileNameWithoutExtension($file)
+    $name = ($leaf -replace '\[[^\]]*\]', '' -replace '\([^)]*\)', '' -replace '\s+v?\d+(\.\d+)+.*$', '' -replace '[-_]+', ' ').Trim()
+    if (-not $name) { $name = $leaf }
+    $d = Join-Path $gamesDir $name
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    return $d
+}
+# 拖到空白處：同一款（看檔名裡的 title ID）就放進原本的資料夾，不然新開一款
+$win.Add_Drop({ param($s, $e)
+    if (-not $e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { return }
+    $byDir = @{}
+    foreach ($f in @($e.Data.GetData([Windows.DataFormats]::FileDrop))) {
+        if ($f -match '\.keys$') { Set-Keys $f; continue }
+        if ($f -notmatch '\.(nsp|xci)$') { continue }
+        $tid = if ((Split-Path $f -Leaf) -match '(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])') { $Matches[1].ToUpper() } else { '' }
+        $base = if ($tid) { $tid.Substring(0, 12) } else { '' }
+        $target = $null
+        if ($base) { foreach ($c in $cards.Values) { if ($c.Tag.Tid -and $c.Tag.Tid.Substring(0, 12) -eq $base) { $target = $c.Tag.Dir } } }
+        if (-not $target) { $target = New-GameFolder $f }
+        if (-not $byDir[$target]) { $byDir[$target] = @() }
+        $byDir[$target] += $f
+    }
+    foreach ($k in $byDir.Keys) { Add-Files $k $byDir[$k] }
+    Build-Library })
+$win.Add_Activated({ if (-not $state.Running) { Build-Library } })
+
+# ---------------------------------------------------------------- Apple ID
+function Update-Account {
+    if (-not (Test-Path $plume)) { $ui.Account.Text = '找不到 plumesign.exe'; return }
+    try {
+        $out = (& $plume account list 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $mail = [regex]::Match($out, '[\w.+-]+@[\w-]+(\.[\w-]+)+').Value
+        if ($mail) { $ui.Account.Text = $mail; $ui.Account.Foreground = Brush '#EBEBF5'; $ui.AcctDot.Fill = Brush '#30D158'; $ui.Login.Content = '換帳號' }
+        else { $ui.Account.Text = '還沒登入 Apple ID'; $ui.AcctDot.Fill = Brush '#FF453A'; $ui.Login.Content = '登入 Apple ID' }
+    } catch { $ui.Account.Text = '無法確認 Apple ID' }
+}
+# 在 app 裡登入：plumesign 在背景跑，密碼和雙重驗證碼從它的標準輸入餵進去（不放在命令列上），輸出寫進檔案再輪詢
+function Show-Login {
+    $lx = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="420" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
+        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner" Title="Apple ID">
+  <Window.Resources>__RES__</Window.Resources>
+  <StackPanel Margin="22">
+    <TextBlock Text="登入 Apple ID" FontSize="22" FontWeight="Bold" Margin="0,0,0,14"/>
+    <TextBlock x:Name="UserLbl" Text="Apple ID" Foreground="#8E8E93" Margin="0,0,0,4"/>
+    <TextBox x:Name="User" Background="#2C2C2E" Foreground="White" BorderThickness="0" Padding="8,6" FontSize="16" CaretBrush="White"/>
+    <TextBlock x:Name="PassLbl" Text="密碼" Foreground="#8E8E93" Margin="0,12,0,4"/>
+    <PasswordBox x:Name="Pass" Background="#2C2C2E" Foreground="White" BorderThickness="0" Padding="8,6" FontSize="16" CaretBrush="White"/>
+    <TextBlock x:Name="CodeLbl" Text="驗證碼（看 iPad 或 iPhone 上跳出的 6 位數）" Foreground="#8E8E93" Margin="0,12,0,4" Visibility="Collapsed"/>
+    <TextBox x:Name="Code" Background="#2C2C2E" Foreground="White" BorderThickness="0" Padding="8,6" FontSize="20" CaretBrush="White" Visibility="Collapsed"/>
+    <TextBlock x:Name="Status" Foreground="#8E8E93" TextWrapping="Wrap" Margin="0,12,0,0"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="Cancel" Content="取消" IsCancel="True" Margin="0,0,8,0"/>
+      <Button x:Name="Ok" Content="登入" Style="{StaticResource Primary}" IsDefault="True"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+'@
+    $lw = Load-Window $lx
+    $lw.Owner = $win
+    $f = @{}; foreach ($n in 'User','Pass','UserLbl','PassLbl','CodeLbl','Code','Status','Ok','Cancel') { $f[$n] = $lw.FindName($n) }
+    $st = @{ Proc = $null; Log = Join-Path $work 'login.log'; Asked = $false; Done = $false }
+    $send = { param($line)
+        $b = [Text.Encoding]::UTF8.GetBytes($line + "`n")
+        $st.Proc.StandardInput.BaseStream.Write($b, 0, $b.Length); $st.Proc.StandardInput.BaseStream.Flush() }
+    $lt = New-Object Windows.Threading.DispatcherTimer
+    $lt.Interval = [TimeSpan]::FromMilliseconds(400)
+    $lt.Add_Tick({
+        $txt = ''
+        try { $fs = New-Object IO.FileStream($st.Log, 'Open', 'Read', 'ReadWrite'); $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8); $txt = $sr.ReadToEnd(); $sr.Dispose() } catch { }
+        if (-not $st.Asked -and $txt -match '(?i)enter (the )?(2fa )?code') {
+            $st.Asked = $true
+            $f.CodeLbl.Visibility = 'Visible'; $f.Code.Visibility = 'Visible'; $f.Code.Text = ''
+            $f.Ok.Content = '送出'; $f.Ok.IsEnabled = $true
+            $f.Status.Text = ''
+            $f.Code.Focus() | Out-Null
+        }
+        if ($st.Proc.HasExited) {
+            $lt.Stop()
+            if ($st.Proc.ExitCode -eq 0) { $st.Done = $true; $lw.DialogResult = $true; return }
+            $last = @($txt -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 3
+            $f.Status.Text = "登入失敗：$(($last -join ' ').Trim())"
+            $f.Status.Foreground = Brush '#FF453A'
+            $f.User.IsEnabled = $true; $f.Pass.IsEnabled = $true
+            $f.CodeLbl.Visibility = 'Collapsed'; $f.Code.Visibility = 'Collapsed'
+            $f.Ok.Content = '登入'; $f.Ok.IsEnabled = $true; $st.Proc = $null; $st.Asked = $false
+        }
+    })
+    $f.Ok.Add_Click({
+        if ($st.Proc -and $st.Asked) {
+            $c = $f.Code.Text.Trim()
+            if (-not $c) { return }
+            & $send $c
+            $f.Ok.IsEnabled = $false; $f.Status.Foreground = Brush '#8E8E93'; $f.Status.Text = '確認驗證碼…'
+            return
+        }
+        $u = $f.User.Text.Trim(); $pw = $f.Pass.Password
+        if (-not $u -or -not $pw) { $f.Status.Text = '請輸入 Apple ID 和密碼'; return }
+        Remove-Item -LiteralPath $st.Log -ErrorAction SilentlyContinue
+        $psi = New-Object Diagnostics.ProcessStartInfo 'cmd.exe'
+        $psi.Arguments = "/d /c `"`"$plume`" account login --username `"$($u -replace '"', '')`" > `"$($st.Log)`" 2>&1`""
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true
+        $psi.EnvironmentVariables['RUST_LOG'] = 'info'
+        $st.Proc = [Diagnostics.Process]::Start($psi)
+        # plumesign 先問密碼（沒給 --password 時從標準輸入讀一行）
+        & $send $pw
+        $f.User.IsEnabled = $false; $f.Pass.IsEnabled = $false; $f.Ok.IsEnabled = $false
+        $f.Status.Foreground = Brush '#8E8E93'; $f.Status.Text = '登入中…'
+        $lt.Start()
+    })
+    $lw.Add_Closed({ $lt.Stop(); if ($st.Proc -and -not $st.Proc.HasExited) { try { $st.Proc.Kill() } catch { } }
+                     Remove-Item -LiteralPath $st.Log -ErrorAction SilentlyContinue })
+    $lw.Add_ContentRendered({ $f.User.Focus() | Out-Null })
+    [void]$lw.ShowDialog()
+    if ($st.Done) { Update-Account }
+}
+$ui.Login.Add_Click({ Show-Login })
+$win.Add_ContentRendered({ Update-Account; Check-Updates })
+
+# ---------------------------------------------------------------- 執行：一次一款，每款一個進度列
+$jobXaml = @'
+<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        CornerRadius="16" Background="#1C1C1E" Margin="0,0,0,10" Padding="16">
+  <DockPanel>
+    <Border x:Name="Icon" DockPanel.Dock="Left" Width="60" Height="60" CornerRadius="14" Background="#2C2C2E" VerticalAlignment="Top">
+      <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="28" FontWeight="Bold" Foreground="White"/>
+    </Border>
+    <StackPanel Margin="16,0,0,0">
+      <DockPanel>
+        <TextBlock x:Name="Time" DockPanel.Dock="Right" Foreground="#8E8E93" FontFamily="Consolas"/>
+        <TextBlock x:Name="Title" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
+      </DockPanel>
+      <WrapPanel x:Name="Steps" Margin="0,10,0,0"/>
+      <TextBlock x:Name="Msg" Foreground="#8E8E93" FontSize="12" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
+      <Expander x:Name="Exp" Header="記錄" Foreground="#8E8E93" Margin="0,6,0,0">
+        <TextBox x:Name="Log" Height="240" IsReadOnly="True" FontFamily="Consolas, Microsoft JhengHei UI" FontSize="12"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
+                 Background="#000000" Foreground="#D1D1D6" BorderThickness="0" Margin="0,6,0,0"/>
+      </Expander>
+    </StackPanel>
+  </DockPanel>
+</Border>
+'@
+# 每一步看記錄裡的哪句話算開始
+$stepDefs = @(
+    @{ Name = '檢查帳號'; Re = '==> 檢查 Apple ID' },
+    @{ Name = '解包';     Re = 'extracting v|reusing the extracted' },
+    @{ Name = '轉換程式'; Re = 'rewriting main|rewritten modules already' },
+    @{ Name = '著色器';   Re = 'translating shaders|shader split|shader libraries|no shader library|Vulkan shaders|GL shaders' },
+    @{ Name = '打包';     Re = 'packing the IPA' },
+    @{ Name = '準備合包'; Re = 'packing the IPA' },
+    @{ Name = '簽章安裝'; Re = '==> 簽章並安裝' },
+    @{ Name = '傳資料';   Re = '==> 傳遊戲資料' },
+    @{ Name = '合成';     Re = '==> 合成一包' },
+    @{ Name = 'Python';   Re = '==> 檢查 Python' },
+    @{ Name = '套件';     Re = '==> 安裝 Python 套件' },
+    @{ Name = '打包器';   Re = '==> 檢查打包器' },
+    @{ Name = '簽章工具'; Re = '==> 檢查簽章工具' },
+    @{ Name = 'Switch Pad'; Re = '==> 檢查 Switch Pad' }
+)
+function Set-Step($job, $idx, $how) {
+    for ($i = 0; $i -lt $job.Steps.Count; $i++) {
+        $pill = $job.Steps[$i]; $tb = $pill.Child; $name = $job.StepNames[$i]
+        $s = if ($i -lt $idx) { 'done' } elseif ($i -eq $idx) { $how } else { 'todo' }
+        switch ($s) {
+            'done'   { $pill.Background = Brush '#1E3A26'; $tb.Foreground = Brush '#30D158'; $tb.Text = "✓ $name" }
+            'active' { $pill.Background = Brush '#0A84FF'; $tb.Foreground = Brush '#FFFFFF'; $tb.Text = "● $name" }
+            'fail'   { $pill.Background = Brush '#3A1E1E'; $tb.Foreground = Brush '#FF453A'; $tb.Text = "✕ $name" }
+            default  { $pill.Background = Brush '#2C2C2E'; $tb.Foreground = Brush '#8E8E93'; $tb.Text = $name }
+        }
+    }
+    $job.Cur = $idx
+}
+
+$state = @{ Queue = New-Object System.Collections.Queue; Job = $null; Proc = $null; Running = $false; Ok = 0; Fail = @(); Started = $null }
+
+function Quote($s) { "'" + ($s -replace "'", "''") + "'" }
+
+function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
+    $row = [Windows.Markup.XamlReader]::Parse($jobXaml)
+    $row.FindName('Title').Text = $g.Name
+    Paint-Icon $row.FindName('Icon') $row.FindName('Letter') $g (Cover-For $g)
+    $names = switch ($mode) {
+        'setup'   { @('Python', '套件', '打包器', '簽章工具', 'Switch Pad') }
+        'pack'    { @('解包', '轉換程式', '著色器', '打包') }
+        'mergepart' { @('解包', '轉換程式', '著色器', '準備合包') }
+        'merge'   { @('合成') }
+        'merge+install' { @('合成', '檢查帳號', '簽章安裝', '傳資料') }
+        'install' { @('檢查帳號', '簽章安裝', '傳資料') }
+        default   { @('檢查帳號', '解包', '轉換程式', '著色器', '打包', '簽章安裝', '傳資料') }
+    }
+    $pills = @()
+    foreach ($n in $names) {
+        $p = New-Object Windows.Controls.Border
+        $p.CornerRadius = '10'; $p.Padding = '11,4'; $p.Margin = '0,0,6,6'
+        $t = New-Object Windows.Controls.TextBlock; $t.FontSize = 12
+        $p.Child = $t
+        [void]$row.FindName('Steps').Children.Add($p)
+        $pills += $p
+    }
+    $a = @()
+    switch ($mode) {
+        'install' { $a += @('-Ipa', (Quote $ipa)) }
+        { $_ -in 'merge', 'merge+install', 'setup' } { }   # 這幾種只跑 Call；mergepart 是一般打包，要走下面
+        default {
+            $a += @('-GameDir', (Quote $g.Dir))
+            if ($mode -in 'pack', 'mergepart') { $a += '-PackOnly' }
+            if ($cfg.Overwrite) { $a += '-Overwrite' }
+            if ($shellPath) { $a += @('-Shell', (Quote $shellPath)) }
+            else { $sh = Current-Shell; if ($sh) { $a += @('-Shell', (Quote $sh.Path)) } }
+            if ($out) { $a += @('-Out', (Quote $out)) }
+        }
+    }
+    if ($cfg.Udid) { $a += @('-Udid', (Quote $cfg.Udid)) }
+    $job = [pscustomobject]@{ Game = $g; Row = $row; Steps = $pills; StepNames = $names; Args = $a; Call = ''; NeedAllOk = $false; Log = ''; Pos = 0; Dec = $null
+                             Started = $null; Cur = -1; Text = $row.FindName('Log'); Msg = $row.FindName('Msg'); Time = $row.FindName('Time') }
+    Set-Step $job -1 'todo'
+    $job.Msg.Text = '排隊中'
+    [void]$ui.Jobs.Children.Add($row)
+    return $job
+}
+
+function Start-Run($jobs) {
+    if (-not $jobs.Count) { return }
+    $ui.Jobs.Children.Clear()
+    $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
+    foreach ($j in $jobs) {
+        $nj = New-Job $j.Game $j.Mode $j.Ipa $j.Out $j.Shell
+        if ($j.Call) { $nj.Call = $j.Call; $nj.NeedAllOk = $true }
+        $state.Queue.Enqueue($nj)
+    }
+    $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'
+    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Collapsed'; $ui.Stop.Visibility = 'Visible'
+    $ui.Login.IsEnabled = $false; $ui.Settings.IsEnabled = $false; $ui.Refresh.IsEnabled = $false
+    $ui.Busy.Visibility = 'Visible'; $ui.ProgTitle.Text = '執行中'
+    Start-Next
+}
+
+function Start-Next {
+    if ($state.Queue.Count -eq 0) {
+        $state.Running = $false; $state.Job = $null
+        $ui.Busy.Visibility = 'Collapsed'
+        $ui.ProgTitle.Text = if ($state.Fail.Count) { "完成 $($state.Ok) 款，失敗：$($state.Fail -join '、')" } else { "全部完成（$($state.Ok) 款）" }
+        $ui.Stop.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Visible'
+        $ui.Login.IsEnabled = $true; $ui.Settings.IsEnabled = $true; $ui.Refresh.IsEnabled = $true
+        # 安裝或更新完：Switch Pad 自己換了新版就重開，不然重新讀殼、支援清單和帳號
+        $flag = Join-Path $work 'app-restart.flag'
+        if (Test-Path $flag) {
+            Remove-Item $flag -ErrorAction SilentlyContinue
+            Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $here 'nxn-app.ps1')`"")
+            $win.Close(); return
+        }
+        Load-Supported; Update-ShellLabel; Update-Account
+        # 全部成功就倒數幾秒自動回遊戲庫；有失敗的留在這頁讓你看記錄
+        if (-not $state.Fail.Count) {
+            $state.BackIn = 5; $state.DoneTitle = $ui.ProgTitle.Text
+            $ui.ProgTitle.Text = "$($state.DoneTitle)，$($state.BackIn) 秒後回到遊戲庫"
+            $backTimer.Start()
+        }
+        return
+    }
+    $job = $state.Queue.Dequeue()
+    if ($job.NeedAllOk -and $state.Fail.Count) {
+        # 前面有遊戲打包失敗，就不合包了
+        Set-Step $job 0 'fail'; $job.Msg.Text = '前面有遊戲打包失敗，這次沒有合包'; $job.Msg.Foreground = Brush '#FF453A'
+        $state.Fail += $job.Game.Name
+        Start-Next; return
+    }
+    $state.Job = $job
+    $job.Log = Join-Path $logDir ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($job.Game.Name -replace '[^\w.-]', '_') + '.log')
+    $job.Pos = 0; $job.Dec = [Text.Encoding]::UTF8.GetDecoder(); $job.Started = Get-Date
+    Set-Step $job 0 'active'
+    $job.Msg.Text = '開始…'
+    # Write-Host 走資訊串流（6），*>&1 才收得到；結束碼交給外層的 exit
+    $call = if ($job.Call) { $job.Call } else { "& $(Quote $script) $($job.Args -join ' ') -NoPause" }
+    $cmd = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; `$env:PYTHONUTF8='1'; `$global:LASTEXITCODE=0; & { $call } *>&1 | Out-File -Encoding utf8 -Width 400 $(Quote $job.Log); exit `$LASTEXITCODE"
+    $psi = New-Object Diagnostics.ProcessStartInfo 'powershell.exe'
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$($cmd -replace '"', '\"')`""
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $state.Proc = [Diagnostics.Process]::Start($psi)
+    $timer.Start()
+}
+
+function Read-Log($job) {
+    if (-not $job.Log -or -not (Test-Path -LiteralPath $job.Log)) { return }
+    try {
+        $fs = New-Object IO.FileStream($job.Log, 'Open', 'Read', 'ReadWrite')
+        try {
+            if ($fs.Length -le $job.Pos) { return }
+            [void]$fs.Seek($job.Pos, 'Begin')
+            $buf = New-Object byte[] ($fs.Length - $job.Pos)
+            $n = $fs.Read($buf, 0, $buf.Length)
+            $job.Pos += $n
+            $chars = New-Object char[] ($job.Dec.GetCharCount($buf, 0, $n))
+            [void]$job.Dec.GetChars($buf, 0, $n, $chars, 0)
+            $text = (-join $chars).Replace([string][char]0xFEFF, '')
+            if (-not $text) { return }
+            $job.Text.AppendText($text); $job.Text.ScrollToEnd()
+            # 看到哪一步的開頭就把那一步點亮
+            foreach ($line in ($text -split "`r?`n")) {
+                $l = $line.Trim()
+                if (-not $l) { continue }
+                for ($i = $job.Cur + 1; $i -lt $job.StepNames.Count; $i++) {
+                    $def = $stepDefs | Where-Object { $_.Name -eq $job.StepNames[$i] }
+                    if ($l -match $def.Re) { Set-Step $job $i 'active'; break }
+                }
+                # 卡片上只顯示看得懂的一行：略過時間戳開頭的記錄、和工具印出的資料結構片段（有大括號、或只是收尾的符號）
+                if ($l -notmatch '^\[?\d{4}-\d\d-\d\dT' -and $l -notmatch '[{}]|^[\]\)\},\s]+$' -and $l.Length -lt 200) { $job.Msg.Text = ($l -replace '^\[\d\d:\d\d:\d\d\]\s*', '') }
+            }
+        } finally { $fs.Dispose() }
+    } catch { }
+}
+
+$timer = New-Object Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromMilliseconds(400)
+$timer.Add_Tick({
+    $job = $state.Job
+    if (-not $job) { $timer.Stop(); return }
+    Read-Log $job
+    $job.Time.Text = '{0:hh\:mm\:ss}' -f ((Get-Date) - $job.Started)
+    $ui.ProgTotal.Text = '總共 {0:hh\:mm\:ss}' -f ((Get-Date) - $state.Started)
+    if ($state.Proc -and $state.Proc.HasExited) {
+        $timer.Stop()
+        Read-Log $job
+        $code = $state.Proc.ExitCode
+        $state.Proc = $null
+        if ($code -eq 0) {
+            $state.Ok++
+            Set-Step $job $job.StepNames.Count 'done'
+            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } else { '打包完成' }
+            $job.Msg.Foreground = Brush '#30D158'
+        } else {
+            $state.Fail += $job.Game.Name
+            Set-Step $job ([math]::Max($job.Cur, 0)) 'fail'
+            $job.Msg.Foreground = Brush '#FF453A'
+            $job.Row.FindName('Exp').IsExpanded = $true
+        }
+        Start-Next
+    } })
+
+# ---------------------------------------------------------------- 按鈕
+# 合包的 bundle ID：加入或移除遊戲後沿用它，iPad 上才是同一個 App
+function Pack-BundleId($ipa) {
+    try {
+        $z = [IO.Compression.ZipFile]::OpenRead($ipa)
+        try {
+            $e = $z.Entries | Where-Object { $_.FullName -match '^Payload/[^/]+\.app/Info\.plist$' } | Select-Object -First 1
+            $sr = New-Object IO.StreamReader($e.Open()); try { $pl = $sr.ReadToEnd() } finally { $sr.Dispose() }
+            if ($pl -match '<key>CFBundleIdentifier</key>\s*<string>([^<]+)</string>') { return $Matches[1] }
+        } finally { $z.Dispose() }
+    } catch { }
+    return ''
+}
+# 從合包拿掉一款：用 nxn_merge_drop.py 把舊包重寫一份（不重新打包，很快），蓋回原檔名。iPad 上重新安裝後，
+# 那款傳過去的遊戲資料會在下次傳檔時刪掉（romfs_data.py）；它的存檔留在 App 裡。
+function Remove-FromPack($p, $gm) {
+    $old = $p.Ipas[0].FullName
+    $mg = Get-MergeScript
+    $drop = Join-Path $here 'nxn_merge_drop.py'
+    if (-not $mg -or -not (Test-Path $drop)) { [void][Windows.MessageBox]::Show('找不到 nxn_merge.py 或 nxn_merge_drop.py。', '移除遊戲'); return }
+    $bid = Pack-BundleId $old
+    $tmp = "$old.removing"
+    $call = "Write-Host '==> 合成一包：從 $($p.Name -replace "'", "''") 移除 $($gm.Name -replace "'", "''")'; " +
+            "& $(Quote (Get-Python)) $(Quote $drop) $(Quote $mg) $($gm.Tid) -o $(Quote $tmp) --name $(Quote $p.Name)" + $(if ($bid) { " --bundle-id $(Quote $bid)" } else { '' }) + " $(Quote $old); " +
+            "if (`$LASTEXITCODE) { Write-Host '出錯了：移除失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
+            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $old) -Force; Write-Host '移除好了，重新安裝到 iPad 後才會生效'"
+    $g = [pscustomobject]@{ Dir = $p.Dir; Name = "從 $($p.Name) 移除 $($gm.Name)"; Ipas = @(); Base = $false; BaseFile = ''; Icon = $p.Icon }
+    Start-Run @(@{ Game = $g; Mode = 'merge'; Ipa = ''; Call = $call })
+}
+# 加進現有的合包：新選的遊戲各自用多遊戲殼打包，再跟舊的合包一起合成，蓋回原本的檔名。
+# bundle ID 和名稱照舊，所以 iPad 上是更新同一個 App（存檔和已經傳過的遊戲資料都留著）。已經在包裡的遊戲跳過。
+function Add-ToPack($p, $dirs, $mode) {
+    $old = $p.Ipas[0].FullName
+    if (-not (Test-Path -LiteralPath $old)) { [void][Windows.MessageBox]::Show("找不到 $old", '加入遊戲'); return }
+    $have = @($p.Games | ForEach-Object { $_.Tid })
+    $ms = Get-MultiShell; $mg = Get-MergeScript
+    $id = if ($ms.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { 'multi' }
+    $jobs = @(); $outs = @(); $skip = @()
+    foreach ($dir in $dirs) {
+        $g = $cards[$dir].Tag
+        if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI）。", '缺本體'); return }
+        $tid = if ($g.Tid) { "$($g.Tid)".ToUpper() } elseif ("$($g.BaseFile)" -match '(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])') { $Matches[1].ToUpper() } else { '' }
+        if ($tid -and $have -contains $tid) { $skip += $g.Name; continue }
+        $o = Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")
+        $outs += $o
+        $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $o; Shell = $ms.FullName }
+    }
+    if (-not $outs.Count) { [void][Windows.MessageBox]::Show("選的遊戲都已經在「$($p.Name)」裡了。", '加入遊戲'); return }
+    if ($skip.Count) { [void][Windows.MessageBox]::Show("已經在包裡，跳過：$($skip -join '、')", '加入遊戲') }
+    $bid = Pack-BundleId $old
+    $tmp = "$old.adding"
+    $names = ($jobs | ForEach-Object { $_.Game.Name }) -join '、'
+    $call = "Write-Host '==> 合成一包：把 $($names -replace "'", "''") 加進 $($p.Name -replace "'", "''")'; " +
+            "& $(Quote (Get-Python)) $(Quote $mg) -o $(Quote $tmp) --name $(Quote $p.Name) --shell $(Quote $ms.FullName)" + $(if ($bid) { " --bundle-id $(Quote $bid)" } else { '' }) +
+            " $(Quote $old) $(($outs | ForEach-Object { Quote $_ }) -join ' '); " +
+            "if (`$LASTEXITCODE) { Write-Host '出錯了：合包失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
+            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $old) -Force; Write-Host `"合包完成：$($old -replace "'", "''")`""
+    if ($mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $old) -NoPause" }
+    $mg2 = [pscustomobject]@{ Dir = $p.Dir; Name = "加進 $($p.Name)（$($outs.Count) 款）"; Ipas = @(); Base = $true; Icon = $p.Icon }
+    $jobs += @{ Game = $mg2; Mode = $(if ($mode -eq 'both') { 'merge+install' } else { 'merge' }); Ipa = ''; Call = $call }
+    $script:addTo = $null; Update-SelCount
+    Start-Run $jobs
+}
+# 跑選的遊戲：mode = both / pack / install；merge = 合成一包
+function Run-Games($dirs, $mode, $merge) {
+    $jobs = @()
+    if ($merge -and $script:addTo) { Add-ToPack $script:addTo $dirs $mode; return }
+    if ($merge) {
+        if ($mode -ne 'install' -and $dirs.Count -lt 2) { [void][Windows.MessageBox]::Show('合成一包至少要選 2 款。', '合成一包'); return }
+        if ($mode -eq 'install') {
+            # 只安裝：裝 nxn\合包 裡最新的那包，不管勾了哪些遊戲
+            $mdir = Join-Path $base '合包'
+            $last = Get-ChildItem -LiteralPath $mdir -Filter '*.ipa' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $last) { [void][Windows.MessageBox]::Show('還沒有合成好的包，先用「打包並安裝」或「只打包」。', '合成一包'); return }
+            $mg2 = [pscustomobject]@{ Dir = $mdir; Name = "合包（$($last.Name)）"; Ipas = @($last); Base = $false }
+            Start-Run @(@{ Game = $mg2; Mode = 'install'; Ipa = $last.FullName })
+            return
+        }
+        $ms = Get-MultiShell; $mg = Get-MergeScript
+        $id = if ($ms.Name -match 'shell-\d+-([0-9a-f]+)') { $Matches[1] } else { 'multi' }
+        $outs = @()
+        foreach ($dir in $dirs) {
+            $g = $cards[$dir].Tag
+            if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI）。", '缺本體'); return }
+            # 每款先用多遊戲殼各自打包成 <資料夾>-multi-<殼版本>.ipa，不碰正式的 IPA
+            $o = Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")
+            $outs += $o
+            $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $o; Shell = $ms.FullName }
+        }
+        $mdir = Join-Path $base '合包'
+        New-Item -ItemType Directory -Force -Path $mdir | Out-Null
+        $names = ($dirs | ForEach-Object { $cards[$_].Tag.Name }) -join '、'
+        $pname = Ask-Text '合成一包' 'iPad 主畫面上顯示的名稱（之後也可以在「合包」裡改）' '遊戲合包'
+        if (-not $pname) { return }
+        $mout = Pack-Path $pname
+        # 每包自己的 bundle ID，兩包才能同時裝在 iPad 上（改名時不給，沿用原本的，存檔才留得住）
+        $md5 = [Security.Cryptography.MD5]::Create()
+        $bid = 'org.nxnative.games.p' + (-join ($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFileNameWithoutExtension($mout))) | Select-Object -First 4 | ForEach-Object { $_.ToString('x2') }))
+        $call = "Write-Host '==> 合成一包：$($names -replace "'", "''")'; & $(Quote (Get-Python)) $(Quote $mg) -o $(Quote $mout) --name $(Quote $pname) --bundle-id $bid $(($outs | ForEach-Object { Quote $_ }) -join ' '); " +
+                "if (`$LASTEXITCODE) { Write-Host '出錯了：合包失敗'; `$global:LASTEXITCODE = 1; return }; Write-Host `"合包完成：$($mout -replace "'", "''")`""
+        if ($mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $mout) -NoPause" }
+        $mg2 = [pscustomobject]@{ Dir = $mdir; Name = "合成一包（$($dirs.Count) 款）"; Ipas = @(); Base = $true }
+        $jobs += @{ Game = $mg2; Mode = $(if ($mode -eq 'both') { 'merge+install' } else { 'merge' }); Ipa = ''; Call = $call }
+    } else {
+        foreach ($dir in $dirs) {
+            $g = $cards[$dir].Tag
+            if ($mode -eq 'install') {
+                if (-not $g.Ipas.Count) { [void][Windows.MessageBox]::Show("$($g.Name) 還沒有打包好的 IPA，先用「打包並安裝」。", '沒有 IPA'); return }
+                # 裝資料夾裡最新打包的那個（重簽才是照安裝紀錄裝上次那個）
+                $jobs += @{ Game = $g; Mode = 'install'; Ipa = $g.Ipas[0].FullName }
+            } else {
+                if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI）。", '缺本體'); return }
+                $jobs += @{ Game = $g; Mode = $mode; Ipa = '' }
+            }
+        }
+    }
+    Start-Run $jobs
+}
+
+$ui.TabGames.Add_Checked({ Set-Tab })
+$ui.TabPacks.Add_Checked({ Set-Tab })
+$ui.Merge.Add_Checked({ Update-ShellLabel })
+$ui.Separate.Add_Checked({ $script:addTo = $null; Update-SelCount; Update-ShellLabel })
+$ui.Start.Add_Click({
+    if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
+    $mode = if ($ui.ModePack.IsChecked) { 'pack' } elseif ($ui.ModeInstall.IsChecked) { 'install' } else { 'both' }
+    $cfg.Mode = $mode; Save-Settings
+    Run-Games @($selected) $mode ([bool]$ui.Merge.IsChecked) })
+
+$ui.RenewBtn.Add_Click({
+    $list = @(Get-Installed | Where-Object { Test-Path -LiteralPath $_.Ipa } | Sort-Object Ipa -Unique)
+    if (-not $list.Count) { return }
+    $jobs = @()
+    foreach ($x in $list) {
+        $g = if ($cards[$x.Dir]) { $cards[$x.Dir].Tag } else { [pscustomobject]@{ Dir = $x.Dir; Name = (Split-Path $x.Dir -Leaf); Ipas = @(); Base = $true } }
+        $jobs += @{ Game = $g; Mode = 'install'; Ipa = $x.Ipa }
+    }
+    Start-Run $jobs })
+
+$ui.Stop.Add_Click({
+    $state.Queue.Clear()
+    if ($state.Proc -and -not $state.Proc.HasExited) { & taskkill.exe /PID $state.Proc.Id /T /F | Out-Null }
+})
+# 跑完後倒數回遊戲庫
+$backTimer = New-Object Windows.Threading.DispatcherTimer
+$backTimer.Interval = [TimeSpan]::FromSeconds(1)
+$backTimer.Add_Tick({
+    $state.BackIn--
+    if ($state.BackIn -le 0) { $backTimer.Stop(); $ui.Back.RaiseEvent((New-Object Windows.RoutedEventArgs ([Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+    else { $ui.ProgTitle.Text = "$($state.DoneTitle)，$($state.BackIn) 秒後回到遊戲庫" }
+})
+$ui.Back.Add_Click({
+    $backTimer.Stop()
+    $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'
+    $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
+    Set-Tab
+    Build-Library })
+$ui.Refresh.Add_Click({
+    # 之前讀不到圖示的再試一次（例如後來才放了 prod.keys）
+    Get-ChildItem -Path $coverDir -Filter '*.none' -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+    Build-Library; Update-Account; Check-Updates })
+
+# ---------------------------------------------------------------- 設定視窗
+$ui.Settings.Add_Click({
+    $sx = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="設定" Width="560" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
+        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+  <Window.Resources>__RES__</Window.Resources>
+  <StackPanel Margin="22">
+    <TextBlock Text="殼" Foreground="#8E8E93" Margin="4,0,0,6"/>
+    <Border Background="#1C1C1E" CornerRadius="12" Padding="14">
+      <StackPanel>
+        <ComboBox x:Name="Shell"/>
+        <TextBlock Foreground="#8E8E93" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap"
+                   Text="預設是正式殼。用其他殼打包時，IPA 會另存成「資料夾名-殼版本.ipa」，不會蓋掉正式版。殼的 .zip 放進 work\phonepads 或 work\multigame 就會出現在這裡。"/>
+      </StackPanel>
+    </Border>
+    <TextBlock Text="iPad" Foreground="#8E8E93" Margin="4,16,0,6"/>
+    <Border Background="#1C1C1E" CornerRadius="12" Padding="14">
+      <StackPanel>
+        <DockPanel>
+          <TextBlock Text="UDID（選填）" VerticalAlignment="Center" Margin="0,0,10,0"/>
+          <TextBox x:Name="Udid" Background="#2C2C2E" Foreground="White" BorderThickness="0" Padding="6,4"/>
+        </DockPanel>
+        <TextBlock Foreground="#8E8E93" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap" Text="留空會自動找 USB 上的 iPad。"/>
+        <CheckBox x:Name="Overwrite" Content="打包時蓋掉資料夾裡原本的 IPA" Foreground="White" Margin="0,12,0,0"/>
+      </StackPanel>
+    </Border>
+    <TextBlock Text="金鑰" Foreground="#8E8E93" Margin="4,16,0,6"/>
+    <Border Background="#1C1C1E" CornerRadius="12" Padding="14">
+      <StackPanel>
+        <DockPanel>
+          <Button x:Name="ChangeKeys" DockPanel.Dock="Right" Content="更換"/>
+          <TextBlock x:Name="KeysText" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+        </DockPanel>
+        <TextBlock Foreground="#8E8E93" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap"
+                   Text="打包要用你自己 Switch 匯出的 prod.keys。新遊戲解包失敗、說 prod.keys 太舊時，把 Switch 更新到最新系統，用 Lockpick_RCM 重新匯出，再按「更換」選新的檔案（也可以直接拖進主視窗）。"/>
+      </StackPanel>
+    </Border>
+    <TextBlock Text="Switch Pad" Foreground="#8E8E93" Margin="4,16,0,6"/>
+    <Border Background="#1C1C1E" CornerRadius="12" Padding="14">
+      <DockPanel>
+        <Button x:Name="UpdateApp" DockPanel.Dock="Right" Content="更新" Style="{StaticResource Primary}"/>
+        <TextBlock x:Name="UpdateText" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+      </DockPanel>
+    </Border>
+    <TextBlock Text="資料夾" Foreground="#8E8E93" Margin="4,16,0,6"/>
+    <Border Background="#1C1C1E" CornerRadius="12" Padding="14">
+      <WrapPanel>
+        <Button x:Name="OpenGames" Content="打開遊戲資料夾" Margin="0,0,8,8"/>
+        <Button x:Name="OpenLogs" Content="打開記錄資料夾" Margin="0,0,8,8"/>
+        <Button x:Name="OldGui" Content="舊版簡易視窗" Margin="0,0,8,8"/>
+      </WrapPanel>
+    </Border>
+    <Button x:Name="Done" Content="完成" Background="#0A84FF" FontWeight="SemiBold" HorizontalAlignment="Right" Margin="0,18,0,0" Padding="28,8"/>
+  </StackPanel>
+</Window>
+'@
+    $sw = Load-Window $sx
+    $sw.Owner = $win
+    $combo = $sw.FindName('Shell')
+    $cur = Current-Shell
+    foreach ($s in Get-Shells) {
+        $it = New-Object Windows.Controls.ComboBoxItem
+        $it.Content = $s.Label; $it.Tag = $s.Path
+        [void]$combo.Items.Add($it)
+        if ($cur -and $s.Path -eq $cur.Path) { $combo.SelectedItem = $it }
+    }
+    $sw.FindName('Udid').Text = $cfg.Udid
+    $sw.FindName('Overwrite').IsChecked = [bool]$cfg.Overwrite
+    # 金鑰：現在用哪個 prod.keys（Find-Keys 的順序），最新到第幾代 titlekek（只讀名稱，不讀值）
+    $showKeys = {
+        $k = Find-Keys
+        $sw.FindName('KeysText').Text = if (-not $k) { '找不到 prod.keys' } else {
+            $gens = @(Select-String -LiteralPath $k -Pattern '^\s*titlekek_([0-9a-fA-F]{2})\s*=' -ErrorAction SilentlyContinue | ForEach-Object { [Convert]::ToInt32($_.Matches[0].Groups[1].Value, 16) })
+            $newest = if ($gens) { [int]($gens | Measure-Object -Maximum).Maximum } else { $null }
+            "$k`n" + $(if ($null -ne $newest) { "金鑰最新到第 $($newest + 1) 代（titlekek_$('{0:x2}' -f $newest)）" } else { '這個檔案裡沒有 titlekek，可能不完整' })
+        }
+    }
+    & $showKeys
+    $sw.FindName('ChangeKeys').Add_Click({
+        $dlg = New-Object Microsoft.Win32.OpenFileDialog
+        $dlg.Title = '選擇 prod.keys'; $dlg.Filter = 'prod.keys|*.keys|所有檔案|*.*'
+        if ($dlg.ShowDialog($sw)) { Set-Keys $dlg.FileName; & $showKeys }
+    })
+    $sw.FindName('OpenGames').Add_Click({ Start-Process explorer.exe "`"$gamesDir`"" })
+    $sw.FindName('OpenLogs').Add_Click({ Start-Process explorer.exe "`"$logDir`"" })
+    if ($here -ne $base -or -not (Test-Path (Join-Path $here 'nxn-gui.ps1'))) { $sw.FindName('OldGui').Visibility = 'Collapsed' }   # 舊版視窗只認得最上層的 遊戲\
+    $sw.FindName('OldGui').Add_Click({ Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $here 'nxn-gui.ps1')`"") })
+    $upd = Update-Available
+    $sw.FindName('UpdateText').Text = if ($upd) { "有新版本：$upd" } elseif ($latest) { "已是最新（$($latest.tag_name)）" } else { '還沒問到 GitHub 上的版本' }
+    $ub = $sw.FindName('UpdateApp')
+    if (-not $upd) { $ub.Content = '重新安裝'; $ub.Style = $sw.FindResource([Windows.Controls.Button]) }
+    $ub.IsEnabled = -not $state.Running
+    $ub.Add_Click({ $sw.DialogResult = $false; Run-Setup })
+    $sw.FindName('Done').Add_Click({ $sw.DialogResult = $true })
+    if ($sw.ShowDialog()) {
+        if ($combo.SelectedItem) { $cfg.Shell = $combo.SelectedItem.Tag }
+        $cfg.Udid = $sw.FindName('Udid').Text.Trim()
+        $cfg.Overwrite = [bool]$sw.FindName('Overwrite').IsChecked
+        Save-Settings
+        Update-ShellLabel
+    }
+})
+
+$win.Add_Closing({ param($s, $e)
+    if ($state.Proc -and -not $state.Proc.HasExited) {
+        $r = [Windows.MessageBox]::Show('還有工作在跑，關掉會停止它。確定要關？', '還在執行', 'YesNo')
+        if ($r -ne 'Yes') { $e.Cancel = $true; return }
+        & taskkill.exe /PID $state.Proc.Id /T /F | Out-Null
+    }
+    if ($iconJob -and -not $iconJob.Proc.HasExited) { try { $iconJob.Proc.Kill() } catch { } } })
+
+# 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
+$ui.LibraryView.Add_SizeChanged({ param($s, $e)
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 236))
+    if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Packs.Columns = $cols } })
+
+Update-ShellLabel
+Build-Library
+[void]$win.ShowDialog()
