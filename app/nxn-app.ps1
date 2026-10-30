@@ -1788,10 +1788,6 @@ function Free-Space($owner) {
                 $found += @{ Item = $x; What = "$($gd.Name) 的打包暫存" }
             }
         }
-        # 合包前每款先各自打包的 IPA：合包做好以後就用不到了
-        foreach ($x in Get-ChildItem -LiteralPath $gd.FullName -File -Filter '*-multi-*.ipa' -ErrorAction SilentlyContinue) {
-            $found += @{ Item = $x; What = "$($gd.Name) 合包用的中間檔" }
-        }
     }
     $old = (Get-Date).AddDays(-30)
     foreach ($x in Get-ChildItem -LiteralPath $logDir -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $old }) {
