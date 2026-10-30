@@ -190,6 +190,43 @@ try {
         Step "打包 $(Split-Path $GameDir -Leaf)（這一步最久，大作可能一小時以上）"
         $pyExe = (& $Python -c 'import sys; print(sys.executable)').Trim()
         $before = @(Get-ChildItem $GameDir -Filter '*.ipa' | ForEach-Object { $_.FullName })
+        # NSZ / XCZ（壓縮過的 NSP / XCI）：打包器只讀 NSP / XCI，先用 nsz -D 解壓成同名的 .nsp / .xci 放在遊戲資料夾，
+        # 原檔收進 NSZ原檔\（打包器只看第一層，留在外面它會拒絕整個資料夾）。上游 nxnative 的 decompress_nsz 也是這樣做
+        $packed = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsz|xcz)$' })
+        if ($packed.Count) {
+            Write-Host "有 $($packed.Count) 個壓縮檔（NSZ / XCZ），先解壓成 NSP / XCI（只要一次）"
+            $ErrorActionPreference = 'Continue'
+            & $pyExe -c 'import nsz' 2>$null | Out-Null
+            if ($LASTEXITCODE) {
+                Write-Host '安裝解壓工具 nsz（只要一次）'
+                & $pyExe -m pip install --disable-pip-version-check --quiet nsz 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -and $_ -ne 'System.Management.Automation.RemoteException' } | ForEach-Object { Write-Host $_ }
+            }
+            $ErrorActionPreference = 'Stop'
+            $origDir = Join-Path $GameDir 'NSZ原檔'
+            New-Item -ItemType Directory -Force -Path $origDir | Out-Null
+            foreach ($f in $packed) {
+                $dstName = [IO.Path]::GetFileNameWithoutExtension($f.Name) + $(if ($f.Extension -ieq '.xcz') { '.xci' } else { '.nsp' })
+                $dst = Join-Path $GameDir $dstName
+                if (-not (Test-Path -LiteralPath $dst)) {
+                    # nsz 讀工作資料夾裡的 keys.txt：在暫存資料夾放一份 prod.keys，解完就刪掉；解到一半失敗不會留下半個檔案
+                    $tmp = Join-Path ([IO.Path]::GetTempPath()) "switchpad-nsz-$PID"
+                    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+                    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+                    try {
+                        Copy-Item -LiteralPath $Keys -Destination (Join-Path $tmp 'keys.txt')
+                        Push-Location $tmp
+                        try { $c = RunExe $pyExe @('-c', "import sys; sys.argv[0] = 'nsz'; from nsz import main; main()", '-D', '-o', $tmp, $f.FullName) }
+                        finally { Pop-Location }
+                        $made = Join-Path $tmp $dstName
+                        if ($c -or -not (Test-Path -LiteralPath $made)) { throw "解壓 $($f.Name) 失敗（結束碼 $c）。可以自己用 nsz -D 解壓後再拖進來。" }
+                        Move-Item -LiteralPath $made -Destination $dst
+                        Write-Host "解壓好了：$dstName"
+                    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+                Move-Item -LiteralPath $f.FullName -Destination (Join-Path $origDir $f.Name) -Force
+            }
+            Write-Host "原本的壓縮檔移到 $origDir（確定打包沒問題後可以刪掉）"
+        }
         # 先看 prod.keys 打不打得開這款（只讀每個 NCA 開頭 1 KB，一秒內），太舊就現在說，不用等解包幾分鐘後才失敗
         $keyCheck = Join-Path $here 'keys_check.py'
         $keyFiles = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|nsz)$' } | ForEach-Object { $_.FullName })

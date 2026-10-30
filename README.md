@@ -23,6 +23,16 @@
 6. 把 NSP / XCI 拖進視窗新增遊戲；更新檔或 DLC 拖到遊戲卡上就會加進那款，打包時自動用最新版本。
 7. 勾選遊戲按「開始」。也可以把好幾款合成一包（「合包」分頁）。
 
+### 遊戲庫（iPad 上只放一個 App）
+
+下方選「遊戲庫」：勾哪些遊戲，iPad 上的「遊戲庫」App 裡就有哪些，取消勾選再按「開始」就拿掉。只有一款時會直接開遊戲，
+兩款以上先選遊戲。bundle ID 固定，加減遊戲都是更新同一個 App，存檔留著；遊戲資料放在 App 的 Documents，只傳新加的那款。
+
+- 每款遊戲第一次會用多遊戲殼打包成遊戲包（`<名稱>-multi-<殼版本>.ipa`，留在遊戲資料夾），之後加減遊戲只重新合成、重簽小 App。
+  「只打包」會把勾的遊戲包全部重做；加了更新檔或 DLC 的遊戲會自動重做。
+- 要有多遊戲殼（`work\multigame`）。圖示固定是 `LibraryIcon.png`。
+- 遊戲可以是 NSP、XCI、NSZ 或 XCZ；NSZ / XCZ 打包前會先自動解壓（原檔收進 `NSZ原檔\`）。
+
 ### 存檔、金鑰和空間
 
 - **iPad 存檔備份**：每次安裝前會先把 iPad 上這款的存檔備份到 `遊戲\<遊戲>\存檔備份\`（合包在 `合包\存檔備份\<合包名稱>\`），
@@ -64,6 +74,8 @@ Switch Pad 打開時會到 GitHub 問有沒有新版；有的話設定（齒輪�
 | `romfs_data.py` | 把遊戲資料直接傳進 iPad，不用整包重裝 |
 | `saves_data.py` | 備份和還原 iPad 上的存檔（經 App 的 Documents） |
 | `keys_check.py` | 打包前檢查 prod.keys 打不打得開這款（移植自 NX2Apple） |
+| `nxn_merge.py` | 把遊戲包合成遊戲庫（ns2ios-shell 的同一支，加了 `--icon`） |
+| `LibraryIcon.png` | 遊戲庫 App 的圖示 |
 | `NOTICE.txt` | 第三方程式碼與授權 |
 
 程式在 [`app/`](app)，測試在 [`tests/`](tests)（`python tests/test_keys_check.py`、`python tests/test_saves_data.py`）。改動 `app/` 推到 `main` 後，[`release.yml`](.github/workflows/release.yml) 會自動把它壓成
