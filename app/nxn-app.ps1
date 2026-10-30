@@ -883,6 +883,7 @@ function Build-Library {
     $libTids = @(Library-Tids)
     $ms = Get-MultiShell; $partId = if ($ms) { Multi-Id $ms } else { '' }
     $libTime = (Get-Item -LiteralPath (Library-Ipa) -ErrorAction SilentlyContinue).LastWriteTime
+    $newShell = if ($ms) { Shell-Changed $ms.FullName } else { $false }
     $dirs = @(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
     foreach ($d in $dirs) {
         $g = Scan-Game $d
@@ -892,7 +893,7 @@ function Build-Library {
         $pf = if ($partId) { Part-For $g $partId }
         $g | Add-Member -NotePropertyName Ready -NotePropertyValue ([bool]$pf -and $pf.Fresh) -Force
         # iPad 上的是舊的：遊戲包比上次合成的遊戲庫新（換了殼或重新轉換過），裝到 iPad 時會換掉
-        $g | Add-Member -NotePropertyName Newer -NotePropertyValue ([bool]($g.Ready -and $g.OnPad -and $libTime -and (Get-Item -LiteralPath $pf.Path).LastWriteTime -gt $libTime)) -Force
+        $g | Add-Member -NotePropertyName Newer -NotePropertyValue ([bool]($g.Ready -and $g.OnPad -and $libTime -and ($newShell -or (Get-Item -LiteralPath $pf.Path).LastWriteTime -gt $libTime))) -Force
         $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
         $card.Tag = $g
         $card.FindName('Title').Text = $g.Name
@@ -1808,6 +1809,15 @@ function Add-ToPack($p, $dirs, $mode) {
 $libName = '遊戲庫'
 $libBid = 'org.nxnative.games.library'
 function Library-Ipa { Join-Path (Join-Path $base '合包') "$libName.ipa" }
+# 遊戲庫上次是用哪個殼合成的（合成好時記在 遊戲庫.ipa.shell）；換了殼，遊戲包沒變也要重新合成，iPad 才用得到新殼
+function Shell-Changed($shell) {
+    $lib = Library-Ipa; $li = Get-Item -LiteralPath $lib -ErrorAction SilentlyContinue
+    if (-not $shell -or -not $li) { return $false }
+    $sh = Get-Item -LiteralPath $shell -ErrorAction SilentlyContinue
+    $rec = "$lib.shell"
+    if (Test-Path -LiteralPath $rec) { return ((Get-Content -LiteralPath $rec -Raw -Encoding UTF8).Trim() -ne $sh.Name) }
+    return [bool]($sh -and $sh.LastWriteTime -gt $li.LastWriteTime)   # 還沒有記錄的舊遊戲庫：殼比遊戲庫新就算換過
+}
 function Library-Tids {
     $f = Get-Item -LiteralPath (Library-Ipa) -ErrorAction SilentlyContinue
     if (-not $f) { return @() }
@@ -1916,16 +1926,22 @@ function Library-Call($lib, $fail) {
         if ((-not $bad -or $p.WasIn) -and (Test-Path -LiteralPath $p.Path)) { $use += $p } else { $skip += $p.Name }
     }
     $added = @($use | Where-Object { -not $_.WasIn })
-    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    # 遊戲包重新轉換過（比遊戲庫新）或換了殼，也要重新合成
+    $libT = (Get-Item -LiteralPath $libIpa -ErrorAction SilentlyContinue).LastWriteTime
+    $newer = @($use | Where-Object { $_.WasIn -and (-not $libT -or (Get-Item -LiteralPath $_.Path).LastWriteTime -gt $libT) })
+    $newShell = Shell-Changed $lib.Shell
+    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
     $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
-            $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' })
+            $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' }) +
+            $(if ($newShell) { '，換新殼' } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
     $tmp = "$libIpa.new"
     $icon = Join-Path $here 'LibraryIcon.png'
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
             "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
             $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
-            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; Write-Host '遊戲庫合成好了'"
+            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +
+            "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; Write-Host '遊戲庫合成好了'"
     if ($lib.Mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $libIpa) -NoPause" }
     return @{ Call = $call; Skip = $skip }
 }
