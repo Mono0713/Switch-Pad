@@ -1,0 +1,33 @@
+name: Tests
+
+# The Python helpers' tests (no device, no keys, no games: hand-made inputs only) and a parse of every PowerShell script
+# with Windows PowerShell 5.1, the one Switch Pad runs on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python helpers
+        run: |
+          python tests/test_keys_check.py -v
+          python tests/test_saves_data.py -v
+      - name: PowerShell scripts parse
+        shell: powershell
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem app -Filter *.ps1) {
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs)
+            foreach ($e in $errs) { Write-Host "$($f.Name):$($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
