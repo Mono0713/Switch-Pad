@@ -287,7 +287,7 @@ $xamlText = @'
       </StackPanel>
       <StackPanel>
         <StackPanel Orientation="Horizontal">
-          <TextBlock Text="Switch Pad" FontSize="30" FontWeight="Bold" ToolTip="勾要放進遊戲庫的遊戲，按「更新遊戲庫」；把 NSP / XCI / NSZ 拖到遊戲上加進那款，拖到空白處新增一款"/>
+          <TextBlock Text="Switch Pad" FontSize="30" FontWeight="Bold" ToolTip="按「＋ 加入」放進遊戲庫，按「放進遊戲庫」轉換，iPad 接上後按「裝到 iPad」；把 NSP / XCI / NSZ 拖到遊戲上加進那款，拖到空白處新增一款"/>
           <Border Background="#1C1C1E" CornerRadius="10" Margin="24,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
             <StackPanel Orientation="Horizontal">
               <RadioButton x:Name="TabGames" GroupName="tab" Style="{StaticResource Seg}" Content="遊戲" IsChecked="True"/>
@@ -344,8 +344,10 @@ $xamlText = @'
           <Button x:Name="Stop" Content="停止" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="Back" Content="返回" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="RenewBtn" Margin="0,0,10,0" Visibility="Collapsed"/>
-          <Button x:Name="Start" Content="套用變更" Style="{StaticResource Primary}" ToolTipService.ShowOnDisabled="True"
-                  ToolTip="把「待加入」的遊戲打包放進遊戲庫、「待移除」的拿掉，再更新 iPad 上的遊戲庫（存檔都留著）"/>
+          <Button x:Name="Start" Content="放進遊戲庫" ToolTipService.ShowOnDisabled="True"
+                  ToolTip="第一步，只在電腦上做：把加入的遊戲轉換好。不用接 iPad，一款失敗不影響其他款"/>
+          <Button x:Name="Sync" Content="裝到 iPad" Style="{StaticResource Primary}" Margin="10,0,0,0" ToolTipService.ShowOnDisabled="True"
+                  ToolTip="第二步，iPad 接著電腦時按：用轉換好的遊戲合成遊戲庫，裝到 iPad（存檔都留著）"/>
         </StackPanel>
         <StackPanel x:Name="Options" Orientation="Horizontal" VerticalAlignment="Center">
           <TextBlock x:Name="SelCount" Text="" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
@@ -404,7 +406,7 @@ if (Test-Path $appIcon) {
 }
 $ui = @{}
 foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
-               'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Options','SelCount',
+               'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Sync','Options','SelCount',
                'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel') { $ui[$n] = $win.FindName($n) }
 
 function Brush($hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
@@ -653,39 +655,43 @@ $cardXaml = @'
 $cards = @{}          # 資料夾路徑 → 卡片
 $selected = New-Object System.Collections.Generic.List[string]
 
-# 卡片四種樣子：在遊戲庫（移除）、待移除（取消）、不在（加入）、待加入（取消）
+# 卡片：在遊戲庫的按「移除」、不在的按「＋ 加入」，左上角標還要做的那一步（待轉換、待裝到 iPad、裝到 iPad 時拿掉）
 function Card-Paint($card) {
-    $want = $selected.Contains($card.Tag.Dir); $in = [bool]$card.Tag.InLib
-    $act = $card.FindName('Act'); $pend = $card.FindName('Pending')
+    $g = $card.Tag; $in = $selected.Contains($g.Dir)
+    $act = $card.FindName('Act'); $pend = $card.FindName('Pending'); $pt = $card.FindName('PendingText')
     $act.Style = $win.FindResource([Windows.Controls.Button])
-    if ($in -and $want) { $act.Content = '移除'; $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent; $card.Opacity = 1 }
-    elseif ($in) { $act.Content = '取消移除'; $pend.Visibility = 'Visible'; $pend.Background = Brush '#FF453A'; $card.FindName('PendingText').Text = '待移除'; $card.BorderBrush = Brush '#FF453A'; $card.Opacity = 0.6 }
-    elseif ($want) { $act.Content = '取消加入'; $pend.Visibility = 'Visible'; $pend.Background = Brush '#0A84FF'; $card.FindName('PendingText').Text = '待加入'; $card.BorderBrush = Brush '#0A84FF'; $card.Opacity = 1 }
-    else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary'); $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent; $card.Opacity = 1 }
-    $act.IsEnabled = -not $state.Running -and ($in -or $want -or $card.Tag.Base)
-    $act.ToolTip = if (-not $in -and -not $card.Tag.Base) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
+    $badge = if ($in -and -not $g.Ready -and -not $g.OnPad) { @('待轉換', '#0A84FF') } elseif ($in -and $g.Ready -and -not $g.OnPad) { @('待裝到 iPad', '#0A84FF') }
+             elseif (-not $in -and $g.OnPad) { @('裝到 iPad 時拿掉', '#FF453A') } else { $null }
+    if ($badge) { $pend.Visibility = 'Visible'; $pt.Text = $badge[0]; $pend.Background = Brush $badge[1]; $card.BorderBrush = Brush $badge[1] }
+    else { $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent }
+    if ($in) { $act.Content = '移除' } else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary') }
+    $act.IsEnabled = -not $state.Running -and ($in -or $g.Base -or $g.Ready)
+    $act.ToolTip = if (-not $in -and -not $g.Base -and -not $g.Ready) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
 }
+# 遊戲庫清單（電腦上的）存在設定裡；第一次用的時候從 iPad 上那份遊戲庫讀
+function Save-Want { $cfg.Want = @($selected); $cfg.WantSet = $true; Save-Settings }
 $addTo = $null      # 合包卡片選「加入遊戲」時：要加進去的那包，勾好按開始就合進它
-# 勾的遊戲就是遊戲庫裡要有的：顯示幾款，和按「更新遊戲庫」會加進、拿掉幾款
+# 底下那行：遊戲庫幾款、還有幾款要轉換、裝到 iPad 會加入和拿掉哪些
 function Update-SelCount {
-    $n = $selected.Count
     if (-not $ui.Merge.IsEnabled) {
-        $ui.SelCount.Text = '還沒有多遊戲殼，遊戲庫還不能用'; $ui.SelCount.ToolTip = $ui.Merge.ToolTip; $ui.Start.IsEnabled = $false; return
+        $ui.SelCount.Text = '還沒有多遊戲殼，遊戲庫還不能用'; $ui.SelCount.ToolTip = $ui.Merge.ToolTip; $ui.Start.IsEnabled = $false; $ui.Sync.IsEnabled = $false; return
     }
-    $before = @(Library-Tids)
-    $now = @($selected | ForEach-Object { Game-Tid $cards[$_].Tag })
-    $addN = @($cards.Values | Where-Object { -not $_.Tag.InLib -and $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag.Name })
-    $delN = @($cards.Values | Where-Object { $_.Tag.InLib -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag.Name })
-    $add = @($now | Where-Object { $_ -and $before -notcontains $_ }).Count
-    $del = @($before | Where-Object { $now -notcontains $_ }).Count
+    $mine = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
+    $conv = @($mine | Where-Object { -not $_.Ready -and $_.Base })
+    $add = @($mine | Where-Object { $_.Ready -and -not $_.OnPad } | ForEach-Object { $_.Name })
+    $del = @($cards.Values | Where-Object { $_.Tag.OnPad -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag.Name })
+    $gl = @($mine | Where-Object { $_.OnPad -and (Game-Tid $_) -and (Test-Path -LiteralPath (Join-Path $base "合包\GL著色器\$(Game-Tid $_)")) })
+    $left = @($mine | Where-Object { $_.Ready -or $_.OnPad }).Count
     $names = { param($l) (@($l | Select-Object -First 3) -join '、') + $(if ($l.Count -gt 3) { " 等 $($l.Count) 款" } else { '' }) }
-    $chg = @(); if ($add) { $chg += "加入：$(& $names $addN)" }; if ($del) { $chg += "移除：$(& $names $delN)" }
-    $ui.SelCount.Text = if (-not $n -and $del) { '遊戲庫至少要留一款' } elseif ($chg) { ($chg -join '　') + "　→ 遊戲庫 $n 款" } else { "遊戲庫 $($before.Count) 款 · 沒有要改的" }
-    $ui.SelCount.ToolTip = $null
-    # OpenGL 遊戲在 iPad 上記下的著色器要拿回來重包，沒有加減遊戲也要能按
-    $gl = @($cards.Values | Where-Object { $_.Tag.InLib -and (Game-Tid $_.Tag) -and (Test-Path -LiteralPath (Join-Path $base "合包\GL著色器\$(Game-Tid $_.Tag)")) })
-    if (-not $chg -and $gl.Count -and $n) { $ui.SelCount.Text = "遊戲庫 $($before.Count) 款 · 按「套用變更」拿回 iPad 上記下的 OpenGL 著色器" }
-    $ui.Start.IsEnabled = ($n -gt 0) -and ([bool]$chg -or [bool]$gl.Count)
+    $t = @("遊戲庫 $($mine.Count) 款")
+    if ($conv.Count) { $t += "還有 $($conv.Count) 款要轉換" }
+    $pad = @(); if ($add.Count) { $pad += "加入 $(& $names $add)" }; if ($del.Count) { $pad += "拿掉 $(& $names $del)" }
+    if ($pad.Count) { $t += "裝到 iPad 會" + ($pad -join '、') } elseif ($gl.Count) { $t += '裝到 iPad 時會拿回 OpenGL 著色器' } elseif ($left) { $t += 'iPad 已是最新' }
+    $ui.SelCount.Text = $t -join ' · '; $ui.SelCount.ToolTip = $null
+    $ui.Start.Content = if ($conv.Count) { "放進遊戲庫（轉換 $($conv.Count) 款）" } else { '放進遊戲庫' }
+    $ui.Start.IsEnabled = [bool]$conv.Count
+    $ui.Sync.IsEnabled = ($left -gt 0) -and ([bool]$pad.Count -or [bool]$gl.Count)
+    if (-not $left -and $del.Count) { $ui.SelCount.Text = '遊戲庫至少要留一款轉換好的遊戲，才能裝到 iPad' }
 }
 
 # ---------------------------------------------------------------- 右鍵選單
@@ -816,7 +822,7 @@ function Card-Action($action, $dir) {
         'savebackup'  { Run-Saves $g (Save-Ipa $g) $false }
         'saverestore' { Run-Saves $g (Save-Ipa $g) $true }
         'log'    { $l = Latest-Log $g; if ($l) { Start-Process notepad.exe "`"$($l.FullName)`"" } }
-        # 遊戲包是快取：刪掉，下次按「更新遊戲庫」就從遊戲檔重新打包這款
+        # 遊戲包是快取：刪掉，下次按「放進遊戲庫」就從遊戲檔重新轉換這款
         'repack' { $ms = Get-MultiShell; if ($ms) { Remove-Item -LiteralPath (Part-For $g (Multi-Id $ms)).Path -ErrorAction SilentlyContinue }; Build-Library }
         'cover'  {
             $dlg = New-Object Microsoft.Win32.OpenFileDialog
@@ -841,8 +847,7 @@ function Card-Action($action, $dir) {
 }
 
 function Build-Library {
-    $keep = @($selected)
-    $ui.Library.Children.Clear(); $ui.Others.Children.Clear(); $cards.Clear(); $selected.Clear()
+    $ui.Library.Children.Clear(); $ui.Others.Children.Clear(); $cards.Clear()
     $inst = @(Get-Installed)
     $libTids = @(Library-Tids)
     $ms = Get-MultiShell; $partId = if ($ms) { Multi-Id $ms } else { '' }
@@ -850,7 +855,9 @@ function Build-Library {
     foreach ($d in $dirs) {
         $g = Scan-Game $d
         if (-not $g.Base -and -not $g.Ipas.Count) { continue }   # 不是遊戲資料夾
-        $g | Add-Member -NotePropertyName InLib -NotePropertyValue ($libTids -contains (Game-Tid $g)) -Force
+        $g | Add-Member -NotePropertyName InLib -NotePropertyValue $selected.Contains($g.Dir) -Force
+        $g | Add-Member -NotePropertyName OnPad -NotePropertyValue ([bool](Game-Tid $g) -and $libTids -contains (Game-Tid $g)) -Force
+        $g | Add-Member -NotePropertyName Ready -NotePropertyValue ([bool]$partId -and (Part-For $g $partId).Fresh) -Force
         $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
         $card.Tag = $g
         $card.FindName('Title').Text = $g.Name
@@ -862,9 +869,16 @@ function Build-Library {
         $st = $card.FindName('State')
         $glRec = Join-Path $base "合包\GL著色器\$(Game-Tid $g)"
         $glN = if ((Game-Tid $g) -and (Test-Path -LiteralPath $glRec)) { @(Get-ChildItem -LiteralPath $glRec -File -ErrorAction SilentlyContinue).Count } else { -1 }
-        if ($g.InLib -and $glN -eq 0) { $st.Text = '到 iPad 上打開玩一下'; $st.Foreground = Brush '#FF9F0A'; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，接著 iPad 接著電腦按「套用變更」，就會有畫面' }
-        elseif ($libTids -contains (Game-Tid $g)) { $st.Text = '在遊戲庫' + $(if ($glN -gt 0) { " · 著色器 $glN 個" } else { '' }); $st.Foreground = Brush '#30D158' }
-        elseif ($partId -and (Part-For $g $partId).Fresh) { $st.Text = '已打包'; $st.Foreground = Brush '#8E8E93'; $st.ToolTip = '勾起來按「更新遊戲庫」就會放進去，不用再打包' }
+        $green = Brush '#30D158'; $blue = Brush '#0A84FF'; $gray = Brush '#8E8E93'; $st.ToolTip = $null
+        if ($g.InLib -and -not $g.Ready -and $addFail.ContainsKey($g.Dir)) { $st.Text = '轉換失敗：' + $addFail[$g.Dir]; $st.Foreground = Brush '#FF453A'; $st.ToolTip = "$($addFail[$g.Dir])。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響" }
+        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '到 iPad 上打開玩一下'; $st.Foreground = Brush '#FF9F0A'; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，接著 iPad 接著電腦按「裝到 iPad」，就會有畫面' }
+        elseif ($g.InLib -and $g.OnPad -and $g.Ready) { $st.Text = '在 iPad 上' + $(if ($glN -gt 0) { " · 著色器 $glN 個" } else { '' }); $st.Foreground = $green }
+        elseif ($g.InLib -and $g.OnPad) { $st.Text = '在 iPad 上 · 遊戲檔有新的，要再轉換'; $st.Foreground = Brush '#FF9F0A' }
+        elseif ($g.InLib -and $g.Ready) { $st.Text = '轉換好了，等裝到 iPad'; $st.Foreground = $blue }
+        elseif ($g.InLib) { $st.Text = '還沒轉換：按「放進遊戲庫」'; $st.Foreground = $gray }
+        elseif ($g.OnPad) { $st.Text = '還在 iPad 上，按「裝到 iPad」拿掉'; $st.Foreground = Brush '#FF453A' }
+        elseif ($addFail.ContainsKey($g.Dir)) { $st.Text = '轉換失敗：' + $addFail[$g.Dir]; $st.Foreground = Brush '#FF453A' }
+        elseif ($g.Ready) { $st.Text = '轉換過了，加入不用再等'; $st.Foreground = $gray }
         else { $st.Text = '' }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
         $sup = Support-Of $g
@@ -878,7 +892,7 @@ function Build-Library {
         $act.Add_Click({ param($s, $e)
             $c = $s.Tag; $dir = $c.Tag.Dir
             if ($selected.Contains($dir)) { [void]$selected.Remove($dir) } else { $selected.Add($dir) }
-            Card-Paint $c; Update-SelCount })
+            Save-Want; Build-Library })
         $card.Add_DragEnter({ param($s, $e) if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $s.FindName('DropHint').Visibility = 'Visible' } })
         $card.Add_DragLeave({ param($s, $e) $s.FindName('DropHint').Visibility = 'Collapsed' })
         $card.Add_Drop({ param($s, $e)
@@ -888,13 +902,12 @@ function Build-Library {
         $card.ContextMenu = New-CardMenu $g
         [void]$(if ($g.InLib) { $ui.Library } else { $ui.Others }).Children.Add($card)
         $cards[$g.Dir] = $card
-        if ($keep -contains $g.Dir) { $selected.Add($g.Dir) }
         Card-Paint $card
     }
     $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
     $ui.GamesHead.Text = "遊戲庫裡 · $nIn 款"; $ui.OutHead.Text = "還沒加入 · $nOut 款"
-    if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「套用變更」。' }
-    else { $ui.InHint.Text = 'iPad 上「遊戲庫」App 裡現在有的遊戲。按「移除」拿掉。' }
+    if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「放進遊戲庫」。' }
+    else { $ui.InHint.Text = '兩步：「放進遊戲庫」在電腦上轉換遊戲（不用接 iPad）；iPad 接上後按「裝到 iPad」。按「移除」拿掉。' }
     if (-not $nOut) {
         $t = New-Object Windows.Controls.TextBlock
         $t.Text = if ($cards.Count) { '電腦上的遊戲都在遊戲庫裡了。把 NSP / XCI / NSZ 拖進視窗新增遊戲。' } else { '把 NSP / XCI / NSZ 拖進來新增遊戲' }
@@ -957,7 +970,7 @@ function Build-Packs($inst) {
     $ipas = @(Get-ChildItem -LiteralPath $mdir -Filter '*.ipa' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
         if (-not $ipas.Count) {
         $t = New-Object Windows.Controls.TextBlock
-        $t.Text = '還沒有遊戲庫：在「還沒加入」按「＋ 加入」，再按「套用變更」'
+        $t.Text = '還沒有遊戲庫：在「還沒加入」按「＋ 加入」，按「放進遊戲庫」，再按「裝到 iPad」'
         $t.Foreground = Brush '#8E8E93'; $t.Margin = '8,40,8,0'; $t.FontSize = 16
         [void]$ui.Packs.Children.Add($t)
     }
@@ -1265,7 +1278,7 @@ function Set-Tab {
     $ui.Packs.Visibility = if ($packs) { 'Visible' } else { 'Collapsed' }
     if (-not $state.Running -and $ui.ProgressView.Visibility -ne 'Visible') {
         $ui.Options.Visibility = if ($packs) { 'Hidden' } else { 'Visible' }
-        $ui.Start.Visibility = if ($packs) { 'Collapsed' } else { 'Visible' }
+        $ui.Start.Visibility = if ($packs) { 'Collapsed' } else { 'Visible' }; $ui.Sync.Visibility = $ui.Start.Visibility
     }
 }
 
@@ -1471,6 +1484,7 @@ function Set-Step($job, $idx, $how) {
     $job.Cur = $idx
 }
 
+$addFail = @{}   # 這次開著時打包失敗的遊戲 → 原因，卡片上標紅字
 $state = @{ Queue = New-Object System.Collections.Queue; Job = $null; Proc = $null; Running = $false; Ok = 0; Fail = @(); Started = $null }
 
 function Quote($s) { "'" + ($s -replace "'", "''") + "'" }
@@ -1534,11 +1548,12 @@ function Start-Run($jobs) {
     $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
     foreach ($j in $jobs) {
         $nj = New-Job $j.Game $j.Mode $j.Ipa $j.Out $j.Shell
-        if ($j.Call) { $nj.Call = $j.Call; $nj.NeedAllOk = $true }
+        if ($j.Lib) { $nj | Add-Member -NotePropertyName Lib -NotePropertyValue $j.Lib -Force }
+        elseif ($j.Call) { $nj.Call = $j.Call; $nj.NeedAllOk = $true }
         $state.Queue.Enqueue($nj)
     }
     $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'
-    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Collapsed'; $ui.Stop.Visibility = 'Visible'
+    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Collapsed'; $ui.Stop.Visibility = 'Visible'
     $ui.Login.IsEnabled = $false; $ui.Settings.IsEnabled = $false; $ui.Refresh.IsEnabled = $false
     $ui.Busy.Visibility = 'Visible'; $ui.ProgTitle.Text = '執行中'
     Start-Next
@@ -1573,6 +1588,15 @@ function Start-Next {
         Set-Step $job 0 'fail'; $job.Msg.Text = '前面有遊戲打包失敗，這次沒有合包'; $job.Msg.Foreground = Brush '#FF453A'
         $state.Fail += $job.Game.Name
         Start-Next; return
+    }
+    if ($job.PSObject.Properties['Lib']) {
+        $lc = Library-Call $job.Lib $state.Fail
+        if (-not $lc.Call) {
+            Set-Step $job 0 'fail'; $job.Msg.Text = "沒有新的遊戲可以放進遊戲庫，這次沒有重新合成（失敗：$($lc.Skip -join '、')）"; $job.Msg.Foreground = Brush '#FF453A'
+            Start-Next; return
+        }
+        $job.Call = $lc.Call
+        if ($lc.Skip.Count) { $job.Msg.Text = "跳過 $($lc.Skip -join '、')，其他照樣放進去" }
     }
     $state.Job = $job
     $job.Log = Join-Path $logDir ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($job.Game.Name -replace '[^\w.-]', '_') + '.log')
@@ -1635,11 +1659,13 @@ $timer.Add_Tick({
         $state.Proc = $null
         if ($code -eq 0) {
             $state.Ok++
+            if ($job.Game.Dir) { $addFail.Remove($job.Game.Dir) }
             Set-Step $job $job.StepNames.Count 'done'
             $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '同步') { '著色器同步好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
         } else {
             $state.Fail += $job.Game.Name
+            if ($job.Game.Dir) { $addFail[$job.Game.Dir] = Fail-Reason $job.Log; $job.Msg.Text = $addFail[$job.Game.Dir] }
             Set-Step $job ([math]::Max($job.Cur, 0)) 'fail'
             $job.Msg.Foreground = Brush '#FF453A'
             $job.Row.FindName('Exp').IsExpanded = $true
@@ -1737,10 +1763,10 @@ function Part-For($g, $id) {
     [pscustomobject]@{ Path = $o; Fresh = [bool]($f -and (-not $newest -or $f.LastWriteTime -ge $newest.LastWriteTime)) }
 }
 function Select-Library {
-    $tids = @(Library-Tids)
     $selected.Clear()
-    foreach ($c in $cards.Values) { if ($tids -contains (Game-Tid $c.Tag)) { $selected.Add($c.Tag.Dir) }; Card-Paint $c }   # 一開始：要的就是現在有的
-    Update-SelCount
+    if ($cfg.WantSet) { foreach ($d in @($cfg.Want)) { if ($d -and $cards.ContainsKey($d)) { $selected.Add($d) } } }
+    else { $tids = @(Library-Tids); foreach ($c in $cards.Values) { if ($tids -contains (Game-Tid $c.Tag)) { $selected.Add($c.Tag.Dir) } } }   # 第一次：iPad 上那份遊戲庫有的
+    Build-Library
 }
 # mode：both = 做缺的遊戲包、合成、安裝；pack = 勾的遊戲包全部重做再合成，不安裝；install = 把現在的遊戲庫裝到 iPad
 function Library-Game { $lib = Library-Ipa; [pscustomobject]@{ Dir = (Split-Path $lib -Parent); Name = $libName; Ipas = @(Get-Item -LiteralPath $lib -ErrorAction SilentlyContinue); Base = $true; BaseFile = ''; Icon = (Join-Path $here 'LibraryIcon.png') } }
@@ -1749,7 +1775,7 @@ function Run-Migrate($owner) {
     if ($state.Running) { return }
     $have = Test-Path -LiteralPath (Library-Ipa)
     $ok = [Windows.MessageBox]::Show($owner, "把 iPad 上舊的單款 App 和合包的存檔整份存到電腦；遊戲庫已經裝在 iPad 上的話，接著放進遊戲庫裡同一款遊戲。`n`n" +
-        "換到遊戲庫的順序：`n1. 按這裡，把舊 App 的存檔存到電腦`n2. 在 iPad 上刪掉舊 App（免費 Apple ID 最多 3 個 App）`n3. 勾遊戲按「更新遊戲庫」`n4. 再按一次這裡，存檔就放進遊戲庫`n`n" +
+        "換到遊戲庫的順序：`n1. 按這裡，把舊 App 的存檔存到電腦`n2. 在 iPad 上刪掉舊 App（免費 Apple ID 最多 3 個 App）`n3. 加入遊戲，按「放進遊戲庫」再按「裝到 iPad」`n4. 再按一次這裡，存檔就放進遊戲庫`n`n" +
         "同一款在好幾個舊 App 裡，用最近玩過的那份；遊戲庫裡已經有存檔的遊戲不會被蓋掉，放進去之前也會先備份遊戲庫。`n`niPad 用 USB 接著並解鎖，遊戲先關掉。要開始嗎？", '搬舊 App 存檔', 'YesNo', 'Question')
     if ($ok -ne 'Yes') { return }
     $owner.DialogResult = $false
@@ -1778,23 +1804,58 @@ function Run-Library($dirs, $mode) {
             if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI/NSZ）。", '缺本體'); return }
             $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
         }
-        $outs += $part.Path
+        $outs += [pscustomobject]@{ Path = $part.Path; Name = $g.Name; Dir = $dir; WasIn = [bool]$g.OnPad }
     }
     New-Item -ItemType Directory -Force -Path (Split-Path $lib -Parent) | Out-Null
     $before = @(Library-Tids)
     $now = @($dirs | ForEach-Object { Game-Tid $cards[$_].Tag })
     $gone = @($cards.Values | Where-Object { $t = Game-Tid $_.Tag; $t -and $before -contains $t -and $now -notcontains $t } | ForEach-Object { $_.Tag.Name })
-    $what = "$($dirs.Count) 款" + $(if ($gone.Count) { "，拿掉 $($gone -join '、')" } else { '' })
-    $tmp = "$lib.new"
+    # 合成那一步等前面跑完才決定放哪些：打包失敗的那款先跳過，其他照樣放進去（Library-Call）
+    $jobs += @{ Game = $libGame; Mode = $(if ($mode -eq 'both') { 'merge+install' } else { 'merge' }); Ipa = ''; Call = '-';
+                Lib = [pscustomobject]@{ Parts = $outs; Gone = $gone; Mode = $mode; Shell = $ms.FullName; Merge = $mg } }
+    Start-Run $jobs
+}
+
+# 第一步「放進遊戲庫」：只把還沒轉換的遊戲各自打包成遊戲包，不合成、不用接 iPad；一款失敗其他照做
+function Run-Convert($dirs) {
+    $ms = Get-MultiShell
+    if (-not $ms) { [void][Windows.MessageBox]::Show($ui.Merge.ToolTip, $libName); return }
+    $id = Multi-Id $ms
+    $jobs = @(foreach ($dir in $dirs) { $g = $cards[$dir].Tag; @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = (Part-For $g $id).Path; Shell = $ms.FullName } })
+    Start-Run $jobs
+}
+
+# 遊戲庫合成的指令：用打包成功的遊戲包，加上本來就在遊戲庫、這次沒重包成功但舊的遊戲包還在的
+function Library-Call($lib, $fail) {
+    $libIpa = Library-Ipa
+    $use = @(); $skip = @()
+    foreach ($p in $lib.Parts) {
+        $bad = $fail -contains $p.Name
+        if ((-not $bad -or $p.WasIn) -and (Test-Path -LiteralPath $p.Path)) { $use += $p } else { $skip += $p.Name }
+    }
+    $added = @($use | Where-Object { -not $_.WasIn })
+    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
+            $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' })
+    $tmp = "$libIpa.new"
     $icon = Join-Path $here 'LibraryIcon.png'
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
-            "& $(Quote (Get-Python)) $(Quote $mg) -o $(Quote $tmp) --name $(Quote $libName) --bundle-id $libBid --shell $(Quote $ms.FullName)" +
-            $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($outs | ForEach-Object { Quote $_ }) -join ' '); " +
+            "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
+            $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
-            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $lib) -Force; Write-Host '遊戲庫合成好了'"
-    if ($mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $lib) -NoPause" }
-    $jobs += @{ Game = $libGame; Mode = $(if ($mode -eq 'both') { 'merge+install' } else { 'merge' }); Ipa = ''; Call = $call }
-    Start-Run $jobs
+            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; Write-Host '遊戲庫合成好了'"
+    if ($lib.Mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $libIpa) -NoPause" }
+    return @{ Call = $call; Skip = $skip }
+}
+
+# 打包失敗的原因：從記錄裡挑一行看得懂的
+function Fail-Reason($log) {
+    $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
+    if ($lines -match 'without type trees') { return 'Unity 舊版的著色器格式還不支援' }
+    if ($lines -match '32-bit|32 位元') { return '32 位元的遊戲，還不支援' }
+    $l = @($lines | Where-Object { $_ -match '\[RED\]|\[x\]|Error|出錯了' -and $_ -notmatch '出錯了：打包失敗' }) | Select-Object -Last 1
+    if ($l) { return ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
+    return '打包失敗'
 }
 
 # 跑選的遊戲：mode = both / pack / install；merge = 合成一包
@@ -1859,7 +1920,12 @@ $ui.TabPacks.Add_Checked({ Set-Tab })
 # 切到遊戲庫：勾選換成遊戲庫現在有的遊戲（加入合包時不換，勾的是要加的）；切回各自安裝就清掉
 $ui.Start.Add_Click({
     if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
-    Run-Library @($selected) 'both' })
+    $conv = @($selected | Where-Object { $cards.ContainsKey($_) -and -not $cards[$_].Tag.Ready -and $cards[$_].Tag.Base })
+    Run-Convert $conv })
+$ui.Sync.Add_Click({
+    if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
+    # 只放轉換好的（和本來就在 iPad 上的）；還沒轉換的等下次「放進遊戲庫」
+    Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad) }) 'both' })
 
 $ui.RenewBtn.Add_Click({ if (-not $state.Running) { Run-Library @() 'install' } })
 
@@ -1878,7 +1944,7 @@ $backTimer.Add_Tick({
 $ui.Back.Add_Click({
     $backTimer.Stop()
     $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'
-    $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
+    $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Sync.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
     Set-Tab
     Build-Library })
 $ui.Refresh.Add_Click({
@@ -2054,7 +2120,7 @@ $ui.Settings.Add_Click({
     $sw.Owner = $win
     $lib = Library-Ipa; $ms = Get-MultiShell
     $have = Test-Path -LiteralPath $lib
-    $sw.FindName('LibText').Text = $(if ($have) { "$lib（$(@(Library-Tids).Count) 款）" } else { '還沒有遊戲庫：勾遊戲按「更新遊戲庫」' }) +
+    $sw.FindName('LibText').Text = $(if ($have) { "$lib（$(@(Library-Tids).Count) 款）" } else { '還沒有遊戲庫：加入遊戲，按「放進遊戲庫」再按「裝到 iPad」' }) +
         "`n" + $(if ($ms) { "多遊戲殼 $(Multi-Id $ms)（$($ms.LastWriteTime.ToString('MM/dd'))）" } else { '還沒有多遊戲殼（放進 work\multigame）' })
     $idle = -not $state.Running
     $sw.FindName('SaveBackup').IsEnabled = $have -and $idle
