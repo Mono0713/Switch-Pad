@@ -875,7 +875,7 @@ function Build-Library {
         $g | Add-Member -NotePropertyName Order -NotePropertyValue 9 -Force
         if ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
         elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
-        elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 遊戲檔有更新，要再轉換'; $st.Foreground = $orange; $g.Order = 1 }
+        elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 要重新轉換'; $st.Foreground = $orange; $st.ToolTip = '換了新的殼或遊戲檔有更新：按「放進遊戲庫」重新轉換，iPad 上的這款先照舊能玩'; $g.Order = 1 }
         elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的 OpenGL 著色器 $glN 個" }; $g.Order = 4 }
         elseif ($g.InLib -and $g.Ready) { $st.Text = '● 等裝到 iPad'; $st.Foreground = $blue; $st.ToolTip = '轉換好了，iPad 接上後按「裝到 iPad」'; $g.Order = 2 }
         elseif ($g.InLib) { $st.Text = '● 等轉換'; $st.Foreground = $gray; $st.ToolTip = '按「放進遊戲庫」在電腦上轉換'; $g.Order = 3 }
