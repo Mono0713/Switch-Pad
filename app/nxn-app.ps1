@@ -1867,6 +1867,25 @@ function Free-Space($owner) {
             if ($curId -and $x.Name -like "*-multi-$curId.ipa") { continue }
             $found += @{ Item = $x; What = "$($gd.Name) 舊殼做的遊戲包" }
         }
+        # 一款一個 App 時打包的 IPA：現在只用遊戲庫，用不到了
+        foreach ($x in Get-ChildItem -LiteralPath $gd.FullName -File -Filter '*.ipa' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*-multi-*.ipa' }) {
+            $found += @{ Item = $x; What = '以前單款安裝的 IPA（遊戲庫用不到）' }
+        }
+    }
+    # 只用最新的多遊戲殼：其他測試殼、舊殼和它們的打包器原始碼（src-<版本>），以及換打包器時留的備份
+    $keepShell = Get-MultiShell
+    foreach ($sub in 'multigame', 'phonepads', 'dl') {
+        foreach ($x in Get-ChildItem -Path (Join-Path $work $sub) -Recurse -Filter 'shell-*.zip' -File -ErrorAction SilentlyContinue) {
+            if ($keepShell -and $x.FullName -eq $keepShell.FullName) { continue }
+            $found += @{ Item = $x; What = '用不到的舊殼' }
+        }
+        foreach ($x in Get-ChildItem -Path (Join-Path $work $sub) -Recurse -Directory -Filter 'src-*' -ErrorAction SilentlyContinue) {
+            if ($keepShell -and $x.Parent.FullName -eq $keepShell.DirectoryName -and $keepShell.Name -like "shell-*-$($x.Name.Substring(4))*") { continue }
+            $found += @{ Item = $x; What = '用不到的舊殼' }
+        }
+    }
+    foreach ($x in Get-ChildItem -LiteralPath $work -Directory -Filter 'src-*-backup*' -ErrorAction SilentlyContinue) {
+        $found += @{ Item = $x; What = '換打包器時留的備份' }
     }
     $old = (Get-Date).AddDays(-30)
     foreach ($x in Get-ChildItem -LiteralPath $logDir -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $old }) {
@@ -1877,7 +1896,7 @@ function Free-Space($owner) {
     if (-not $found.Count) { [void][Windows.MessageBox]::Show($owner, '沒有可以清的暫存檔。', '清理空間'); return }
     $total = ($found | ForEach-Object { $_.Size } | Measure-Object -Sum).Sum
     $lines = $found | Group-Object { $_.What } | ForEach-Object { '  {0}：{1:N1} GB' -f $_.Name, (($_.Group | ForEach-Object { $_.Size } | Measure-Object -Sum).Sum / 1GB) }
-    $ok = [Windows.MessageBox]::Show($owner, ("可以清出 {0:N1} GB：`n`n{1}`n`n都是之後需要時會自己重做的檔案，遊戲本體、打包好的 IPA、遊戲庫用的遊戲包和存檔備份都不會動。移到資源回收筒？" -f ($total / 1GB), ($lines -join "`n")), '清理空間', 'YesNo', 'Question')
+    $ok = [Windows.MessageBox]::Show($owner, ("可以清出 {0:N1} GB：`n`n{1}`n`n遊戲本體、遊戲庫和它用的遊戲包、存檔備份都不會動。移到資源回收筒？" -f ($total / 1GB), ($lines -join "`n")), '清理空間', 'YesNo', 'Question')
     if ($ok -ne 'Yes') { return }
     $freed = 0
     foreach ($f in $found) { if (Recycle $f.Item.FullName $f.Item.PSIsContainer) { $freed += $f.Size } }
