@@ -4,8 +4,12 @@ import datetime
 import importlib.util
 import os
 import shutil
+import sys
 import tempfile
 import unittest
+
+# saves_data.py prints Chinese; run as a script it switches stdout to UTF-8 itself, imported here it does not (cp1252 on Windows)
+sys.stdout.reconfigure(encoding='utf-8')
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
 spec = importlib.util.spec_from_file_location('saves_data', os.path.join(APP, 'saves_data.py'))
