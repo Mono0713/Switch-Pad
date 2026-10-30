@@ -1,0 +1,42 @@
+Switch Pad 用到的第三方程式碼與設計 / Third-party code and designs used by Switch Pad
+
+keys_check.py
+  prod.keys 檢查，移植自 NX2Apple 的 frontend/Sources/NSPortBuilder/KeyCheck.swift
+  Ported from NX2Apple, https://github.com/LNPANDY/NX2Apple
+
+saves_data.py
+  先備份再覆蓋的存檔轉移做法，參考 NX Play（nx-native-wrapper）的 Transfer Saves 和 NX2Apple 的 SaveTransfer.swift
+  Design follows NX Play's Transfer Saves (https://github.com/varyform/nx-native-wrapper) and NX2Apple's SaveTransfer.swift
+
+nxn-app.ps1 的「清理空間」「複製診斷資訊」
+  參考 NX Play 的 Free Up Space 和 NX2Apple 的 Copy diagnostics
+  Follow NX Play's Free Up Space and NX2Apple's Copy diagnostics
+
+殼和打包器 / The shell and the packer: nxnative, https://github.com/seedds/nxnative (MIT), through Mono0713/ns2ios-shell
+
+------------------------------------------------------------------------
+NX2Apple — MIT License
+
+Copyright (c) 2026 seedds
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------
+NX Play (nx-native-wrapper) — MIT License, Copyright (c) 2026 Oleh Khomei
+(same terms as above)

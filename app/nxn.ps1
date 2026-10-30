@@ -8,6 +8,8 @@
 #   .\nxn.ps1 "遊戲\Boomerang Fu" -PackOnly         只打包，不安裝
 #   .\nxn.ps1 "遊戲\Boomerang Fu" -Shell work\phonepads\art7\shell-....zip   用別的殼（輸出成 <資料夾>-<殼版本>.ipa）
 #   .\nxn.ps1 -Ipa "遊戲\Boomerang Fu\x.ipa"        只安裝現成的 IPA
+#   .\nxn.ps1 -Ipa "遊戲\Boomerang Fu\x.ipa" -SaveBackup                 把 iPad 上這款的存檔備份到 遊戲\Boomerang Fu\存檔備份\
+#   .\nxn.ps1 -Ipa "遊戲\Boomerang Fu\x.ipa" -SaveRestore "<備份資料夾>"   把一份備份還原回 iPad（先備份 iPad 上現在的）
 param(
     [Parameter(Position = 0)][string]$GameDir = '',
     [string]$Ipa = '',
@@ -20,11 +22,15 @@ param(
     [switch]$PackOnly,
     [switch]$Overwrite,
     [switch]$Full,                   # 整包裝（遊戲資料也放在 App 裡），不分開傳
+    [switch]$SaveBackup,             # 只備份 iPad 上的存檔（要 -Ipa）
+    [string]$SaveRestore = '',       # 只把這份存檔備份還原回 iPad（要 -Ipa）
+    [switch]$NoSaveBackup,           # 安裝前不自動備份存檔
     [switch]$NoPause
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
+$saveMode = $SaveBackup -or $SaveRestore
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
@@ -121,9 +127,10 @@ try {
     }
 
     if (-not $GameDir -and -not $Ipa) { throw '請用 -GameDir 或 -Ipa 指定要打包或安裝的東西。' }
+    if ($saveMode -and -not $Ipa) { throw '備份或還原存檔要用 -Ipa 指定是哪個 App。' }
 
     # ---- 先確認登入狀態，不然白打包一小時 ----
-    if (-not $PackOnly) {
+    if (-not $PackOnly -and -not $saveMode) {
         Step '檢查 Apple ID'
         # plumesign 的記錄寫在 stderr，Stop 模式下會被當成錯誤，所以這裡改用 Continue 收輸出
         $ErrorActionPreference = 'Continue'
@@ -183,6 +190,30 @@ try {
         Step "打包 $(Split-Path $GameDir -Leaf)（這一步最久，大作可能一小時以上）"
         $pyExe = (& $Python -c 'import sys; print(sys.executable)').Trim()
         $before = @(Get-ChildItem $GameDir -Filter '*.ipa' | ForEach-Object { $_.FullName })
+        # 先看 prod.keys 打不打得開這款（只讀每個 NCA 開頭 1 KB，一秒內），太舊就現在說，不用等解包幾分鐘後才失敗
+        $keyCheck = Join-Path $here 'keys_check.py'
+        $keyFiles = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|nsz)$' } | ForEach-Object { $_.FullName })
+        if ((Test-Path $keyCheck) -and $keyFiles.Count) {
+            $kr = $null
+            $ErrorActionPreference = 'Continue'
+            $kout = (& $pyExe -I $keyCheck $Keys @keyFiles 2>$null | Out-String).Trim()
+            $kcode = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            try { $kr = $kout | ConvertFrom-Json } catch { }
+            if ($kr) {
+                switch ($kr.result) {
+                    'fits'             { Write-Host 'prod.keys 打得開這款' }
+                    'cannot_check'     { Write-Host "prod.keys 先不檢查（$($kr.file) 要解包才看得出來）" }
+                    'too_old'          {
+                        $fw = if ($kr.firmware) { "，至少要從 $($kr.firmware) 以上的 Switch 系統匯出" } else { '' }
+                        throw "prod.keys 太舊，打不開 $($kr.file)：少了 $($kr.missing)（第 $($kr.generation) 代金鑰$fw）。`n把 Switch 更新到最新系統，用 Lockpick_RCM 重新匯出 prod.keys，再到設定的「金鑰」按「更換」。"
+                    }
+                    'wrong_header_key' { throw "這份 prod.keys 的 header_key 打不開 $($kr.file)：可能不是從 Switch 匯出的完整金鑰，請重新匯出。" }
+                    'no_header_key'    { throw "prod.keys 裡沒有 header_key，檔案不完整：$Keys" }
+                    'unreadable_keys'  { throw "讀不到 prod.keys：$Keys" }
+                }
+            } elseif ($kcode) { Warn "金鑰檢查沒跑成（結束碼 $kcode），直接打包" }
+        }
         Push-Location $srcDir
         try {
             $env:PYTHONUTF8 = '1'
@@ -238,7 +269,9 @@ try {
     if ($PackOnly) { Finish "打包完成：$Ipa" Green; return }
 
     # ---- 簽章並安裝 ----
-    Step '簽章並安裝到 iPad（iPad 要用 USB 接著並解鎖；第一次會問要不要信任這台電腦）'
+    if ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
+    elseif ($SaveBackup) { Step '備份 iPad 存檔（iPad 要用 USB 接著並解鎖）' }
+    else { Step '簽章並安裝到 iPad（iPad 要用 USB 接著並解鎖；第一次會問要不要信任這台電腦）' }
     # plumesign 的 --udid 其實要的是 Apple 行動裝置服務（usbmuxd）給這次連線的編號（1、2、3…），
     # 不是真的 UDID，所以直接問服務（127.0.0.1:27015）現在接著哪些裝置，免得 plumesign 每次都問「Select a device」
     function Get-MuxDevices {
@@ -329,6 +362,35 @@ try {
         }
         return ''
     }
+    # ---- 存檔：裝之前先把 iPad 上的備份到電腦（免費帳號過期、App 被刪掉時還救得回來），或把一份備份還原回去 ----
+    # 遊戲的備份在 <遊戲資料夾>\存檔備份\，合包的在 合包\存檔備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
+    $saveTool = Join-Path $here 'saves_data.py'
+    $ipaDir = Split-Path $Ipa -Parent
+    $saveRoot = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $ipaDir ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($Ipa)) } else { Join-Path $ipaDir '存檔備份' }
+    if ($saveMode) {
+        if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
+        $tpy = Transfer-Python
+        if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，讀不到 iPad 上的存檔。' }
+        if ($SaveRestore) {
+            if (-not (Test-Path -LiteralPath $SaveRestore)) { throw "找不到存檔備份：$SaveRestore" }
+            $c = RunExe $tpy @('-I', $saveTool, 'restore', $Ipa, $SaveRestore, $saveRoot, '--udid', $dev.Serial)
+        } else {
+            $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
+        }
+        if ($c -eq 3) { throw 'iPad 上還沒有裝這個 App。' }
+        if ($c) { throw "存檔$(if ($SaveRestore) { '還原' } else { '備份' })失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
+        Finish $(if ($SaveRestore) { '存檔還原好了，在 iPad 上打開遊戲就是這份存檔。' } else { "存檔備份在 $saveRoot" }) Green
+        return
+    }
+    if (-not $NoSaveBackup -and (Test-Path $saveTool)) {
+        Write-Host '先把 iPad 上的存檔備份到電腦'
+        $tpy = Transfer-Python
+        if ($tpy) {
+            $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
+            if ($c -and $c -ne 3) { Warn "存檔備份沒做成（結束碼 $c），照樣安裝" }
+        } else { Warn '傳檔工具裝不起來，這次沒有備份存檔' }
+    }
+
     $signIpa = $Ipa; $split = $null
     if (-not $Full -and (Test-Path $dataTool) -and $py) {
         $r = Quiet $py @('-I', $dataTool, 'info', $Ipa)

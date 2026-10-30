@@ -23,6 +23,14 @@
 6. 把 NSP / XCI 拖進視窗新增遊戲；更新檔或 DLC 拖到遊戲卡上就會加進那款，打包時自動用最新版本。
 7. 勾選遊戲按「開始」。也可以把好幾款合成一包（「合包」分頁）。
 
+### 存檔、金鑰和空間
+
+- **iPad 存檔備份**：每次安裝前會先把 iPad 上這款的存檔備份到 `遊戲\<遊戲>\存檔備份\`（合包在 `合包\存檔備份\<合包名稱>\`），
+  一樣的存檔不重複存，最多留 30 份。遊戲卡右鍵也可以「備份 iPad 存檔」「還原存檔…」；還原前會先把 iPad 上現在的存檔另外備份一份。
+- **金鑰預檢**：打包前先檢查 prod.keys 打不打得開這款（只讀檔案開頭幾 KB），太舊會馬上說缺哪一代、要從哪個系統版本匯出，不用等解包失敗。
+- **清理空間**：設定 →「清理空間…」列出可以重做的暫存檔（安裝用的小 App、打包暫存、30 天前的記錄）和大小，確認後丟資源回收筒。
+- **複製診斷資訊**：設定 →「複製診斷資訊」把版本、工具狀態和最近記錄的結尾複製起來，回報問題時貼上（不含金鑰內容、Apple ID 或遊戲檔）。
+
 ### 需要
 
 - Windows 10 / 11
@@ -54,8 +62,11 @@ Switch Pad 打開時會到 GitHub 問有沒有新版；有的話設定（齒輪�
 | `make_provisional.py` | 沒有上游設定檔的遊戲，在 Windows 上做暫定設定檔（實驗性） |
 | `nxn_merge_drop.py` | 從合包移除一款遊戲 |
 | `romfs_data.py` | 把遊戲資料直接傳進 iPad，不用整包重裝 |
+| `saves_data.py` | 備份和還原 iPad 上的存檔（經 App 的 Documents） |
+| `keys_check.py` | 打包前檢查 prod.keys 打不打得開這款（移植自 NX2Apple） |
+| `NOTICE.txt` | 第三方程式碼與授權 |
 
-程式在 [`app/`](app)。改動 `app/` 推到 `main` 後，[`release.yml`](.github/workflows/release.yml) 會自動把它壓成
+程式在 [`app/`](app)，測試在 [`tests/`](tests)（`python tests/test_keys_check.py`、`python tests/test_saves_data.py`）。改動 `app/` 推到 `main` 後，[`release.yml`](.github/workflows/release.yml) 會自動把它壓成
 `SwitchPad.zip` 發布成新的 release，大家的 Switch Pad 就會收到更新。
 
 ---
@@ -76,5 +87,9 @@ The app's interface is in Traditional Chinese.
 
 Needs Windows 10/11, the iPad connected by USB and unlocked, and **Apple Devices** (Microsoft Store) or iTunes.
 No games, keys or firmware are provided, and none of your files are ever uploaded. Only use it with games you own.
+
+Before each install it backs up the game's iPad saves to the PC (right-click a game to back up or restore them), checks
+`prod.keys` against the game before packing, and Settings can free the space of rebuildable temporary files and copy a
+diagnostics summary for bug reports.
 
 The app updates itself from this repository's releases; every push to `app/` on `main` publishes a new one.

@@ -52,7 +52,7 @@ function Move-ToAppDir {
     $appDir = Join-Path $base $appDirName
     $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'nxn[\w-]*\.ps1' })
-    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
+    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'saves_data.py', 'NOTICE.txt', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
         ForEach-Object { Get-ChildItem -LiteralPath $base -File -Filter $_ -ErrorAction SilentlyContinue }
     $dirs = @('work', '工具') | ForEach-Object { Join-Path $base $_ } | Where-Object { Test-Path -LiteralPath $_ }
     if (-not ($plain.Count + @($dirs).Count)) { return }
@@ -688,7 +688,9 @@ function New-CardMenu($g) {
     $cm.Resources.Add([Windows.Controls.Separator], $win.FindResource([Windows.Controls.Separator]))
     $hasLog = [bool](Latest-Log $g)
     Menu-Item $cm '📂  遊戲資料夾' $g.Dir 'folder'
-    Menu-Item $cm '💾  存檔資料夾' $g.Dir 'save'
+    Menu-Item $cm '💾  存檔備份資料夾' $g.Dir 'save'
+    Menu-Item $cm '⬆  備份 iPad 存檔' $g.Dir 'savebackup' (($g.Ipas.Count -gt 0) -and -not $state.Running)
+    Menu-Item $cm '⬇  還原存檔…' $g.Dir 'saverestore' ((@(Save-Backups (Join-Path $g.Dir '存檔備份')).Count -gt 0) -and ($g.Ipas.Count -gt 0) -and -not $state.Running)
     Menu-Item $cm '📄  最近的記錄' $g.Dir 'log' $hasLog
     [void]$cm.Items.Add((New-Sep))
     Menu-Item $cm '▶  打包並安裝' $g.Dir 'both' $g.Base
@@ -700,6 +702,63 @@ function New-CardMenu($g) {
     [void]$cm.Items.Add((New-Sep))
     Menu-Item $cm '🗑  刪除…' $g.Dir 'delete' (-not $state.Running)
     return $cm
+}
+# ---------------------------------------------------------------- iPad 存檔：備份、還原都由 nxn.ps1 做（saves_data.py 經 App 的 Documents 讀寫）
+# 備份在 <遊戲資料夾>\存檔備份\<時間>\，合包的在 合包\存檔備份\<合包名稱>\；每次安裝前也會自動備份一次
+function Save-Root($ipa) {
+    $d = Split-Path $ipa -Parent
+    if ((Split-Path $d -Leaf) -eq '合包') { Join-Path $d ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($ipa)) } else { Join-Path $d '存檔備份' }
+}
+function Save-Backups($root) {
+    @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{8}-\d{6}' -and $_.Name -notmatch '\.part$' } | Sort-Object Name -Descending)
+}
+# iPad 上裝的是哪個 IPA：安裝紀錄裡的那個，沒有就用資料夾裡最新的（同一款的 IPA bundle ID 都一樣）
+function Save-Ipa($g) {
+    $rec = Get-Installed | Where-Object { $_.Dir -eq $g.Dir -and (Test-Path -LiteralPath $_.Ipa) } | Select-Object -First 1
+    if ($rec) { return $rec.Ipa }
+    if ($g.Ipas.Count) { return $g.Ipas[0].FullName }
+    return ''
+}
+function Pick-Backup($title, $list) {
+    $bx = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="460" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
+        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+  <Window.Resources>__RES__</Window.Resources>
+  <StackPanel Margin="22">
+    <TextBlock Foreground="#8E8E93" TextWrapping="Wrap" Margin="0,0,0,10"
+               Text="選一份備份還原回 iPad。iPad 上現在的存檔會先另外備份一份（名稱有 before-restore），選錯也救得回來。還原前先在 iPad 上把遊戲關掉。"/>
+    <ListBox x:Name="List" Height="260" Background="#1C1C1E" Foreground="White" BorderThickness="0" Padding="4"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="Cancel" Content="取消" IsCancel="True" Margin="0,0,8,0"/>
+      <Button x:Name="Ok" Content="還原" Style="{StaticResource Primary}" IsDefault="True"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+'@
+    $bw = Load-Window $bx
+    $bw.Owner = $win; $bw.Title = $title
+    $lb = $bw.FindName('List')
+    foreach ($b in $list) {
+        $it = New-Object Windows.Controls.ListBoxItem
+        $when = [datetime]::ParseExact($b.Name.Substring(0, 15), 'yyyyMMdd-HHmmss', $null)
+        $it.Content = $when.ToString('yyyy/MM/dd HH:mm:ss') + $(if ($b.Name -match 'before-restore') { '（還原前自動備份）' } else { '' })
+        $it.Tag = $b.FullName; $it.Padding = '8,6'
+        [void]$lb.Items.Add($it)
+    }
+    $lb.SelectedIndex = 0
+    $bw.FindName('Ok').Add_Click({ if ($lb.SelectedItem) { $bw.DialogResult = $true } })
+    $lb.Add_MouseDoubleClick({ if ($lb.SelectedItem) { $bw.DialogResult = $true } })
+    if ($bw.ShowDialog() -and $lb.SelectedItem) { return $lb.SelectedItem.Tag }
+    return $null
+}
+function Run-Saves($g, $ipa, $restore) {
+    if ($state.Running -or -not $ipa) { return }
+    if (-not $restore) { Start-Run @(@{ Game = $g; Mode = 'savebackup'; Ipa = $ipa }); return }
+    $list = Save-Backups (Save-Root $ipa)
+    if (-not $list.Count) { [void][Windows.MessageBox]::Show($win, '還沒有存檔備份：先用「備份 iPad 存檔」，或安裝一次（安裝前會自動備份）。', '還原存檔'); return }
+    $pick = Pick-Backup "還原 $($g.Name) 的存檔" $list
+    if ($pick) { Start-Run @(@{ Game = $g; Mode = 'saverestore'; Ipa = $ipa; Out = $pick }) }
 }
 function Latest-Log($g) {
     $key = ($g.Name -replace '[^\w.-]', '_')
@@ -730,7 +789,9 @@ function Card-Action($action, $dir) {
     $g = $card.Tag
     switch ($action) {
         'folder' { Open-Folder $g.Dir }
-        'save'   { Open-Folder (Join-Path $g.Dir 'Save') }
+        'save'   { Open-Folder (Join-Path $g.Dir '存檔備份') }
+        'savebackup'  { Run-Saves $g (Save-Ipa $g) $false }
+        'saverestore' { Run-Saves $g (Save-Ipa $g) $true }
         'log'    { $l = Latest-Log $g; if ($l) { Start-Process notepad.exe "`"$($l.FullName)`"" } }
         'cover'  {
             $dlg = New-Object Microsoft.Win32.OpenFileDialog
@@ -891,7 +952,7 @@ function Build-Packs($inst) {
         $cm = New-Object Windows.Controls.ContextMenu
         $cm.Style = $win.FindResource([Windows.Controls.ContextMenu])
         $cm.Resources.Add([Windows.Controls.MenuItem], $win.FindResource([Windows.Controls.MenuItem]))
-        foreach ($it in @(@('🎮  看裡面的遊戲', 'show'), @('➕  加入遊戲…', 'add'), @('➖  移除遊戲…', 'show'), @('📲  安裝到 iPad', 'install'), @('✏  改名…', 'rename'), @('📂  打開資料夾', 'folder'), @('🗑  刪除…', 'delete'))) {
+        foreach ($it in @(@('🎮  看裡面的遊戲', 'show'), @('➕  加入遊戲…', 'add'), @('➖  移除遊戲…', 'show'), @('📲  安裝到 iPad', 'install'), @('⬆  備份 iPad 存檔', 'savebackup'), @('⬇  還原存檔…', 'saverestore'), @('✏  改名…', 'rename'), @('📂  打開資料夾', 'folder'), @('🗑  刪除…', 'delete'))) {
             $mi = New-Object Windows.Controls.MenuItem
             $mi.Header = Menu-Header $it[0]; $mi.Tag = @{ Pack = $p; Action = $it[1] }
             $mi.Add_Click({ param($s, $e) Pack-Action $s.Tag.Pack $s.Tag.Action })
@@ -914,6 +975,8 @@ function Pack-Action($p, $action) {
             Update-SelCount
         }
         'install' { Start-Run @(@{ Game = $p; Mode = 'install'; Ipa = $p.Ipas[0].FullName }) }
+        'savebackup'  { Run-Saves $p $p.Ipas[0].FullName $false }
+        'saverestore' { Run-Saves $p $p.Ipas[0].FullName $true }
         'folder'  { Start-Process explorer.exe "/select,`"$($p.Ipas[0].FullName)`"" }
         'delete'  {
             if ($state.Running) { return }
@@ -1353,6 +1416,7 @@ $stepDefs = @(
     @{ Name = '準備合包'; Re = 'packing the IPA' },
     @{ Name = '簽章安裝'; Re = '==> 簽章並安裝' },
     @{ Name = '傳資料';   Re = '==> 傳遊戲資料' },
+    @{ Name = '存檔';     Re = '==> (備份|還原) iPad 存檔' },
     @{ Name = '合成';     Re = '==> 合成一包' },
     @{ Name = 'Python';   Re = '==> 檢查 Python' },
     @{ Name = '套件';     Re = '==> 安裝 Python 套件' },
@@ -1389,6 +1453,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         'merge'   { @('合成') }
         'merge+install' { @('合成', '檢查帳號', '簽章安裝', '傳資料') }
         'install' { @('檢查帳號', '簽章安裝', '傳資料') }
+        { $_ -in 'savebackup', 'saverestore' } { @('存檔') }
         default   { @('檢查帳號', '解包', '轉換程式', '著色器', '打包', '簽章安裝', '傳資料') }
     }
     $pills = @()
@@ -1403,6 +1468,8 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     $a = @()
     switch ($mode) {
         'install' { $a += @('-Ipa', (Quote $ipa)) }
+        'savebackup'  { $a += @('-Ipa', (Quote $ipa), '-SaveBackup') }
+        'saverestore' { $a += @('-Ipa', (Quote $ipa), '-SaveRestore', (Quote $out)) }
         { $_ -in 'merge', 'merge+install', 'setup' } { }   # 這幾種只跑 Call；mergepart 是一般打包，要走下面
         default {
             $a += @('-GameDir', (Quote $g.Dir))
@@ -1530,7 +1597,7 @@ $timer.Add_Tick({
         if ($code -eq 0) {
             $state.Ok++
             Set-Step $job $job.StepNames.Count 'done'
-            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } else { '打包完成' }
+            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
         } else {
             $state.Fail += $job.Game.Name
@@ -1703,6 +1770,80 @@ $ui.Refresh.Add_Click({
     Get-ChildItem -Path $coverDir -Filter '*.none' -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
     Build-Library; Update-Account; Check-Updates })
 
+# ---------------------------------------------------------------- 清理空間：只清做得回來的東西（照 NX Play / NX2Apple 的 Free Up Space），一律丟資源回收筒
+# 遊戲本體、正式的 IPA、存檔備份都不碰
+function Size-Of($item) {
+    if ($item.PSIsContainer) { [long](Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
+    else { [long]$item.Length }
+}
+function Free-Space($owner) {
+    $found = @()   # @{ Item; What; Size }
+    foreach ($f in Get-ChildItem -LiteralPath (Join-Path $work 'lite') -File -Filter '*.ipa' -ErrorAction SilentlyContinue) {
+        $found += @{ Item = $f; What = '安裝用的小 App（下次安裝會重做）' }
+    }
+    foreach ($gd in Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue) {
+        # 打包器留下的工作資料夾（--keep-work 或中途停掉的），記錄 logs\ 留著
+        foreach ($pk in Get-ChildItem -LiteralPath $gd.FullName -Directory -Filter '*_pack' -ErrorAction SilentlyContinue) {
+            foreach ($x in Get-ChildItem -LiteralPath $pk.FullName -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'logs' }) {
+                $found += @{ Item = $x; What = "$($gd.Name) 的打包暫存" }
+            }
+        }
+    }
+    $old = (Get-Date).AddDays(-30)
+    foreach ($x in Get-ChildItem -LiteralPath $logDir -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $old }) {
+        $found += @{ Item = $x; What = '30 天前的記錄' }
+    }
+    foreach ($f in $found) { $f.Size = Size-Of $f.Item }
+    $found = @($found | Where-Object { $_.Size -gt 0 })
+    if (-not $found.Count) { [void][Windows.MessageBox]::Show($owner, '沒有可以清的暫存檔。', '清理空間'); return }
+    $total = ($found | ForEach-Object { $_.Size } | Measure-Object -Sum).Sum
+    $lines = $found | Group-Object { $_.What } | ForEach-Object { '  {0}：{1:N1} GB' -f $_.Name, (($_.Group | ForEach-Object { $_.Size } | Measure-Object -Sum).Sum / 1GB) }
+    $ok = [Windows.MessageBox]::Show($owner, ("可以清出 {0:N1} GB：`n`n{1}`n`n都是之後需要時會自己重做的檔案，遊戲本體、打包好的 IPA 和存檔備份都不會動。移到資源回收筒？" -f ($total / 1GB), ($lines -join "`n")), '清理空間', 'YesNo', 'Question')
+    if ($ok -ne 'Yes') { return }
+    $freed = 0
+    foreach ($f in $found) { if (Recycle $f.Item.FullName $f.Item.PSIsContainer) { $freed += $f.Size } }
+    [void][Windows.MessageBox]::Show($owner, ('清掉 {0:N1} GB（在資源回收筒，清空回收筒才會真的空出來）。' -f ($freed / 1GB)), '清理空間')
+}
+
+# ---------------------------------------------------------------- 診斷資訊：回報問題時貼上（照 NX2Apple 的 Copy diagnostics）。不含金鑰內容、Apple ID 或遊戲檔
+function Copy-Diagnostics($owner) {
+    $read = { param($f) if (Test-Path $f) { (Get-Content $f -Raw -ErrorAction SilentlyContinue).Trim() } else { '（沒有）' } }
+    $py = Get-Python
+    $pyv = '（找不到）'
+    if ($py) { try { $pyv = (& $py --version 2>&1 | Out-String).Trim() } catch { } }
+    $tpf = Join-Path $work 'python-transfer.txt'
+    $k = Find-Keys
+    $gens = if ($k) { @(Select-String -LiteralPath $k -Pattern '^\s*titlekek_([0-9a-fA-F]{2})\s*=' -ErrorAction SilentlyContinue | ForEach-Object { [Convert]::ToInt32($_.Matches[0].Groups[1].Value, 16) }) } else { @() }
+    $sh = Current-Shell
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $apple = @(Get-Service -Name 'Apple Mobile Device Service', 'AppleMobileDeviceService' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Status)" })
+    if (-not $apple.Count -and (Get-AppxPackage -Name 'AppleInc.AppleDevices' -ErrorAction SilentlyContinue)) { $apple = @('Apple Devices（Microsoft Store）') }
+    $last = Get-ChildItem -LiteralPath $logDir -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $tail = if ($last) { (Get-Content -LiteralPath $last.FullName -Tail 40 -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+    # 記錄裡可能有 email：遮掉
+    $tail = $tail -replace '[\w.+-]+@[\w-]+(\.[\w-]+)+', '<email>'
+    $text = @(
+        '=== Switch Pad 診斷資訊 ==='
+        "Switch Pad：$(& $read (Join-Path $work 'app-version.txt'))"
+        "殼和打包器：$(& $read (Join-Path $work 'release.txt'))"
+        "使用中的殼：$(if ($sh) { $sh.Label } else { '（沒有）' })"
+        "Windows：$(if ($os) { "$($os.Caption) $($os.Version)" } else { [Environment]::OSVersion.VersionString })"
+        "PowerShell：$($PSVersionTable.PSVersion)"
+        "Python（打包）：$pyv"
+        "Python（傳檔）：$(& $read $tpf)"
+        "plumesign：$(if (Test-Path $plume) { '有' } else { '沒有' })"
+        "Apple 裝置服務：$(if ($apple.Count) { $apple -join ', ' } else { '找不到' })"
+        "prod.keys：$(if ($k) { "有，最新到第 $(if ($gens) { [int]($gens | Measure-Object -Maximum).Maximum + 1 } else { '?' }) 代" } else { '找不到' })"
+        "遊戲數：$(@(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue).Count)"
+        "缺的工具：$(if (@(Setup-Missing).Count) { @(Setup-Missing) -join '、' } else { '無' })"
+        ''
+        "=== 最近的記錄（$(if ($last) { $last.Name } else { '沒有' })，最後 40 行）==="
+        $tail
+    ) -join "`r`n"
+    [Windows.Clipboard]::SetText($text)
+    [void][Windows.MessageBox]::Show($owner, '診斷資訊複製好了，貼到 GitHub issue 或訊息裡就可以。裡面沒有金鑰內容、Apple ID 或遊戲檔。', '複製診斷資訊')
+}
+
 # ---------------------------------------------------------------- 設定視窗
 $ui.Settings.Add_Click({
     $sx = @'
@@ -1753,6 +1894,8 @@ $ui.Settings.Add_Click({
       <WrapPanel>
         <Button x:Name="OpenGames" Content="打開遊戲資料夾" Margin="0,0,8,8"/>
         <Button x:Name="OpenLogs" Content="打開記錄資料夾" Margin="0,0,8,8"/>
+        <Button x:Name="FreeSpace" Content="清理空間…" Margin="0,0,8,8"/>
+        <Button x:Name="Diag" Content="複製診斷資訊" Margin="0,0,8,8"/>
         <Button x:Name="OldGui" Content="舊版簡易視窗" Margin="0,0,8,8"/>
       </WrapPanel>
     </Border>
@@ -1789,6 +1932,9 @@ $ui.Settings.Add_Click({
     })
     $sw.FindName('OpenGames').Add_Click({ Start-Process explorer.exe "`"$gamesDir`"" })
     $sw.FindName('OpenLogs').Add_Click({ Start-Process explorer.exe "`"$logDir`"" })
+    $sw.FindName('FreeSpace').IsEnabled = -not $state.Running
+    $sw.FindName('FreeSpace').Add_Click({ Free-Space $sw })
+    $sw.FindName('Diag').Add_Click({ Copy-Diagnostics $sw })
     if ($here -ne $base -or -not (Test-Path (Join-Path $here 'nxn-gui.ps1'))) { $sw.FindName('OldGui').Visibility = 'Collapsed' }   # 舊版視窗只認得最上層的 遊戲\
     $sw.FindName('OldGui').Add_Click({ Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $here 'nxn-gui.ps1')`"") })
     $upd = Update-Available
