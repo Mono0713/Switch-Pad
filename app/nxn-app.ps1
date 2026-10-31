@@ -400,20 +400,19 @@ if (Test-Path $appIcon) {
         $fs = [IO.File]::OpenRead($appIcon)
         try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create($fs, 'None', 'OnLoad') } finally { $fs.Dispose() }
     } catch { }
-    # 桌面捷徑指向 Switch Pad.exe；舊版建的是 PowerShell 開 nxn-app.ps1 的捷徑，換掉
+    # 不自己建桌面捷徑（使用者不要）；只把舊版建的「PowerShell 開 nxn-app.ps1」捷徑改指向 Switch Pad.exe
     try {
         $exe = Join-Path $base 'Switch Pad.exe'
         $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Switch Pad.lnk'
-        $wsh = New-Object -ComObject WScript.Shell
-        $lnk = $wsh.CreateShortcut($lnkPath)
-        if ((Test-Path -LiteralPath $exe) -and (-not (Test-Path -LiteralPath $lnkPath) -or $lnk.Arguments -like '*nxn-app.ps1*')) {
-            $lnk.TargetPath = $exe
-            $lnk.Arguments = ''
-            $lnk.WorkingDirectory = $base
-            $lnk.IconLocation = "$exe,0"
-            $lnk.WindowStyle = 1
-            $lnk.Description = 'Switch Pad'
-            $lnk.Save()
+        if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $lnkPath)) {
+            $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
+            if ($lnk.Arguments -like '*nxn-app.ps1*') {
+                $lnk.TargetPath = $exe
+                $lnk.Arguments = ''
+                $lnk.WorkingDirectory = $base
+                $lnk.IconLocation = "$exe,0"
+                $lnk.Save()
+            }
         }
     } catch { }
 }
@@ -1597,7 +1596,8 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     $row = [Windows.Markup.XamlReader]::Parse($jobXaml)
     $row.FindName('Title').Text = $g.Name
     Paint-Icon $row.FindName('Icon') $row.FindName('Letter') $g (Cover-For $g)
-    $names = switch ($mode) {
+    # @(...)：只有一個步驟時 switch 會把陣列攤成一個字串，$names[0] 就只剩第一個字（「同步」變「同」）
+    $names = @(switch ($mode) {
         'setup'   { @('Python', '套件', '打包器', '簽章工具', 'Switch Pad') }
         'pack'    { @('解包', '轉換程式', '著色器', '打包') }
         { $_ -in 'mergepart', 'mergepart-reuse' } { @('解包', '轉換程式', '著色器', '準備合包') }
@@ -1608,7 +1608,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         { $_ -in 'savebackup', 'saverestore', 'savemigrate' } { @('存檔') }
         'pulllogs' { @('記錄') }
         default   { @('檢查帳號', '解包', '轉換程式', '著色器', '打包', '簽章安裝', '傳資料') }
-    }
+    })
     $pills = @()
     foreach ($n in $names) {
         $p = New-Object Windows.Controls.Border
