@@ -193,13 +193,16 @@ try {
         $nx = Get-ChildItem (Join-Path $root 'tools') -Recurse -Filter 'nx_extract.exe' | Select-Object -First 1
         if (-not $nx) { throw "在 $root\tools 找不到 nx_extract.exe，請先在 Switch Pad 按「安裝」。" }
 
-        # OpenGL 遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
+        # OpenGL 遊戲、執行時才編譯著色器的遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
         $glArg = @(); $glDir = $null
         $tidGuess = Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Name -match '\[(01[0-9A-Fa-f]{11}000)\]' } | Sort-Object Length -Descending | Select-Object -First 1
         if ($tidGuess -and $tidGuess.Name -match '\[(01[0-9A-Fa-f]{11}000)\]') {
             $glDir = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
             $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
+            # 執行時才用 GLSLC 編譯著色器的 NVN 遊戲（Unrailed 2）記下的是 <hash>.glslc，放在同一個資料夾
+            $glslcN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.glslc$' }).Count
             if ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
+            elseif ($glslcN) { $glArg = @('--glslc-capture', $glDir); Write-Host "執行時編譯的著色器：用 iPad 上記下的 $glslcN 個" }
         }
         if ($ReuseIfFresh -and $Out -and (Test-Path -LiteralPath $Out)) {
             $part = Get-Item -LiteralPath $Out

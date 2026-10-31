@@ -20,10 +20,11 @@ Checkpoint's export, which are the same plain tree the shell keeps) as that game
 ID> in the library or a package, which must have that game (exit 5 when it does not). The app's saves are backed up first, as
 restore does, and only that one game's folder (and its .work / .new) is replaced.
 
-glsync is for OpenGL games whose shaders exist only while they run (Roof Rage): their package records each GLSL shader the
-game compiles to Documents/<DM_GL_CAPTURE> (gl_capture/<title ID>, set in the game's dm/env.txt). It makes those folders on
+glsync is for games whose shaders exist only while they run: an OpenGL game (Roof Rage) records each GLSL shader it
+compiles to Documents/<DM_GL_CAPTURE>, an NVN game compiling GLSL with GLSLC (Unrailed 2) each output to <DM_GLSLC_CAPTURE> (gl_capture/<title ID>
+or glslc_capture/<title ID>, set in the game's dm/env.txt). It makes those folders on
 the iPad (the host only writes files into one that exists) and copies what was recorded to <shaders folder>/<title ID>/,
-which the next pack of that game takes with --gl-capture.
+which the next pack of that game takes with --gl-capture (or --glslc-capture).
 
 logs copies the app's own logs (Documents/log.txt, log.prev.txt and the other top-level .txt / .log files) to
 <logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
@@ -365,7 +366,9 @@ async def migrate_on_device(a):
 
 
 def gl_games(ipa):
-    """{title ID: Documents-relative folder} of the games in a package that record their GLSL (DM_GL_CAPTURE in dm/env.txt)."""
+    """{title ID: Documents-relative folder} of the games in a package that record their shaders on the iPad: the GLSL an OpenGL
+    game compiles (DM_GL_CAPTURE in dm/env.txt, Roof Rage) or the GLSLC outputs an NVN game compiles at run time
+    (DM_GLSLC_CAPTURE, Unrailed 2). A game has one or the other, so both go to the same <shaders folder>/<title ID>."""
     out = {}
     with zipfile.ZipFile(ipa) as z:
         for n in z.namelist():
@@ -373,8 +376,11 @@ def gl_games(ipa):
             if not m: continue
             for line in z.read(n).decode('utf-8', 'replace').splitlines():
                 k, _, v = line.partition('=')
-                if k.strip() == 'DM_GL_CAPTURE' and v.strip() and not v.strip().startswith('/'): out[m.group(1).upper()] = v.strip()
+                if k.strip() in ('DM_GL_CAPTURE', 'DM_GLSLC_CAPTURE') and v.strip() and not v.strip().startswith('/'): out[m.group(1).upper()] = v.strip()
     return out
+
+
+SHADER_FILE = re.compile(r'[0-9a-f]{16}\.(vert|frag|glslc)')   # what the host writes: <key>.vert / .frag (hle_gl.m), <hash>.glslc (hle_glslc.c)
 
 
 async def gl_sync(afc, games, root):
@@ -388,12 +394,12 @@ async def gl_sync(afc, games, root):
         os.makedirs(dest, exist_ok=True)
         new = 0
         for name in await afc.listdir(d):
-            if not re.fullmatch(r'[0-9a-f]{16}\.(vert|frag)', name) or os.path.isfile(os.path.join(dest, name)): continue
+            if not SHADER_FILE.fullmatch(name) or os.path.isfile(os.path.join(dest, name)): continue
             with open(os.path.join(dest, name), 'wb') as f: f.write(await afc.get_file_contents(d + '/' + name))
             new += 1
-        totals[tid] = len([n for n in os.listdir(dest) if re.fullmatch(r'[0-9a-f]{16}\.(vert|frag)', n)])
-        print('%s：OpenGL 著色器 %d 個（這次新拿回 %d 個）' % (tid, totals[tid], new) if totals[tid]
-              else '%s：還沒記下 OpenGL 著色器，在 iPad 上打開這款玩一下' % tid)
+        totals[tid] = len([n for n in os.listdir(dest) if SHADER_FILE.fullmatch(n)])
+        print('%s：iPad 記下的著色器 %d 個（這次新拿回 %d 個）' % (tid, totals[tid], new) if totals[tid]
+              else '%s：還沒記下著色器，在 iPad 上打開這款玩一下' % tid)
     return totals
 
 
