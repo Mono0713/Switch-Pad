@@ -361,6 +361,7 @@ $xamlText = @'
     <Border Grid.Row="3" Background="#1C1C1E" CornerRadius="18,18,0,0" Padding="22,14" Margin="-28,0,-28,0">
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <Button x:Name="ShowProg" Content="查看進度" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="Stop" Content="停止" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="Back" Content="返回" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="RenewBtn" Margin="0,0,10,0" Visibility="Collapsed"/>
@@ -427,7 +428,7 @@ if (Test-Path $appIcon) {
 $ui = @{}
 foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
                'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Sync','Options','SelCount',
-               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub') { $ui[$n] = $win.FindName($n) }
+               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg') { $ui[$n] = $win.FindName($n) }
 
 function Brush($hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
 function Esc($s) { [Security.SecurityElement]::Escape([string]$s) }
@@ -714,7 +715,7 @@ function Card-Paint($card) {
     $act.Style = $win.FindResource([Windows.Controls.Button])
     $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent   # 狀態只看卡片上那一行「●」
     if ($in) { $act.Content = '移除' } else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary') }
-    $act.IsEnabled = -not $state.Running -and ($in -or $g.Base -or $g.Ready)
+    $act.IsEnabled = [bool]($in -or $g.Base -or $g.Ready)
     $act.ToolTip = if (-not $in -and -not $g.Base -and -not $g.Ready) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
 }
 # 遊戲庫清單（電腦上的）存在設定裡；第一次用的時候從 iPad 上那份遊戲庫讀
@@ -745,6 +746,16 @@ function Update-SelCount {
     $n = $add.Count + $del.Count + $upd.Count
     $ui.Sync.Content = if ($n) { "裝到 iPad（$n 款）" } else { '裝到 iPad' }
     if (-not $left -and $del.Count) { $ui.SelCount.Text = '遊戲庫至少要留一款轉換好的遊戲，才能裝到 iPad' }
+    if ($state.Running) {
+        # 轉換中：還沒排進去的可以再排；裝到 iPad 要等隊伍跑完（合成要用到正在轉的遊戲包）
+        $busy = @(Busy-Dirs)
+        $more = @($conv | Where-Object { $busy -notcontains $_.Dir })
+        $ui.Start.Content = if ($more.Count) { "放進遊戲庫（排入 $($more.Count) 款）" } else { '放進遊戲庫' }
+        $ui.Start.IsEnabled = [bool]$more.Count
+        $ui.Sync.IsEnabled = $false
+        $ui.SelSub.Text = "還有 $($busy.Count) 款在轉換或排隊，跑完才能裝到 iPad"; $ui.SelSub.Visibility = 'Visible'
+        $ui.ShowProg.Content = "查看進度（$($busy.Count)）"
+    }
 }
 
 # ---------------------------------------------------------------- 右鍵選單
@@ -948,7 +959,9 @@ function Build-Library {
         $preWarn = @($pre | Where-Object { $_.level -eq 'warn' } | ForEach-Object { $_.text })
         if (-not $why -and $preBad.Count -and -not $g.Ready) { $why = $preBad -join '；' }
         $g | Add-Member -NotePropertyName Order -NotePropertyValue 9 -Force
-        if ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
+        if ($state.Job -and $state.Job.Game.Dir -eq $g.Dir) { $st.Text = '● 轉換中'; $st.Foreground = $blue; $g.Order = 0 }
+        elseif ($state.Running -and @(Busy-Dirs) -contains $g.Dir) { $st.Text = '● 排隊中'; $st.Foreground = $gray; $g.Order = 0 }
+        elseif ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
         elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
         elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 要重新轉換'; $st.Foreground = $orange; $st.ToolTip = '換了新的殼或遊戲檔有更新：按「放進遊戲庫」重新轉換，iPad 上的這款先照舊能玩'; $g.Order = 1 }
         elseif ($g.InLib -and $g.Newer) { $st.Text = '● 等更新到 iPad'; $st.Foreground = $blue; $st.ToolTip = 'iPad 上的是舊的版本（換了殼或重新轉換過），按「裝到 iPad」換成新的，存檔都留著'; $g.Order = 2 }
@@ -1656,18 +1669,34 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     return $job
 }
 
-function Start-Run($jobs) {
-    if (-not $jobs.Count) { return }
-    $ui.Jobs.Children.Clear()
-    $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
+# 正在做和排隊中的遊戲資料夾
+function Busy-Dirs { @(@($(if ($state.Job) { $state.Job.Game.Dir })) + @($state.Queue | ForEach-Object { $_.Game.Dir }) | Where-Object { $_ }) }
+function Add-Jobs($jobs) {
     foreach ($j in $jobs) {
         $nj = New-Job $j.Game $j.Mode $j.Ipa $j.Out $j.Shell
         if ($j.Lib) { $nj | Add-Member -NotePropertyName Lib -NotePropertyValue $j.Lib -Force }
         elseif ($j.Call) { $nj.Call = $j.Call; $nj.NeedAllOk = $true }
         $state.Queue.Enqueue($nj)
     }
-    $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'
-    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Collapsed'; $ui.Stop.Visibility = 'Visible'
+}
+function Show-Progress {
+    $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'
+    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'
+    $ui.Stop.Visibility = 'Visible'; $ui.Back.Content = '回遊戲庫'; $ui.Back.Visibility = 'Visible'
+}
+function Start-Run($jobs) {
+    if (-not $jobs.Count) { return }
+    if ($state.Running) {
+        # 跑到一半又按「放進遊戲庫」：排到隊伍後面（已經在排或正在做的同一款不重複），留在遊戲庫畫面
+        $busy = @(Busy-Dirs)
+        Add-Jobs @($jobs | Where-Object { -not ($_.Game.Dir -and $busy -contains $_.Game.Dir) })
+        Build-Library
+        return
+    }
+    $ui.Jobs.Children.Clear()
+    $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
+    Add-Jobs $jobs
+    Show-Progress
     $ui.Login.IsEnabled = $false; $ui.Settings.IsEnabled = $false; $ui.Refresh.IsEnabled = $false
     $ui.Busy.Visibility = 'Visible'; $ui.ProgTitle.Text = '執行中'
     Start-Next
@@ -1678,7 +1707,8 @@ function Start-Next {
         $state.Running = $false; $state.Job = $null
         $ui.Busy.Visibility = 'Collapsed'
         $ui.ProgTitle.Text = if ($state.Fail.Count) { "完成 $($state.Ok) 款，失敗：$($state.Fail -join '、')" } else { "全部完成（$($state.Ok) 款）" }
-        $ui.Stop.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Visible'
+        $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'; $ui.Back.Content = '返回'
+        $ui.Back.Visibility = if ($ui.ProgressView.Visibility -eq 'Visible') { 'Visible' } else { 'Collapsed' }
         $ui.Login.IsEnabled = $true; $ui.Settings.IsEnabled = $true; $ui.Refresh.IsEnabled = $true
         # 安裝或更新完：Switch Pad 自己換了新版就重開，不然重新讀殼、支援清單和帳號
         $flag = Join-Path $work 'app-restart.flag'
@@ -1688,6 +1718,8 @@ function Start-Next {
             $win.Close(); return
         }
         Load-Supported; Update-ShellLabel; Update-Account
+        # 跑的時候回到遊戲庫在看：直接更新卡片，不用跳回進度頁
+        if ($ui.ProgressView.Visibility -ne 'Visible') { Build-Library; return }
         # 全部成功就倒數幾秒自動回遊戲庫；有失敗的留在這頁讓你看記錄
         if (-not $state.Fail.Count) {
             $state.BackIn = 5; $state.DoneTitle = $ui.ProgTitle.Text
@@ -2102,8 +2134,11 @@ $ui.Back.Add_Click({
     $backTimer.Stop()
     $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'
     $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Sync.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
+    # 還在跑：回遊戲庫看、加遊戲排隊，「查看進度」回來
+    if ($state.Running) { $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Visible' }
     Set-Tab
     Build-Library })
+$ui.ShowProg.Add_Click({ Show-Progress })
 $ui.Refresh.Add_Click({
     # 之前讀不到圖示的再試一次（例如後來才放了 prod.keys）
     Get-ChildItem -Path $coverDir -Filter '*.none' -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
