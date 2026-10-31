@@ -11,8 +11,14 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py backup  <ipa> <backups folder> [--udid UDID] [--keep N] [--tag TEXT]
   saves_data.py restore <ipa> <one backup folder> <backups folder> [--udid UDID]
   saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
+  saves_data.py put     <ipa> <save folder> <backups folder> [--tid TITLEID] [--udid UDID]
   saves_data.py logs    <ipa> <logs folder> [--udid UDID]
   saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
+
+put places one game's save from the PC (what Switch Pad takes when a save is dropped on a game card: an emulator's, JKSV's or
+Checkpoint's export, which are the same plain tree the shell keeps) as that game's save: save/ in a one-game app, save/<title
+ID> in the library or a package, which must have that game (exit 5 when it does not). The app's saves are backed up first, as
+restore does, and only that one game's folder (and its .work / .new) is replaced.
 
 glsync is for OpenGL games whose shaders exist only while they run (Roof Rage): their package records each GLSL shader the
 game compiles to Documents/<DM_GL_CAPTURE> (gl_capture/<title ID>, set in the game's dm/env.txt). It makes those folders on
@@ -50,6 +56,7 @@ import zipfile
 FOLDERS = ('save', 'save_device')
 DIGEST = '.digest'
 NOT_INSTALLED = 3
+NOT_IN_APP = 5
 
 
 def skipped(name):
@@ -173,6 +180,39 @@ async def restore(afc, src, root, now=None):
     n = 0
     for f in have: n += await push_tree(afc, os.path.join(src, f), base + '/' + f)
     print('存檔還原好了：%s（%d 個檔案）' % (os.path.basename(os.path.normpath(src)), n))
+
+
+def save_dest(ipa, tid):
+    """Where a game's save lives in the app's Documents: 'save' in a one-game app, 'save/<title ID as the package names it>' in a
+    package, or None when the package does not have that game."""
+    with zipfile.ZipFile(ipa) as z:
+        folders = sorted({m.group(1) for n in z.namelist() for m in [re.match(r'Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/', n)] if m})
+    if not folders: return 'save'
+    hit = next((f for f in folders if f.upper() == (tid or '').upper()), None)
+    return 'save/' + hit if hit else None
+
+
+def local_files(folder):
+    return sorted(os.path.relpath(os.path.join(r, f), folder).replace(os.sep, '/') for r, _, fs in os.walk(folder) for f in fs)
+
+
+async def put(afc, src, root, dest, now=None):
+    """Replace the save folder dest (relative to Documents) with the PC folder src, after backing up the app's saves."""
+    files = local_files(src)
+    if not files: raise SystemExit('這個資料夾裡沒有檔案：%s' % src)
+    await backup(afc, root, keep=0, tag='before-import', now=now)
+    base = await docs_base(afc)
+    p = base + '/' + dest
+    for leftover in (p, p + '.work', p + '.new'):
+        if await afc.exists(leftover): await afc.rm(leftover, force=True)
+    n = await push_tree(afc, src, p)
+    # read the sizes back: a save cut short is worse than none
+    bad = []
+    for rel in files:
+        st = await afc.stat(p + '/' + rel)
+        if 'st_size' in st and int(st['st_size']) != os.path.getsize(os.path.join(src, *rel.split('/'))): bad.append(rel)
+    if bad: raise SystemExit('這些檔案沒有完整傳到：%s' % '、'.join(bad[:5]))
+    print('存檔放進 iPad 了：%d 個檔案 → %s' % (n, dest))
 
 
 SINGLE = re.compile(r'org\.nxnative\.([0-9a-fA-F]{16})(?:\.|$)')
@@ -428,6 +468,7 @@ def main():
     p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
     p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
     p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root')
+    p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default='')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
     try: import pymobiledevice3  # noqa: F401
@@ -438,6 +479,12 @@ def main():
         if not games: return 0
         work = lambda afc: gl_sync(afc, games, a.root)
     elif a.cmd == 'logs': work = lambda afc: pull_logs(afc, a.root)
+    elif a.cmd == 'put':
+        dest = save_dest(a.ipa, a.tid)
+        if not dest:
+            print('這個 App 裡沒有 %s 這款' % (a.tid or '這'))
+            return NOT_IN_APP
+        work = lambda afc: put(afc, a.src, a.root, dest)
     elif a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
     else: work = lambda afc: restore(afc, a.src, a.root)
     return asyncio.run(on_device(a, work))

@@ -567,11 +567,36 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         $map | ConvertTo-Json -Depth 3 | Set-Content $db -Encoding UTF8
     } catch { Warn "記錄安裝紀錄失敗：$($_.Exception.Message)" }
 
+    # 拖到遊戲卡的存檔（模擬器、JKSV、Checkpoint 匯出的）：在 <遊戲資料夾>\存檔待傳\，title ID 在 存檔待傳.txt。
+    # 裝好後放進 iPad 上那款的存檔（saves_data.py put：先備份 App 的存檔，只換那一款），放好的搬到 存檔備份\已匯入\<時間>，
+    # 之後重簽或更新不會再蓋一次。遊戲庫和合包：遊戲\ 裡每款有待傳的都試，不在這個 App 裡的跳過。沒放成功不算安裝失敗，待傳的留著下次再試。
+    $saveNote = ''
+    $gameDirs = if ((Split-Path $ipaDir -Leaf) -eq '合包') { @(Get-ChildItem -LiteralPath (Join-Path $base '遊戲') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) } else { @($ipaDir) }
+    $pending = @($gameDirs | Where-Object { Test-Path -LiteralPath (Join-Path $_ '存檔待傳') })
+    if ($pending.Count -and (Test-Path $saveTool)) {
+        $tpy = Transfer-Python
+        if (-not $tpy) { $saveNote = '待傳的存檔這次沒放進 iPad：傳檔工具裝不起來' }
+        foreach ($gd in $(if ($tpy) { $pending } else { @() })) {
+            $tidFile = Join-Path $gd '存檔待傳.txt'
+            $tid = if (Test-Path -LiteralPath $tidFile) { (Get-Content -LiteralPath $tidFile -Raw).Trim() } else { '' }
+            Step "把存檔放進 iPad：$(Split-Path $gd -Leaf)"
+            $c = RunExe $tpy @('-I', $saveTool, 'put', $Ipa, (Join-Path $gd '存檔待傳'), $saveRoot, '--tid', $tid, '--udid', $dev.Serial)
+            if ($c -eq 5) { Write-Host '這個 App 裡沒有這款，跳過'; continue }
+            if ($c) { Warn "存檔沒放進去（結束碼 $c），待傳的還留著，下次裝到 iPad 會再試"; $saveNote = '有存檔沒放進 iPad，看上面的記錄'; continue }
+            $done = Join-Path $gd ('存檔備份\已匯入\' + (Get-Date).ToString('yyyyMMdd-HHmmss'))
+            New-Item -ItemType Directory -Force -Path (Split-Path $done -Parent) | Out-Null
+            Move-Item -LiteralPath (Join-Path $gd '存檔待傳') -Destination $done
+            Remove-Item -LiteralPath $tidFile -ErrorAction SilentlyContinue
+            Ok "存檔放好了（電腦上的這份移到 $done）"
+        }
+    }
+
     # OpenGL 遊戲：先在 iPad 上建好記錄著色器的資料夾（殼只寫進已經有的資料夾），順便拿回上次記下的
     if (Test-Path $saveTool) {
         $tpy = Transfer-Python
         if ($tpy) { $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial) }
     }
+    if ($saveNote) { Warn $saveNote }
     Finish "裝好了：$Ipa 已經在 iPad 上，可以直接開。（免費帳號 7 天後要重簽）" Green
 } catch {
     Finish "出錯了：$($_.Exception.Message)" Red

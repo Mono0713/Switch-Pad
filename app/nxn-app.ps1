@@ -699,7 +699,7 @@ $cardXaml = @'
       <TextBlock Text="✓" Foreground="White" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
     <Border x:Name="DropHint" CornerRadius="17" Background="#D90A84FF" Visibility="Collapsed">
-      <TextBlock Text="放開就加進這款" Foreground="White" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      <TextBlock Text="放開就加進這款（遊戲檔或存檔）" Foreground="White" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
   </Grid>
 </Border>
@@ -782,6 +782,7 @@ function Fill-CardMenu($cm, $g) {
     $ms = Get-MultiShell
     Menu-Item $cm '📂  遊戲資料夾' $g.Dir 'folder'
     Menu-Item $cm '📄  最近的記錄' $g.Dir 'log' $hasLog
+    if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) { Menu-Item $cm '↩  取消待傳的存檔' $g.Dir 'unsave' }
     Menu-Item $cm '🔁  下次更新時重新打包' $g.Dir 'repack' ($ms -and (Test-Path -LiteralPath (Part-For $g (Multi-Id $ms)).Path) -and -not $state.Running)
     [void]$cm.Items.Add((New-Sep))
     Menu-Item $cm '🖼  換圖示…' $g.Dir 'cover'
@@ -876,6 +877,11 @@ function Card-Action($action, $dir) {
     switch ($action) {
         'folder' { Open-Folder $g.Dir }
         'save'   { Open-Folder (Join-Path $g.Dir '存檔備份') }
+        'unsave' {
+            $ok = [Windows.MessageBox]::Show($win, "不把拖進來的存檔放進 iPad 了？`n`n那份存檔會移到資源回收筒，iPad 上的存檔不會動。", '取消待傳的存檔', 'YesNo', 'Question')
+            if ($ok -ne 'Yes') { return }
+            if (Recycle (Join-Path $g.Dir '存檔待傳') $true) { Remove-Item -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue; Build-Library }
+        }
         'savebackup'  { Run-Saves $g (Save-Ipa $g) $false }
         'saverestore' { Run-Saves $g (Save-Ipa $g) $true }
         'log'    { $l = Latest-Log $g; if ($l) { Start-Process notepad.exe "`"$($l.FullName)`"" } }
@@ -959,6 +965,10 @@ function Build-Library {
         elseif ($why) { $st.Text = '● 上次轉換失敗'; $st.Foreground = $red; $st.ToolTip = $why; $g.Order = 1 }
         elseif ($g.Ready) { $st.Text = '● 轉換過了，加入就能裝'; $st.Foreground = $gray; $g.Order = 2 }
         else { $st.Text = '' }
+        if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) {
+            $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '💾 存檔待傳'
+            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消') -join "`n"
+        }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
         if ($preWarn.Count -and -not $why) {
             if ($st.Text -and $st.Text -notlike '*⚠') { $st.Text += ' · ⚠' } elseif (-not $st.Text) { $st.Text = '⚠ 要注意'; $st.Foreground = $orange }
@@ -985,8 +995,14 @@ function Build-Library {
         $card.Add_DragLeave({ param($s, $e) $s.FindName('DropHint').Visibility = 'Collapsed' })
         $card.Add_Drop({ param($s, $e)
             $s.FindName('DropHint').Visibility = 'Collapsed'
-            Add-Files $s.Tag.Dir @($e.Data.GetData([Windows.DataFormats]::FileDrop))
-            $e.Handled = $true })
+            $all = @($e.Data.GetData([Windows.DataFormats]::FileDrop))
+            $e.Handled = $true
+            foreach ($k in @($all | Where-Object { $_ -match '\.keys$' })) { Set-Keys $k }
+            $games = @($all | Where-Object { $_ -match '\.(nsp|xci|nsz|xcz)$' })
+            $rest = @($all | Where-Object { $_ -notmatch '\.(nsp|xci|nsz|xcz|keys)$' })
+            if ($games.Count) { Add-Files $s.Tag.Dir $games }
+            # 其他的（資料夾、zip、散的檔案）當成這款的存檔
+            if ($rest.Count) { Import-Save $s.Tag $rest } })
         $card.ContextMenu = New-CardMenu $g
         $card.Add_ContextMenuOpening({ param($s, $e) $m = $s.ContextMenu; $m.Items.Clear(); Fill-CardMenu $m $s.Tag })
         $panel = if ($g.InLib) { $ui.Library } else { $ui.Others }
@@ -1407,6 +1423,83 @@ function Add-Files($dir, $paths) {
     foreach ($f in $files) {
         if (Test-Path -LiteralPath (Join-Path $dir (Split-Path $f -Leaf))) { continue }
         $ns.CopyHere($f, 0)
+    }
+}
+# ---------------------------------------------------------------- 存檔拖到遊戲卡
+# 放進 <遊戲資料夾>\存檔待傳\（title ID 在 存檔待傳.txt），下次「裝到 iPad」時 nxn.ps1 用 saves_data.py put 放進 iPad 上那款的存檔。
+# 模擬器、JKSV、Checkpoint 匯出的存檔都是一般的檔案樹，殼原樣讀，只要找到真正的那一層：
+#   Ryujinx  bis\user\save\<編號>\ 裡有 0\（存好的）、1\（暫存）和 ExtraData：用 0\
+#   yuzu 系  nand\user\save\0000000000000000\<使用者>\<title ID>\：拖哪一層都行，有這款 title ID 的資料夾就往裡走
+#   JKSV     JKSV\<遊戲名稱>\<使用者 - 日期>\；Checkpoint  saves\0x<title ID> <名稱>\<日期>\：好幾份就用最新的
+function Import-SaveRoot($dir, $tid) {
+    for ($i = 0; $i -lt 8; $i++) {
+        $files = @(Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue)
+        $subs = @(Get-ChildItem -LiteralPath $dir -Directory -Force -ErrorAction SilentlyContinue)
+        $mine = if ($tid) { @($subs | Where-Object { $_.Name -match "(?i)(^|0x)$tid" }) } else { @() }
+        if ($mine.Count -eq 1) { $dir = $mine[0].FullName; continue }
+        $zero = @($subs | Where-Object { $_.Name -eq '0' })
+        if ($zero.Count -and -not @($subs | Where-Object { $_.Name -notin '0', '1', '_' }).Count -and -not @($files | Where-Object { $_.Name -notmatch '^(ExtraData\d*|\.lock)$' }).Count) {
+            $dir = $zero[0].FullName; $script:saveFrom = 'Ryujinx'; continue
+        }
+        if ($files.Count) { break }
+        $dated = @($subs | Where-Object { $_.Name -match '\d{4}[-._]?\d{2}[-._]?\d{2}' })
+        if ($subs.Count -gt 1 -and $dated.Count -eq $subs.Count) { $dir = ($subs | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName; $script:saveNewest = $true; continue }
+        if ($subs.Count -ne 1 -or $subs[0].Name -notmatch '^(\d+|0x[0-9A-Fa-f]+.*|[0-9A-Fa-f]{16,32})$|\d{4}[-._]?\d{2}[-._]?\d{2}') { break }
+        $dir = $subs[0].FullName
+    }
+    return $dir
+}
+function Import-Save($g, $paths) {
+    $paths = @($paths | Where-Object { Test-Path -LiteralPath $_ })
+    if (-not $paths.Count) { return }
+    $tid = Game-Tid $g
+    $script:saveNewest = $false; $script:saveFrom = ''
+    $tmp = Join-Path $g.Dir ('.匯入存檔-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        if ($paths.Count -eq 1 -and $paths[0] -match '\.zip$') {
+            $x = Join-Path $tmp 'x'
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [IO.Compression.ZipFile]::ExtractToDirectory($paths[0], $x)
+            $src = Import-SaveRoot $x $tid
+        } elseif ($paths.Count -eq 1 -and (Test-Path -LiteralPath $paths[0] -PathType Container)) {
+            $src = Import-SaveRoot $paths[0] $tid
+        } else {
+            # 散的檔案（或好幾個資料夾）：拖進來的東西就是存檔的最上層
+            $src = Join-Path $tmp 'x'
+            New-Item -ItemType Directory -Force -Path $src | Out-Null
+            foreach ($p in $paths) { Copy-Item -LiteralPath $p -Destination $src -Recurse -Force }
+        }
+        $all = @(Get-ChildItem -LiteralPath $src -Force)
+        $files = @(Get-ChildItem -LiteralPath $src -File -Recurse -Force -ErrorAction SilentlyContinue)
+        if (-not $files.Count) { [void][Windows.MessageBox]::Show($win, '拖進來的東西裡沒有檔案，不像存檔。', '匯入存檔'); return }
+        # 好幾款遊戲的存檔資料夾（裡面全是 title ID）卻沒有這款：多半拖錯了
+        if ($all.Count -gt 1 -and -not @($all | Where-Object { $_.Name -notmatch '^(0x)?[0-9A-Fa-f]{16}\b' }).Count) {
+            [void][Windows.MessageBox]::Show($win, "這像是好幾款遊戲的存檔資料夾，裡面找不到「$($g.Name)」$(if ($tid) { "（$tid）" })的。`n`n請直接拖這款遊戲的那一個資料夾。", '匯入存檔'); return
+        }
+        $kb = [math]::Ceiling((($files | Measure-Object Length -Sum).Sum) / 1KB)
+        $top = @($all | Select-Object -First 8 | ForEach-Object { if ($_.PSIsContainer) { "$($_.Name)\" } else { $_.Name } })
+        $more = if ($all.Count -gt 8) { '、…' } else { '' }
+        $pend = Join-Path $g.Dir '存檔待傳'
+        $notes = @()
+        if ($script:saveFrom) { $notes += "（看起來是 $($script:saveFrom) 的存檔，用 0\ 那份）" }
+        if ($script:saveNewest) { $notes += "（裡面有好幾份，用最新的：$(Split-Path $src -Leaf)）" }
+        if (Test-Path -LiteralPath $pend) { $notes += '（這款已經有一份待傳的存檔，會換成這份）' }
+        $msg = "把這份存檔放進「$($g.Name)」？`n`n$($files.Count) 個檔案，共 $kb KB`n最上層：$($top -join '、')$more`n" + $(if ($notes.Count) { ($notes -join "`n") + "`n" } else { '' }) + "`n" +
+               "⚠ 下次「裝到 iPad」時，會用它取代 iPad 上這款的存檔。iPad 上原本的存檔會先備份到電腦，在「還原存檔…」裡找得到（名稱有 before-import）。"
+        if ([Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'YesNo', 'Warning') -ne 'Yes') { return }
+        # 先整份複製到暫存，再換掉舊的待傳（拖進來的可能就是待傳資料夾裡的東西）
+        $stage = Join-Path $tmp 'stage'
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        foreach ($c in $all) { Copy-Item -LiteralPath $c.FullName -Destination $stage -Recurse -Force }
+        if (Test-Path -LiteralPath $pend) { Remove-Item -LiteralPath $pend -Recurse -Force }
+        Move-Item -LiteralPath $stage -Destination $pend
+        Set-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -Value $tid -Encoding ASCII
+        Build-Library
+    } catch {
+        [void][Windows.MessageBox]::Show($win, "匯入存檔失敗：$($_.Exception.Message)", '匯入存檔')
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 function New-GameFolder($file) {

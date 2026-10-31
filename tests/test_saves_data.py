@@ -24,7 +24,7 @@ class FakeAfc:
     async def listdir(self, p): return sorted(os.listdir(self._p(p)))
     async def stat(self, p):
         q = self._p(p)
-        return {'st_ifmt': 'S_IFDIR' if os.path.isdir(q) else 'S_IFREG', 'st_mtime': datetime.datetime.fromtimestamp(os.path.getmtime(q))}
+        return {'st_ifmt': 'S_IFDIR' if os.path.isdir(q) else 'S_IFREG', 'st_mtime': datetime.datetime.fromtimestamp(os.path.getmtime(q)), 'st_size': os.path.getsize(q)}
     async def get_file_contents(self, p):
         with open(self._p(p), 'rb') as f: return f.read()
     async def set_file_contents(self, p, data):
@@ -168,6 +168,45 @@ class Migrate(unittest.TestCase):
         self.assertEqual(sd.old_apps(apps, 'org.nxnative.games.library'),
                          [('org.nxnative.0100000000010000.T1', 'Game A', A), ('org.nxnative.games.T1', 'org.nxnative.games.T1', None),
                           ('org.nxnative.games.p1a2b3c4d.T1', '合包', None)])
+
+
+class Put(unittest.TestCase):
+    """A save dropped on a game card replaces only that game's save, after a backup of the app's saves."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dev = os.path.join(self.tmp, 'dev'); self.root = os.path.join(self.tmp, 'backups')
+        self.docs = os.path.join(self.dev, 'Documents')
+        write(os.path.join(self.docs, 'save', '0100AAAA00000000', 'old.bin'), b'old')
+        write(os.path.join(self.docs, 'save', '0100AAAA00000000.work', 'w'), b'w')
+        write(os.path.join(self.docs, 'save', '0100BBBB00000000', 'other.bin'), b'keep')
+        self.src = os.path.join(self.tmp, 'import')
+        write(os.path.join(self.src, 'data', 'new.bin'), b'newnew'); write(os.path.join(self.src, 'top'), b't')
+        self.afc = FakeAfc(self.dev)
+
+    def tearDown(self): shutil.rmtree(self.tmp)
+
+    def ipa(self, tids):
+        import zipfile
+        p = os.path.join(self.tmp, 'app.ipa')
+        with zipfile.ZipFile(p, 'w') as z:
+            z.writestr('Payload/A.app/Info.plist', b'')
+            for t in tids: z.writestr('Payload/A.app/games/%s/game.json' % t, b'{}')
+        return p
+
+    def test_dest(self):
+        self.assertEqual(sd.save_dest(self.ipa([]), ''), 'save')
+        self.assertEqual(sd.save_dest(self.ipa(['0100aaaa00000000']), '0100AAAA00000000'), 'save/0100aaaa00000000')
+        self.assertIsNone(sd.save_dest(self.ipa(['0100AAAA00000000']), '0100CCCC00000000'))
+
+    def test_put_replaces_one_game(self):
+        asyncio.run(sd.put(self.afc, self.src, self.root, 'save/0100AAAA00000000', now=at(0)))
+        game = os.path.join(self.docs, 'save', '0100AAAA00000000')
+        self.assertEqual(sorted(sd.local_files(game)), ['data/new.bin', 'top'])
+        self.assertFalse(os.path.exists(game + '.work'))
+        with open(os.path.join(self.docs, 'save', '0100BBBB00000000', 'other.bin'), 'rb') as f: self.assertEqual(f.read(), b'keep')
+        b = os.path.join(self.root, sd.backups(self.root)[-1])
+        self.assertTrue(b.endswith('-before-import'))
+        self.assertTrue(os.path.isfile(os.path.join(b, 'save', '0100AAAA00000000', 'old.bin')))
 
 
 class Logs(unittest.TestCase):
