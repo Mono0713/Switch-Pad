@@ -39,11 +39,35 @@ function RunExe($exe, $arglist) {
         if ($line -eq 'System.Management.Automation.RemoteException') { $line = '' }
         # 打包器找不到設定檔時說的 title ID（檔名裡不一定有）
         if ($line -match 'no game profile for title ID (0[0-9A-Fa-f]{15})') { $script:noProfile = $Matches[1].ToUpper() }
+        # 打包器停下來時的原因（die() 印的 "[x] ..."），失敗時拿來說明
+        if ($line -match '^\[x\] (.+)') { $script:packErr = $Matches[1] }
         Write-Host $line
     }
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     return $code
+}
+
+# 打包失敗的說明：常見原因直接講要怎麼做；只有真的有 *_pack\logs 才叫人去看
+function Pack-FailMessage($code, $dir) {
+    $e = $script:packErr
+    $hint = if (-not $e) { '' }
+        elseif ($e -match '^no base game for (\w+)') { "資料夾裡只有更新檔或 DLC，沒有遊戲本體。請把本體（title ID $($Matches[1])）的 NSP/XCI 放進這個資料夾，跟更新檔放在一起，再打包一次。" }
+        elseif ($e -match '^no update for (\w+)') { "這款需要特定版本的更新檔，資料夾裡沒有。請把 $($Matches[1]) 的更新檔放進這個資料夾。" }
+        elseif ($e -match '^the folder holds \d+ different games') { '這個資料夾裡有好幾款不同的遊戲，一款遊戲要放一個資料夾。' }
+        elseif ($e -match '^no game could be identified') { '認不出資料夾裡是哪一款遊戲：檔案可能不完整，或 prod.keys 太舊打不開。' }
+        elseif ($e -match '^no \.nsp or \.xci') { '資料夾裡沒有 NSP 或 XCI 檔。' }
+        elseif ($e -match 'NSZ file') { '資料夾裡是 NSZ 壓縮檔，打包器只讀 NSP/XCI，請先解壓成 NSP。' }
+        elseif ($e -match '^not enough space') { '硬碟空間不夠，請清出空間再打包。' }
+        else { '' }
+    $msg = "打包失敗（結束碼 $code）"
+    if ($hint) { $msg += "：$hint" }
+    if ($e) { $msg += "`n打包器說：$e" }
+    $logs = @(Get-ChildItem -LiteralPath $dir -Directory -Filter '*_pack' -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'logs') })
+    if ($logs.Count) { $msg += "`n詳細記錄在 $(Join-Path $logs[0].FullName 'logs')。" }
+    elseif (-not $e) { $msg += "，請看上面打包器印出的訊息。" }
+    return $msg
 }
 
 $here = $PSScriptRoot
@@ -211,7 +235,7 @@ try {
                 }
             }
         } finally { Pop-Location }
-        if ($code) { throw "打包失敗（結束碼 $code），記錄在 $GameDir 裡的 *_pack\logs。" }
+        if ($code) { throw (Pack-FailMessage $code $GameDir) }
 
         if ($outArg) {
             $ipaFile = Get-Item $outPath
