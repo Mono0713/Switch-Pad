@@ -1395,6 +1395,8 @@ function Update-Banner($inst) {
     $ui.RenewBtn.Content = if (-not $mine) { '重簽' } elseif ($mine.Left -le 0) { '重簽（已過期）' } else { "重簽（剩 $($mine.Left) 天）" }
     $ui.RenewBtn.Foreground = Brush $(if ($mine -and $mine.Left -le 3) { '#FF9F0A' } else { '#EBEBF5' })
     $ui.RenewBtn.ToolTip = "免費 Apple ID 簽的 App 7 天後就打不開。按這裡把 iPad 上的遊戲庫重簽一次，遊戲和存檔都不動。"
+    $ms = Get-MultiShell
+    if ($ms -and (Shell-Changed $ms.FullName)) { $ui.RenewBtn.ToolTip += "`n換了新殼，這次會先用新殼重新合成遊戲庫再裝。" }
     $ui.RenewBtn.Visibility = 'Visible'
 }
 
@@ -2068,12 +2070,17 @@ $ui.Start.Add_Click({
     if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
     $conv = @($selected | Where-Object { $cards.ContainsKey($_) -and -not $cards[$_].Tag.Ready -and $cards[$_].Tag.Base })
     Run-Convert $conv })
+# 只放轉換好的（和本來就在 iPad 上的）；還沒轉換的等下次「放進遊戲庫」
+function Sync-Library { Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad) }) 'both' }
 $ui.Sync.Add_Click({
     if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
-    # 只放轉換好的（和本來就在 iPad 上的）；還沒轉換的等下次「放進遊戲庫」
-    Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad) }) 'both' })
+    Sync-Library })
 
-$ui.RenewBtn.Add_Click({ if (-not $state.Running) { Run-Library @() 'install' } })
+# 重簽本來只把現在的遊戲庫重裝一次；換了殼還沒合成過就順便用新殼合成，不然 iPad 上一直是舊殼
+$ui.RenewBtn.Add_Click({
+    if ($state.Running) { return }
+    $ms = Get-MultiShell
+    if ($ms -and (Shell-Changed $ms.FullName) -and -not @(Setup-Missing).Count) { Sync-Library } else { Run-Library @() 'install' } })
 
 $ui.Stop.Add_Click({
     $state.Queue.Clear()
