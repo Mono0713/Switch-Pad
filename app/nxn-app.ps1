@@ -599,8 +599,14 @@ function Cover-For($g) {
             } finally { $z.Dispose() }
         } catch { }
     }
-    if ($g.BaseFile -and -not (Test-Path -LiteralPath (Join-Path $coverDir "$key.none"))) { Queue-Icon $g $jpg }
+    if ($g.BaseFile -and (Icon-Sig $g.BaseFile) -ne (Get-Content -LiteralPath (Join-Path $coverDir "$key.none") -Raw -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() })) { Queue-Icon $g $jpg }
     return $null
+}
+# .none 記下當時讀的本體檔（路徑、大小、時間）：本體換了（例如 NSZ 解壓成 NSP）就再試一次
+function Icon-Sig($file) {
+    $i = Get-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    if (-not $i) { return '' }
+    "$($i.FullName)|$($i.Length)|$($i.LastWriteTimeUtc.Ticks)"
 }
 
 # 從本體讀圖示：nx_extract 會先寫 control.nacp 和 icon.jpg 再解程式，看到 icon.jpg 就把它停掉（--manifest 不解 RomFS）
@@ -638,7 +644,7 @@ $iconTimer.Add_Tick({
                 if ($card) { Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $card.Tag (Load-Bitmap $j.Dest) }
             } else {
                 # 讀不到（缺金鑰、檔案壞了）就記下來，不要每次開都重試
-                Set-Content -LiteralPath ([IO.Path]::ChangeExtension($j.Dest, '.none')) -Value (Get-Date).ToString('s')
+                Set-Content -LiteralPath ([IO.Path]::ChangeExtension($j.Dest, '.none')) -Value (Icon-Sig $j.File)
             }
             Start-Sleep -Milliseconds 200
             Remove-Item -LiteralPath $j.Tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -656,7 +662,7 @@ $iconTimer.Add_Tick({
     try {
         $p = [Diagnostics.Process]::Start($psi)
         $p.BeginOutputReadLine(); $p.BeginErrorReadLine()   # 不讀會塞住
-        $script:iconJob = @{ Proc = $p; Tmp = $tmp; Dest = $q.Dest; Dir = $q.Dir; Start = Get-Date }
+        $script:iconJob = @{ Proc = $p; Tmp = $tmp; Dest = $q.Dest; Dir = $q.Dir; File = $q.File; Start = Get-Date }
     } catch { }
 })
 $tileColors = '#FF453A', '#FF9F0A', '#30D158', '#0A84FF', '#BF5AF2', '#FF375F', '#64D2FF', '#FFD60A'
