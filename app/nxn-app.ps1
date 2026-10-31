@@ -1777,6 +1777,10 @@ $timer.Add_Tick({
             Set-Step $job $job.StepNames.Count 'done'
             $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '同步') { '著色器同步好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
+            if ($job.StepNames -contains '合成') {
+                $freed = Clean-AfterMerge
+                if ($freed -gt 100MB) { $job.Msg.Text += '（順便清掉用不到的舊遊戲包 {0:N1} GB）' -f ($freed / 1GB) }
+            }
         } else {
             $state.Fail += $job.Game.Name
             if ($job.Game.Dir) { $addFail[$job.Game.Dir] = Fail-Reason $job.Log; $job.Msg.Text = $addFail[$job.Game.Dir] }
@@ -2110,6 +2114,22 @@ $ui.Refresh.Add_Click({
 function Size-Of($item) {
     if ($item.PSIsContainer) { [long](Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
     else { [long]$item.Length }
+}
+# 合成遊戲庫成功後自動清：已經有現在格式遊戲包的那幾款，舊殼做的遊戲包和以前單款安裝的 IPA 都用不到了。
+# 直接刪（不進資源回收筒，不然空間不會回來）；要的話都能從原檔再轉。留著可以退回的那一版殼做的
+function Clean-AfterMerge {
+    $keepIds = @(Keep-Shells | ForEach-Object { Multi-Id $_ })
+    $freed = 0L
+    foreach ($gd in Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue) {
+        $ipas = @(Get-ChildItem -LiteralPath $gd.FullName -File -Filter '*.ipa' -ErrorAction SilentlyContinue)
+        $isKept = { param($f) @($keepIds | Where-Object { $f.Name -like "*-multi-$_.ipa" }).Count -gt 0 }
+        if (-not @($ipas | Where-Object { & $isKept $_ }).Count) { continue }   # 這款還沒有現在格式的遊戲包：舊的先留著
+        foreach ($f in $ipas) {
+            if (& $isKept $f) { continue }
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $freed += $f.Length } catch { }
+        }
+    }
+    $freed
 }
 function Free-Space($owner) {
     $found = @()   # @{ Item; What; Size }
