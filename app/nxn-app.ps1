@@ -2059,6 +2059,7 @@ $failHints = @(
     @{ Re = 'extracting .* failed \(exit|nx_extract did not appear'; Msg = '解包失敗：遊戲檔可能不完整，或 prod.keys 太舊。重新下載遊戲檔，或到設定的「金鑰」換新的 prod.keys' }
     @{ Re = 'rewriting \S+ failed \(exit';                Msg = '改寫遊戲程式那一步失敗。請把「最近的記錄」給 Claude 看' }
     @{ Re = 'no game profile for title ID|做不出暫定設定檔'; Msg = '這款沒有設定檔，自動推導也失敗了。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'zbic package could not be installed';          Msg = '這款用了新的壓縮格式（ZBIC），要的解壓套件裝不起來：確認電腦有網路後再轉一次' }
     @{ Re = 'MemoryError|No space left on device|errno 28'; Msg = '電腦的記憶體或硬碟空間不夠，關掉別的程式、清出空間再試一次' }
 )
 function Fail-Reason($log) {
