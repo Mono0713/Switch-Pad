@@ -752,8 +752,11 @@ function Update-SelCount {
         $more = @($conv | Where-Object { $busy -notcontains $_.Dir })
         $ui.Start.Content = if ($more.Count) { "放進遊戲庫（排入 $($more.Count) 款）" } else { '放進遊戲庫' }
         $ui.Start.IsEnabled = [bool]$more.Count
-        $ui.Sync.IsEnabled = $false
-        $ui.SelSub.Text = "還有 $($busy.Count) 款在轉換或排隊，跑完才能裝到 iPad"; $ui.SelSub.Visibility = 'Visible'
+        $libQueued = $busy -contains (Split-Path (Library-Ipa) -Parent)
+        $ui.Sync.IsEnabled = -not $libQueued -and [bool]@($mine | Where-Object { $_.Ready -or $_.OnPad -or $busy -contains $_.Dir }).Count
+        $ui.Sync.Content = if ($libQueued) { '轉完會自動裝到 iPad' } else { '裝到 iPad（轉完接著裝）' }
+        $ui.SelSub.Text = "還有 $(@($busy | Where-Object { $_ -ne (Split-Path (Library-Ipa) -Parent) }).Count) 款在轉換或排隊" + $(if ($libQueued) { '，跑完會接著合成、裝到 iPad（iPad 要接著）' } else { '' })
+        $ui.SelSub.Visibility = 'Visible'
         $ui.ShowProg.Content = "查看進度（$($busy.Count)）"
     }
 }
@@ -1976,6 +1979,8 @@ function Run-Library($dirs, $mode) {
         $part = Part-For $g $id
         if ($mode -ne 'pack' -and $part.Fresh -and $glGames -contains $dir) {
             $jobs += @{ Game = $g; Mode = 'mergepart-reuse'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
+        } elseif ($state.Running -and @(Busy-Dirs) -contains $dir) {
+            # 已經在轉或排隊：不重複排，合成時用它轉好的遊戲包（轉失敗的話 Library-Call 會跳過）
         } elseif ($mode -eq 'pack' -or -not $part.Fresh) {
             if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI/NSZ）。", '缺本體'); return }
             $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
@@ -2107,7 +2112,8 @@ $ui.Start.Add_Click({
     $conv = @($selected | Where-Object { $cards.ContainsKey($_) -and -not $cards[$_].Tag.Ready -and $cards[$_].Tag.Base })
     Run-Convert $conv })
 # 只放轉換好的（和本來就在 iPad 上的）；還沒轉換的等下次「放進遊戲庫」
-function Sync-Library { Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad) }) 'both' }
+# 轉換中按：正在轉和排隊中的也算進去，排在它們後面，轉完就接著合成、裝
+function Sync-Library { $busy = @(Busy-Dirs); Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad -or $busy -contains $_) }) 'both' }
 $ui.Sync.Add_Click({
     if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
     Sync-Library })
