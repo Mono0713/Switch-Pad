@@ -361,6 +361,7 @@ $xamlText = @'
     <Border Grid.Row="3" Background="#1C1C1E" CornerRadius="18,18,0,0" Padding="22,14" Margin="-28,0,-28,0">
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <Button x:Name="ShowProg" Content="查看進度" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="Stop" Content="停止" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="Back" Content="返回" Margin="0,0,10,0" Visibility="Collapsed"/>
           <Button x:Name="RenewBtn" Margin="0,0,10,0" Visibility="Collapsed"/>
@@ -427,7 +428,7 @@ if (Test-Path $appIcon) {
 $ui = @{}
 foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
                'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Sync','Options','SelCount',
-               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub') { $ui[$n] = $win.FindName($n) }
+               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg') { $ui[$n] = $win.FindName($n) }
 
 function Brush($hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
 function Esc($s) { [Security.SecurityElement]::Escape([string]$s) }
@@ -714,7 +715,7 @@ function Card-Paint($card) {
     $act.Style = $win.FindResource([Windows.Controls.Button])
     $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent   # 狀態只看卡片上那一行「●」
     if ($in) { $act.Content = '移除' } else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary') }
-    $act.IsEnabled = -not $state.Running -and ($in -or $g.Base -or $g.Ready)
+    $act.IsEnabled = [bool]($in -or $g.Base -or $g.Ready)
     $act.ToolTip = if (-not $in -and -not $g.Base -and -not $g.Ready) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
 }
 # 遊戲庫清單（電腦上的）存在設定裡；第一次用的時候從 iPad 上那份遊戲庫讀
@@ -745,6 +746,19 @@ function Update-SelCount {
     $n = $add.Count + $del.Count + $upd.Count
     $ui.Sync.Content = if ($n) { "裝到 iPad（$n 款）" } else { '裝到 iPad' }
     if (-not $left -and $del.Count) { $ui.SelCount.Text = '遊戲庫至少要留一款轉換好的遊戲，才能裝到 iPad' }
+    if ($state.Running) {
+        # 轉換中：還沒排進去的可以再排；裝到 iPad 要等隊伍跑完（合成要用到正在轉的遊戲包）
+        $busy = @(Busy-Dirs)
+        $more = @($conv | Where-Object { $busy -notcontains $_.Dir })
+        $ui.Start.Content = if ($more.Count) { "放進遊戲庫（排入 $($more.Count) 款）" } else { '放進遊戲庫' }
+        $ui.Start.IsEnabled = [bool]$more.Count
+        $libQueued = $busy -contains (Split-Path (Library-Ipa) -Parent)
+        $ui.Sync.IsEnabled = -not $libQueued -and [bool]@($mine | Where-Object { $_.Ready -or $_.OnPad -or $busy -contains $_.Dir }).Count
+        $ui.Sync.Content = if ($libQueued) { '轉完會自動裝到 iPad' } else { '裝到 iPad（轉完接著裝）' }
+        $ui.SelSub.Text = "還有 $(@($busy | Where-Object { $_ -ne (Split-Path (Library-Ipa) -Parent) }).Count) 款在轉換或排隊" + $(if ($libQueued) { '，跑完會接著合成、裝到 iPad（iPad 要接著）' } else { '' })
+        $ui.SelSub.Visibility = 'Visible'
+        $ui.ShowProg.Content = "查看進度（$($busy.Count)）"
+    }
 }
 
 # ---------------------------------------------------------------- 右鍵選單
@@ -954,7 +968,9 @@ function Build-Library {
         $preWarn = @($pre | Where-Object { $_.level -eq 'warn' } | ForEach-Object { $_.text })
         if (-not $why -and $preBad.Count -and -not $g.Ready) { $why = $preBad -join '；' }
         $g | Add-Member -NotePropertyName Order -NotePropertyValue 9 -Force
-        if ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
+        if ($state.Job -and $state.Job.Game.Dir -eq $g.Dir) { $st.Text = '● 轉換中'; $st.Foreground = $blue; $g.Order = 0 }
+        elseif ($state.Running -and @(Busy-Dirs) -contains $g.Dir) { $st.Text = '● 排隊中'; $st.Foreground = $gray; $g.Order = 0 }
+        elseif ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
         elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
         elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 要重新轉換'; $st.Foreground = $orange; $st.ToolTip = '換了新的殼或遊戲檔有更新：按「放進遊戲庫」重新轉換，iPad 上的這款先照舊能玩'; $g.Order = 1 }
         elseif ($g.InLib -and $g.Newer) { $st.Text = '● 等更新到 iPad'; $st.Foreground = $blue; $st.ToolTip = 'iPad 上的是舊的版本（換了殼或重新轉換過），按「裝到 iPad」換成新的，存檔都留著'; $g.Order = 2 }
@@ -1411,6 +1427,8 @@ function Update-Banner($inst) {
     $ui.RenewBtn.Content = if (-not $mine) { '重簽' } elseif ($mine.Left -le 0) { '重簽（已過期）' } else { "重簽（剩 $($mine.Left) 天）" }
     $ui.RenewBtn.Foreground = Brush $(if ($mine -and $mine.Left -le 3) { '#FF9F0A' } else { '#EBEBF5' })
     $ui.RenewBtn.ToolTip = "免費 Apple ID 簽的 App 7 天後就打不開。按這裡把 iPad 上的遊戲庫重簽一次，遊戲和存檔都不動。"
+    $ms = Get-MultiShell
+    if ($ms -and (Shell-Changed $ms.FullName)) { $ui.RenewBtn.ToolTip += "`n換了新殼，這次會先用新殼重新合成遊戲庫再裝。" }
     $ui.RenewBtn.Visibility = 'Visible'
 }
 
@@ -1747,18 +1765,34 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     return $job
 }
 
-function Start-Run($jobs) {
-    if (-not $jobs.Count) { return }
-    $ui.Jobs.Children.Clear()
-    $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
+# 正在做和排隊中的遊戲資料夾
+function Busy-Dirs { @(@($(if ($state.Job) { $state.Job.Game.Dir })) + @($state.Queue | ForEach-Object { $_.Game.Dir }) | Where-Object { $_ }) }
+function Add-Jobs($jobs) {
     foreach ($j in $jobs) {
         $nj = New-Job $j.Game $j.Mode $j.Ipa $j.Out $j.Shell
         if ($j.Lib) { $nj | Add-Member -NotePropertyName Lib -NotePropertyValue $j.Lib -Force }
         elseif ($j.Call) { $nj.Call = $j.Call; $nj.NeedAllOk = $true }
         $state.Queue.Enqueue($nj)
     }
-    $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'
-    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Collapsed'; $ui.Stop.Visibility = 'Visible'
+}
+function Show-Progress {
+    $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'
+    $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'
+    $ui.Stop.Visibility = 'Visible'; $ui.Back.Content = '回遊戲庫'; $ui.Back.Visibility = 'Visible'
+}
+function Start-Run($jobs) {
+    if (-not $jobs.Count) { return }
+    if ($state.Running) {
+        # 跑到一半又按「放進遊戲庫」：排到隊伍後面（已經在排或正在做的同一款不重複），留在遊戲庫畫面
+        $busy = @(Busy-Dirs)
+        Add-Jobs @($jobs | Where-Object { -not ($_.Game.Dir -and $busy -contains $_.Game.Dir) })
+        Build-Library
+        return
+    }
+    $ui.Jobs.Children.Clear()
+    $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
+    Add-Jobs $jobs
+    Show-Progress
     $ui.Login.IsEnabled = $false; $ui.Settings.IsEnabled = $false; $ui.Refresh.IsEnabled = $false
     $ui.Busy.Visibility = 'Visible'; $ui.ProgTitle.Text = '執行中'
     Start-Next
@@ -1769,7 +1803,8 @@ function Start-Next {
         $state.Running = $false; $state.Job = $null
         $ui.Busy.Visibility = 'Collapsed'
         $ui.ProgTitle.Text = if ($state.Fail.Count) { "完成 $($state.Ok) 款，失敗：$($state.Fail -join '、')" } else { "全部完成（$($state.Ok) 款）" }
-        $ui.Stop.Visibility = 'Collapsed'; $ui.Back.Visibility = 'Visible'
+        $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'; $ui.Back.Content = '返回'
+        $ui.Back.Visibility = if ($ui.ProgressView.Visibility -eq 'Visible') { 'Visible' } else { 'Collapsed' }
         $ui.Login.IsEnabled = $true; $ui.Settings.IsEnabled = $true; $ui.Refresh.IsEnabled = $true
         # 安裝或更新完：Switch Pad 自己換了新版就重開，不然重新讀殼、支援清單和帳號
         $flag = Join-Path $work 'app-restart.flag'
@@ -1779,6 +1814,8 @@ function Start-Next {
             $win.Close(); return
         }
         Load-Supported; Update-ShellLabel; Update-Account
+        # 跑的時候回到遊戲庫在看：直接更新卡片，不用跳回進度頁
+        if ($ui.ProgressView.Visibility -ne 'Visible') { Build-Library; return }
         # 全部成功就倒數幾秒自動回遊戲庫；有失敗的留在這頁讓你看記錄
         if (-not $state.Fail.Count) {
             $state.BackIn = 5; $state.DoneTitle = $ui.ProgTitle.Text
@@ -1868,6 +1905,10 @@ $timer.Add_Tick({
             Set-Step $job $job.StepNames.Count 'done'
             $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '同步') { '著色器同步好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
+            if ($job.StepNames -contains '合成') {
+                $freed = Clean-AfterMerge
+                if ($freed -gt 100MB) { $job.Msg.Text += '（順便清掉用不到的舊遊戲包 {0:N1} GB）' -f ($freed / 1GB) }
+            }
         } else {
             $state.Fail += $job.Game.Name
             if ($job.Game.Dir) { $addFail[$job.Game.Dir] = Fail-Reason $job.Log; $job.Msg.Text = $addFail[$job.Game.Dir] }
@@ -2031,6 +2072,8 @@ function Run-Library($dirs, $mode) {
         $part = Part-For $g $id
         if ($mode -ne 'pack' -and $part.Fresh -and $glGames -contains $dir) {
             $jobs += @{ Game = $g; Mode = 'mergepart-reuse'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
+        } elseif ($state.Running -and @(Busy-Dirs) -contains $dir) {
+            # 已經在轉或排隊：不重複排，合成時用它轉好的遊戲包（轉失敗的話 Library-Call 會跳過）
         } elseif ($mode -eq 'pack' -or -not $part.Fresh) {
             if (-not $g.Base) { [void][Windows.MessageBox]::Show("$($g.Name) 的資料夾裡沒有遊戲本體（NSP/XCI/NSZ）。", '缺本體'); return }
             $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
@@ -2161,12 +2204,18 @@ $ui.Start.Add_Click({
     if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
     $conv = @($selected | Where-Object { $cards.ContainsKey($_) -and -not $cards[$_].Tag.Ready -and $cards[$_].Tag.Base })
     Run-Convert $conv })
+# 只放轉換好的（和本來就在 iPad 上的）；還沒轉換的等下次「放進遊戲庫」
+# 轉換中按：正在轉和排隊中的也算進去，排在它們後面，轉完就接著合成、裝
+function Sync-Library { $busy = @(Busy-Dirs); Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad -or $busy -contains $_) }) 'both' }
 $ui.Sync.Add_Click({
     if (@(Setup-Missing).Count) { [void][Windows.MessageBox]::Show('還沒安裝打包和簽章工具，請先按上面的「安裝」。', 'Switch Pad'); return }
-    # 只放轉換好的（和本來就在 iPad 上的）；還沒轉換的等下次「放進遊戲庫」
-    Run-Library @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad) }) 'both' })
+    Sync-Library })
 
-$ui.RenewBtn.Add_Click({ if (-not $state.Running) { Run-Library @() 'install' } })
+# 重簽本來只把現在的遊戲庫重裝一次；換了殼還沒合成過就順便用新殼合成，不然 iPad 上一直是舊殼
+$ui.RenewBtn.Add_Click({
+    if ($state.Running) { return }
+    $ms = Get-MultiShell
+    if ($ms -and (Shell-Changed $ms.FullName) -and -not @(Setup-Missing).Count) { Sync-Library } else { Run-Library @() 'install' } })
 
 $ui.Stop.Add_Click({
     $state.Queue.Clear()
@@ -2184,8 +2233,11 @@ $ui.Back.Add_Click({
     $backTimer.Stop()
     $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'
     $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Sync.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
+    # 還在跑：回遊戲庫看、加遊戲排隊，「查看進度」回來
+    if ($state.Running) { $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Visible' }
     Set-Tab
     Build-Library })
+$ui.ShowProg.Add_Click({ Show-Progress })
 $ui.Refresh.Add_Click({
     # 之前讀不到圖示的再試一次（例如後來才放了 prod.keys）
     Get-ChildItem -Path $coverDir -Filter '*.none' -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
@@ -2196,6 +2248,22 @@ $ui.Refresh.Add_Click({
 function Size-Of($item) {
     if ($item.PSIsContainer) { [long](Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
     else { [long]$item.Length }
+}
+# 合成遊戲庫成功後自動清：已經有現在格式遊戲包的那幾款，舊殼做的遊戲包和以前單款安裝的 IPA 都用不到了。
+# 直接刪（不進資源回收筒，不然空間不會回來）；要的話都能從原檔再轉。留著可以退回的那一版殼做的
+function Clean-AfterMerge {
+    $keepIds = @(Keep-Shells | ForEach-Object { Multi-Id $_ })
+    $freed = 0L
+    foreach ($gd in Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue) {
+        $ipas = @(Get-ChildItem -LiteralPath $gd.FullName -File -Filter '*.ipa' -ErrorAction SilentlyContinue)
+        $isKept = { param($f) @($keepIds | Where-Object { $f.Name -like "*-multi-$_.ipa" }).Count -gt 0 }
+        if (-not @($ipas | Where-Object { & $isKept $_ }).Count) { continue }   # 這款還沒有現在格式的遊戲包：舊的先留著
+        foreach ($f in $ipas) {
+            if (& $isKept $f) { continue }
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $freed += $f.Length } catch { }
+        }
+    }
+    $freed
 }
 function Free-Space($owner) {
     $found = @()   # @{ Item; What; Size }
