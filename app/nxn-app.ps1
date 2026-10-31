@@ -1011,7 +1011,11 @@ function Build-Library {
         $act = $card.FindName('Act'); $act.Tag = $card
         $act.Add_Click({ param($s, $e)
             $c = $s.Tag; $dir = $c.Tag.Dir
-            if ($selected.Contains($dir)) { [void]$selected.Remove($dir) } else { $selected.Add($dir) }
+            if ($selected.Contains($dir)) {
+                [void]$selected.Remove($dir)
+                # 排隊等轉換的遊戲從遊戲庫拿掉：也不用轉了
+                if ($state.Running) { foreach ($q in @($state.Queue | Where-Object { $_.Game.Dir -eq $dir -and -not $_.PSObject.Properties['Lib'] })) { Drop-Queued $q } }
+            } else { $selected.Add($dir) }
             Save-Want; Build-Library })
         $card.Add_DragEnter({ param($s, $e) if ($e.Data.GetDataPresent([Windows.DataFormats]::FileDrop)) { $s.FindName('DropHint').Visibility = 'Visible' } })
         $card.Add_DragLeave({ param($s, $e) $s.FindName('DropHint').Visibility = 'Collapsed' })
@@ -1665,6 +1669,7 @@ $jobXaml = @'
     <StackPanel Margin="16,0,0,0">
       <DockPanel>
         <TextBlock x:Name="Time" DockPanel.Dock="Right" Foreground="#8E8E93" FontFamily="Consolas"/>
+        <Button x:Name="Drop" DockPanel.Dock="Right" Content="取消排隊" Padding="10,2" Margin="0,0,10,0" FontSize="12" VerticalAlignment="Center" ToolTip="還沒輪到它：從隊伍拿掉，不轉這一款"/>
         <TextBlock x:Name="Title" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
       </DockPanel>
       <WrapPanel x:Name="Steps" Margin="0,10,0,0"/>
@@ -1767,10 +1772,22 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
                              Started = $null; Cur = -1; Text = $row.FindName('Log'); Msg = $row.FindName('Msg'); Time = $row.FindName('Time') }
     Set-Step $job -1 'todo'
     $job.Msg.Text = '排隊中'
+    $drop = $row.FindName('Drop'); $drop.Tag = $job
+    $drop.Add_Click({ param($s, $e) Drop-Queued $s.Tag })
     [void]$ui.Jobs.Children.Add($row)
     return $job
 }
 
+# 還沒輪到的工作從隊伍拿掉（正在做的不能用這個停，要按「停止」）
+function Drop-Queued($job) {
+    if ($state.Job -eq $job) { return }
+    $keep = @($state.Queue | Where-Object { $_ -ne $job })
+    if ($keep.Count -eq $state.Queue.Count) { return }
+    $state.Queue.Clear(); foreach ($k in $keep) { $state.Queue.Enqueue($k) }
+    [void]$ui.Jobs.Children.Remove($job.Row)
+    if ($ui.ShowProg.Visibility -eq 'Visible') { $ui.ShowProg.Content = "查看進度（$($state.Queue.Count + 1)）" }
+    if ($ui.LibraryView.Visibility -eq 'Visible') { Build-Library }
+}
 # 正在做和排隊中的遊戲資料夾
 function Busy-Dirs { @(@($(if ($state.Job) { $state.Job.Game.Dir })) + @($state.Queue | ForEach-Object { $_.Game.Dir }) | Where-Object { $_ }) }
 function Add-Jobs($jobs) {
@@ -1847,6 +1864,7 @@ function Start-Next {
         if ($lc.Skip.Count) { $job.Msg.Text = "跳過 $($lc.Skip -join '、')，其他照樣放進去" }
     }
     $state.Job = $job
+    $job.Row.FindName('Drop').Visibility = 'Collapsed'
     $job.Log = Join-Path $logDir ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($job.Game.Name -replace '[^\w.-]', '_') + '.log')
     $job.Pos = 0; $job.Dec = [Text.Encoding]::UTF8.GetDecoder(); $job.Started = Get-Date
     Set-Step $job 0 'active'
