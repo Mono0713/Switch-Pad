@@ -353,7 +353,12 @@ $xamlText = @'
       <ProgressBar x:Name="Busy" DockPanel.Dock="Top" Height="4" IsIndeterminate="True" Margin="0,0,0,12"
                    Background="#1C1C1E" Foreground="#0A84FF" BorderThickness="0"/>
       <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel x:Name="Jobs" Margin="0,0,0,12"/>
+        <StackPanel>
+          <StackPanel x:Name="Jobs" Margin="0,0,0,12"/>
+          <Expander x:Name="DoneBox" Header="已完成" Foreground="#8E8E93" Visibility="Collapsed" Margin="0,0,0,12">
+            <StackPanel x:Name="DoneJobs" Margin="0,8,0,0"/>
+          </Expander>
+        </StackPanel>
       </ScrollViewer>
     </DockPanel>
 
@@ -428,7 +433,7 @@ if (Test-Path $appIcon) {
 $ui = @{}
 foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
                'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Sync','Options','SelCount',
-               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg') { $ui[$n] = $win.FindName($n) }
+               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg','DoneBox','DoneJobs') { $ui[$n] = $win.FindName($n) }
 
 function Brush($hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
 function Esc($s) { [Security.SecurityElement]::Escape([string]$s) }
@@ -1631,7 +1636,7 @@ function Quote($s) { "'" + ($s -replace "'", "''") + "'" }
 
 function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     $row = [Windows.Markup.XamlReader]::Parse($jobXaml)
-    $row.FindName('Title').Text = $g.Name
+    $row.FindName('Title').Text = if ($mode -eq 'glsync') { "$($g.Name) · 拿回 iPad 錄的著色器" } else { $g.Name }
     Paint-Icon $row.FindName('Icon') $row.FindName('Letter') $g (Cover-For $g)
     # @(...)：只有一個步驟時 switch 會把陣列攤成一個字串，$names[0] 就只剩第一個字（「同步」變「同」）
     $names = @(switch ($mode) {
@@ -1719,7 +1724,7 @@ function Start-Run($jobs) {
         Build-Library
         return
     }
-    $ui.Jobs.Children.Clear()
+    $ui.Jobs.Children.Clear(); $ui.DoneJobs.Children.Clear(); $ui.DoneBox.Visibility = 'Collapsed'; $ui.DoneBox.IsExpanded = $false
     $state.Queue.Clear(); $state.Ok = 0; $state.Fail = @(); $state.Running = $true; $state.Started = Get-Date
     Add-Jobs $jobs
     Show-Progress
@@ -1732,6 +1737,7 @@ function Start-Next {
     if ($state.Queue.Count -eq 0) {
         $state.Running = $false; $state.Job = $null
         $ui.Busy.Visibility = 'Collapsed'
+        if ($ui.Jobs.Children.Count -eq 0) { $ui.DoneBox.IsExpanded = $true }
         $ui.ProgTitle.Text = if ($state.Fail.Count) { "完成 $($state.Ok) 款，失敗：$($state.Fail -join '、')" } else { "全部完成（$($state.Ok) 款）" }
         $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'; $ui.Back.Content = '返回'
         $ui.Back.Visibility = if ($ui.ProgressView.Visibility -eq 'Visible') { 'Visible' } else { 'Collapsed' }
@@ -1840,6 +1846,10 @@ $timer.Add_Tick({
                 $freed = Clean-AfterMerge
                 if ($freed -gt 100MB) { $job.Msg.Text += '（順便清掉用不到的舊遊戲包 {0:N1} GB）' -f ($freed / 1GB) }
             }
+            # 做好的移到下面「已完成」，上面只留正在做、排隊中和失敗的
+            [void]$ui.Jobs.Children.Remove($job.Row)
+            $ui.DoneJobs.Children.Insert(0, $job.Row)
+            $ui.DoneBox.Header = "已完成（$($ui.DoneJobs.Children.Count)）"; $ui.DoneBox.Visibility = 'Visible'
         } else {
             $state.Fail += $job.Game.Name
             if ($job.Game.Dir) { $addFail[$job.Game.Dir] = Fail-Reason $job.Log; $job.Msg.Text = $addFail[$job.Game.Dir] }
