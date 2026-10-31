@@ -8,6 +8,14 @@ $here = $PSScriptRoot
 # 程式檔都在 nxn\程式\，遊戲、合包和 Switch Pad.exe 在上一層 nxn\（舊版全部攤在 nxn\ 最上層，開起來會自己搬）
 $appDirName = '程式'
 $base = if ((Split-Path $here -Leaf) -eq $appDirName) { Split-Path $here -Parent } else { $here }
+# 用 Start-Process 開 powershell 會走 ShellExecute：Windows 11 的預設主控台是 Windows Terminal，-WindowStyle Hidden 藏不住，
+# 會留下一個標題「powershell」的視窗。跟 Switch Pad.exe 一樣用 CreateNoWindow 開就沒有視窗
+function Start-HiddenPs($ps1, [string[]]$more = @()) {
+    $psi = New-Object Diagnostics.ProcessStartInfo (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+    $psi.Arguments = (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$ps1`"") + $more) -join ' '
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = Split-Path $ps1
+    [void][Diagnostics.Process]::Start($psi)
+}
 
 # ---------------------------------------------------------------- 搬家：最上層只留 Switch Pad.exe、遊戲、合包，其他收進 程式\
 # 搬到一半失敗也沒關係：每次開都會把還留在最上層的搬過去。正在打包或安裝（另一個 Switch Pad 在跑）就等下次再搬。
@@ -102,7 +110,7 @@ try {
     # 這次是從最上層開的，搬好了就從 程式\ 重開
     if ($here -eq $base -and (Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path (Join-Path $base 'nxn-app.ps1'))) {
         if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }
-        else { Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $appDir 'nxn-app.ps1')`"") }
+        else { Start-HiddenPs (Join-Path $appDir 'nxn-app.ps1') }
         exit
     }
 } catch {
@@ -1674,7 +1682,7 @@ function Start-Next {
         $flag = Join-Path $work 'app-restart.flag'
         if (Test-Path $flag) {
             Remove-Item $flag -ErrorAction SilentlyContinue
-            Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $here 'nxn-app.ps1')`"", '-Restart')
+            Start-HiddenPs (Join-Path $here 'nxn-app.ps1') @('-Restart')
             $win.Close(); return
         }
         Load-Supported; Update-ShellLabel; Update-Account
@@ -2319,7 +2327,7 @@ $ui.Settings.Add_Click({
     $sw.FindName('FreeSpace').Add_Click({ Free-Space $sw })
     $sw.FindName('Diag').Add_Click({ Copy-Diagnostics $sw })
     if ($here -ne $base -or -not (Test-Path (Join-Path $here 'nxn-gui.ps1'))) { $sw.FindName('OldGui').Visibility = 'Collapsed' }   # 舊版視窗只認得最上層的 遊戲\
-    $sw.FindName('OldGui').Add_Click({ Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $here 'nxn-gui.ps1')`"") })
+    $sw.FindName('OldGui').Add_Click({ Start-HiddenPs (Join-Path $here 'nxn-gui.ps1') })
     $upd = Update-Available
     $sw.FindName('UpdateText').Text = if ($upd) { "有新版本：$upd" } elseif ($latest) { "已是最新（$($latest.tag_name)）" } else { '還沒問到 GitHub 上的版本' }
     $ub = $sw.FindName('UpdateApp')
