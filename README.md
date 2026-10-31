@@ -21,6 +21,7 @@
 4. prod.keys：會自己到 Ryujinx 和 yuzu 系模擬器的資料夾找；找不到就把檔案拖進視窗（複製一份到 `work\`，只留在這台電腦）。
 5. 按「登入 Apple ID」一次。免費帳號簽的 App 7 天後過期（按「全部續期」重簽），同時最多 3 個。
 6. 把 NSP / XCI 拖進視窗新增遊戲；更新檔或 DLC 拖到遊戲卡上就會加進那款，打包時自動用最新版本。
+   存檔（模擬器、JKSV、Checkpoint 匯出的資料夾或 zip，或存檔裡的檔案）拖到遊戲卡上，下次「裝到 iPad」時會取代 iPad 上那款的存檔；iPad 上原本的會先備份，「還原存檔…」找得到。
 7. 勾選遊戲按「開始」。也可以把好幾款合成一包（「合包」分頁）。
 
 ### 遊戲庫（iPad 上只放一個 App）
@@ -72,7 +73,7 @@ Switch Pad 打開時會到 GitHub 問有沒有新版；有的話設定（齒輪�
 | `make_provisional.py` | 沒有上游設定檔的遊戲，在 Windows 上做暫定設定檔（實驗性） |
 | `nxn_merge_drop.py` | 從合包移除一款遊戲 |
 | `romfs_data.py` | 把遊戲資料直接傳進 iPad，不用整包重裝 |
-| `saves_data.py` | 備份和還原 iPad 上的存檔（經 App 的 Documents） |
+| `saves_data.py` | 備份和還原 iPad 上的存檔（經 App 的 Documents），也把拖進遊戲卡的存檔放進去 |
 | `keys_check.py` | 打包前檢查 prod.keys 打不打得開這款（移植自 NX2Apple） |
 | `nxn_merge.py` | 把遊戲包合成遊戲庫（ns2ios-shell 的同一支，加了 `--icon`） |
 | `LibraryIcon.png` | 遊戲庫 App 的圖示 |
