@@ -743,7 +743,7 @@ function Update-SelCount {
     $t = @("遊戲庫 $($mine.Count) 款")
     if ($conv.Count) { $t += "$($conv.Count) 款要轉換" }
     $pad = @(); if ($add.Count) { $pad += "加入 $(& $names $add)" }; if ($del.Count) { $pad += "拿掉 $(& $names $del)" }; if ($upd.Count) { $pad += "更新 $(& $names $upd)" }
-    $sub = if ($pad.Count) { "裝到 iPad 會" + ($pad -join '，') } elseif ($gl.Count) { '裝到 iPad 時會拿回 OpenGL 著色器' } elseif ($left) { 'iPad 已是最新' } else { '' }
+    $sub = if ($pad.Count) { "裝到 iPad 會" + ($pad -join '，') } elseif ($gl.Count) { '裝到 iPad 時會拿回 iPad 記下的著色器' } elseif ($left) { 'iPad 已是最新' } else { '' }
     $ui.SelCount.Text = $t -join ' · '; $ui.SelCount.ToolTip = $null
     $ui.SelSub.Text = $sub; $ui.SelSub.ToolTip = $(if ($sub) { $sub } else { $null }); $ui.SelSub.Visibility = $(if ($sub) { 'Visible' } else { 'Collapsed' })
     $ui.Start.Content = if ($conv.Count) { "放進遊戲庫（轉換 $($conv.Count) 款）" } else { '放進遊戲庫' }
@@ -971,10 +971,10 @@ function Build-Library {
         if ($state.Job -and $state.Job.Game.Dir -eq $g.Dir) { $st.Text = '● 轉換中'; $st.Foreground = $blue; $g.Order = 0 }
         elseif ($state.Running -and @(Busy-Dirs) -contains $g.Dir) { $st.Text = '● 排隊中'; $st.Foreground = $gray; $g.Order = 0 }
         elseif ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
-        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
+        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = '著色器要在 iPad 上記下來的遊戲（OpenGL 或執行時才編譯著色器）：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
         elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 要重新轉換'; $st.Foreground = $orange; $st.ToolTip = '換了新的殼或遊戲檔有更新：按「放進遊戲庫」重新轉換，iPad 上的這款先照舊能玩'; $g.Order = 1 }
         elseif ($g.InLib -and $g.Newer) { $st.Text = '● 等更新到 iPad'; $st.Foreground = $blue; $st.ToolTip = 'iPad 上的是舊的版本（換了殼或重新轉換過），按「裝到 iPad」換成新的，存檔都留著'; $g.Order = 2 }
-        elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的 OpenGL 著色器 $glN 個" }; $g.Order = 4 }
+        elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的著色器 $glN 個" }; $g.Order = 4 }
         elseif ($g.InLib -and $g.Ready) { $st.Text = '● 等裝到 iPad'; $st.Foreground = $blue; $st.ToolTip = '轉換好了，iPad 接上後按「裝到 iPad」'; $g.Order = 2 }
         elseif ($g.InLib) { $st.Text = '● 等轉換'; $st.Foreground = $gray; $st.ToolTip = '按「放進遊戲庫」在電腦上轉換'; $g.Order = 3 }
         elseif ($g.OnPad) { $st.Text = '● 裝到 iPad 時拿掉'; $st.Foreground = $red; $g.Order = 0 }
