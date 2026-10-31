@@ -2041,15 +2041,36 @@ function Library-Call($lib, $fail) {
     return @{ Call = $call; Skip = $skip }
 }
 
-# 打包失敗的原因：從記錄裡挑一行看得懂的
+# 打包失敗的原因：記錄裡認得的錯誤換成白話，說要做什麼；認不得的挑最後一行錯誤原文
+# 每條是打包器（nxn_pack.py、shader_split.py）或 nxn.ps1 會印的訊息；越前面越優先（真正的原因通常比後面跟著的「打包失敗」早出現）
+$failHints = @(
+    @{ Re = 'without type trees';                         Msg = '這款 Unity 遊戲的著色器格式，打包器內建的 Unity 2017～6000 格式都讀不出來。請把「最近的記錄」給 Claude 看' }
+    @{ Re = '32-bit|32 位元|aarch32';                     Msg = '32 位元的遊戲，殼還不支援（只能跑 64 位元的 Switch 遊戲）' }
+    @{ Re = 'no base game for';                           Msg = '資料夾裡只有更新檔或 DLC，沒有遊戲本體：把本體的 NSP / XCI 拖到這款遊戲上' }
+    @{ Re = 'no update for';                              Msg = '這款要搭配特定版本的更新檔，資料夾裡沒有：把更新檔的 NSP 拖到這款遊戲上' }
+    @{ Re = 'folder holds \d+ different games';          Msg = '資料夾裡混了不同遊戲的檔案：一個資料夾只放一款（本體、更新、DLC）' }
+    @{ Re = 'no game could be identified';                Msg = '認不出資料夾裡的遊戲：XCI 要跟 prod.keys 對得上，可以改用 NSP，或到設定的「金鑰」換新的 prod.keys' }
+    @{ Re = 'no \.nsp or \.xci';                        Msg = '資料夾裡沒有 NSP / XCI 檔' }
+    @{ Re = 'NSZ file\(s\)';                            Msg = 'NSZ 還沒解壓：再按一次「放進遊戲庫」會自動解壓；還是不行的話自己用 nsz -D 解壓後拖進來' }
+    @{ Re = 'not enough space on the disk';               Msg = '硬碟空間不夠：轉換時要放三份遊戲資料。清出空間（設定裡的「清理空間」）或把遊戲資料夾移到別顆硬碟' }
+    @{ Re = 'cannot dispatch the .* gate|older than this packer|built before the shell route|ignores dm/env\.txt|this is not a shell'; Msg = '殼太舊，跟打包器不合：到設定按「改用最新殼」再轉一次' }
+    @{ Re = 'run-time shader capture boots the game in the Mac host|cannot pack .* on Windows|captures them by booting the game on a Mac'; Msg = '這款的著色器是遊戲執行時才產生的（Vulkan / OpenGL），要先在 iPad 上錄：換支援錄著色器的殼再轉' }
+    @{ Re = 'no shader libraries were produced|none of the \d+ shaders .* translates|no shader translator'; Msg = '著色器轉成 iPad 格式那一步失敗。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'extracting .* failed \(exit|nx_extract did not appear'; Msg = '解包失敗：遊戲檔可能不完整，或 prod.keys 太舊。重新下載遊戲檔，或到設定的「金鑰」換新的 prod.keys' }
+    @{ Re = 'rewriting \S+ failed \(exit';                Msg = '改寫遊戲程式那一步失敗。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'no game profile for title ID|做不出暫定設定檔'; Msg = '這款沒有設定檔，自動推導也失敗了。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'MemoryError|No space left on device|errno 28'; Msg = '電腦的記憶體或硬碟空間不夠，關掉別的程式、清出空間再試一次' }
+)
 function Fail-Reason($log) {
     $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
-    if ($lines -match 'without type trees') { return '這個 Unity 版本的著色器格式還不支援' }
-    if ($lines -match '32-bit|32 位元') { return '32 位元的遊戲，還不支援' }
+    foreach ($h in $failHints) { if ($lines -match $h.Re) { return $h.Msg } }
     $l = @($lines | Where-Object { $_ -match '\[x\] precheck: ' }) | Select-Object -Last 1
     if ($l) { return ($l -replace '^.*precheck:\s*', '').Trim() }
+    # nxn.ps1 自己的錯誤已經是中文（金鑰、Apple ID、iPad 連線），原樣顯示
+    $l = @($lines | Where-Object { $_ -match '出錯了：' -and $_ -notmatch '出錯了：打包失敗' -and $_ -match '[\u4e00-\u9fff]{2}' }) | Select-Object -Last 1
+    if ($l) { return ($l -replace '^.*出錯了：', '').Trim() }
     $l = @($lines | Where-Object { $_ -match '\[RED\]|\[x\]|Error|出錯了' -and $_ -notmatch '出錯了：打包失敗' }) | Select-Object -Last 1
-    if ($l) { return ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
+    if ($l) { return '沒見過的錯誤：' + ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
     return '打包失敗'
 }
 
