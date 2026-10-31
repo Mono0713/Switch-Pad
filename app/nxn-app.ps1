@@ -2044,7 +2044,7 @@ function Library-Call($lib, $fail) {
 # 打包失敗的原因：從記錄裡挑一行看得懂的
 function Fail-Reason($log) {
     $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
-    if ($lines -match 'without type trees') { return 'Unity 舊版的著色器格式還不支援' }
+    if ($lines -match 'without type trees') { return '這個 Unity 版本的著色器格式還不支援' }
     if ($lines -match '32-bit|32 位元') { return '32 位元的遊戲，還不支援' }
     $l = @($lines | Where-Object { $_ -match '\[x\] precheck: ' }) | Select-Object -Last 1
     if ($l) { return ($l -replace '^.*precheck:\s*', '').Trim() }
