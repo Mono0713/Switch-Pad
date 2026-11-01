@@ -611,7 +611,8 @@ function Cover-For($g) {
 function Icon-Sig($file) {
     $i = Get-Item -LiteralPath $file -ErrorAction SilentlyContinue
     if (-not $i) { return '' }
-    "$($i.FullName)|$($i.Length)|$($i.LastWriteTimeUtc.Ticks)"
+    # 開頭的 2：從 NSZ / XCZ 也會抓之後，舊的 .none 都要再試一次
+    "2|$($i.FullName)|$($i.Length)|$($i.LastWriteTimeUtc.Ticks)"
 }
 
 # 從本體讀圖示：nx_extract 會先寫 control.nacp 和 icon.jpg 再解程式，看到 icon.jpg 就把它停掉（--manifest 不解 RomFS）
@@ -635,40 +636,69 @@ function Queue-Icon($g, $dest) {
 }
 $iconTimer = New-Object Windows.Threading.DispatcherTimer
 $iconTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+function Start-Hidden($exe, $argLine, $dir = '') {
+    $psi = New-Object Diagnostics.ProcessStartInfo $exe
+    $psi.Arguments = $argLine
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    if ($dir) { $psi.WorkingDirectory = $dir }
+    $p = [Diagnostics.Process]::Start($psi)
+    $p.BeginOutputReadLine(); $p.BeginErrorReadLine()   # 不讀會塞住
+    return $p
+}
+function Start-IconExtract($j, $file) {
+    $j.Out = Join-Path $j.Tmp 'icon'
+    $j.Proc = Start-Hidden $nxExtract "`"$($j.Keys)`" `"$file`" - `"$($j.Out)`" --manifest"
+    $j.Stage = 'icon'; $j.Start = Get-Date
+}
+function End-IconJob($j, $ok) {
+    if (-not $j.Proc.HasExited) { try { $j.Proc.Kill() } catch { } }
+    $got = Join-Path $j.Out 'icon.jpg'
+    if ($ok -and (Test-Path $got)) {
+        Copy-Item -LiteralPath $got -Destination $j.Dest -Force
+        $card = $cards[$j.Dir]
+        if ($card) { Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $card.Tag (Load-Bitmap $j.Dest) }
+    } else {
+        # 讀不到（缺金鑰、檔案壞了）就記下當時的本體檔，本體沒換就不要每次開都重試
+        Set-Content -LiteralPath ([IO.Path]::ChangeExtension($j.Dest, '.none')) -Value (Icon-Sig $j.File)
+    }
+    Start-Sleep -Milliseconds 200
+    Remove-Item -LiteralPath $j.Tmp -Recurse -Force -ErrorAction SilentlyContinue
+    $script:iconJob = $null
+}
 $iconTimer.Add_Tick({
     if ($script:iconJob) {
         $j = $script:iconJob
-        $got = Join-Path $j.Tmp 'icon.jpg'
-        $done = $j.Proc.HasExited
-        if ((Test-Path $got) -or $done -or ((Get-Date) - $j.Start).TotalSeconds -gt 120) {
+        if ($j.Stage -eq 'nsz') {
+            # 只有 NSZ / XCZ：nx_extract 讀不了壓縮過的 NCA，先解到暫存資料夾（不動遊戲資料夾），再從解好的檔抓圖示
+            if ($j.Proc.HasExited) {
+                $made = @(Get-ChildItem -LiteralPath (Join-Path $j.Tmp 'out') -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(nsp|xci)$' }) | Select-Object -First 1
+                Remove-Item -LiteralPath (Join-Path $j.Tmp 'keys.txt') -Force -ErrorAction SilentlyContinue
+                if ($made) { try { Start-IconExtract $j $made.FullName } catch { End-IconJob $j $false } } else { End-IconJob $j $false }
+            } elseif (((Get-Date) - $j.Start).TotalMinutes -gt 15) { End-IconJob $j $false }
+            return
+        }
+        $got = Join-Path $j.Out 'icon.jpg'
+        if ((Test-Path $got) -or $j.Proc.HasExited -or ((Get-Date) - $j.Start).TotalSeconds -gt 120) {
             Start-Sleep -Milliseconds 300   # 等它寫完
-            if (-not $j.Proc.HasExited) { try { $j.Proc.Kill() } catch { } }
-            if (Test-Path $got) {
-                Copy-Item -LiteralPath $got -Destination $j.Dest -Force
-                $card = $cards[$j.Dir]
-                if ($card) { Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $card.Tag (Load-Bitmap $j.Dest) }
-            } else {
-                # 讀不到（缺金鑰、檔案壞了）就記下來，不要每次開都重試
-                Set-Content -LiteralPath ([IO.Path]::ChangeExtension($j.Dest, '.none')) -Value (Icon-Sig $j.File)
-            }
-            Start-Sleep -Milliseconds 200
-            Remove-Item -LiteralPath $j.Tmp -Recurse -Force -ErrorAction SilentlyContinue
-            $script:iconJob = $null
+            End-IconJob $j $true
         }
         return
     }
     if ($iconQueue.Count -eq 0) { $iconTimer.Stop(); return }
     $q = $iconQueue.Dequeue()
     $tmp = Join-Path $env:TEMP ('switchpad-icon-' + [guid]::NewGuid().ToString('N'))
-    $psi = New-Object Diagnostics.ProcessStartInfo $nxExtract
-    $psi.Arguments = "`"$($q.Keys)`" `"$($q.File)`" - `"$tmp`" --manifest"
-    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $j = @{ Proc = $null; Tmp = $tmp; Out = $tmp; Dest = $q.Dest; Dir = $q.Dir; File = $q.File; Keys = $q.Keys; Stage = ''; Start = Get-Date }
     try {
-        $p = [Diagnostics.Process]::Start($psi)
-        $p.BeginOutputReadLine(); $p.BeginErrorReadLine()   # 不讀會塞住
-        $script:iconJob = @{ Proc = $p; Tmp = $tmp; Dest = $q.Dest; Dir = $q.Dir; File = $q.File; Start = Get-Date }
-    } catch { }
+        if ($q.File -match '\.(nsz|xcz)$') {
+            # nsz 讀工作資料夾裡的 keys.txt（跟 nxn.ps1 解壓 NSZ 一樣），解完就刪
+            New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            Copy-Item -LiteralPath $q.Keys -Destination (Join-Path $tmp 'keys.txt')
+            $j.Proc = Start-Hidden (Get-Python) "-c `"import sys; sys.argv[0] = 'nsz'; from nsz import main; main()`" -D -o `"$(Join-Path $tmp 'out')`" `"$($q.File)`"" $tmp
+            $j.Stage = 'nsz'
+        } else { Start-IconExtract $j $q.File; $j.Out = Join-Path $tmp 'icon' }
+        $script:iconJob = $j
+    } catch { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 })
 $tileColors = '#FF453A', '#FF9F0A', '#30D158', '#0A84FF', '#BF5AF2', '#FF375F', '#64D2FF', '#FFD60A'
 function Paint-Icon($border, $letterBlock, $g, $bmp) {
