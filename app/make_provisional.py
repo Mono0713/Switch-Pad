@@ -66,6 +66,14 @@ if r.returncode:
     print('\n'.join(err[:8] + (['...'] if len(err) > 16 else []) + err[max(8, len(err) - 8):]))
     sys.exit('nx_extract failed')
 print(r.stdout[-2000:], r.stderr[-2000:])
+# 32-bit games (AArch32, New Super Mario Bros. U Deluxe): the rewriter and the shell's host are AArch64 only, and such a game
+# fails much later with an error that says nothing (patch_nso.py reads its .ARM.exidx as an eh_frame_hdr). main.npdm's flags
+# byte, bit 0, is Is64BitInstruction.
+npdm = ex / 'ExeFS' / 'main.npdm'
+if npdm.is_file():
+    meta = npdm.read_bytes()
+    if meta[:4] == b'META' and not meta[0xC] & 1:
+        sys.exit('這款是 32 位元（AArch32）的遊戲，打包器和殼目前只支援 64 位元的 Switch 遊戲，所以沒辦法打包。')
 F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv')
 dv = re.search(r'display version (\S+)', r.stdout)
 # the title ID: given (Switch Pad passes the one the packer asked for), else from the file name's [0100…]
@@ -116,4 +124,18 @@ if not any(l.partition('\t')[0] == 'mem_used' for l in rows):
         print('mem_used 0x%X (modules of about %d MB)' % (used, est >> 20))
 gt.write_text('\n'.join(rows) + '\n', encoding='utf-8')
 print('profile installed:', dest)
+# An OpenGL game whose shaders exist only while it runs (Roof Rage: main imports EGL and compiles GLSL, and neither main
+# nor the RomFS holds a source): profile_guess calls it gl_capture. The packer takes the GL route only for a profile with
+# a gl_capture.tsv (upstream's lists what its Mac run captured); with none it splits NVN shaders, finds none and fails.
+# A table with no rows says "GL route, nothing captured yet": the packer then builds a package that records the shaders
+# on the phone (Documents/gl_capture/<title ID>), which Switch Pad brings back for the next pack.
+imp = F['mods'].get('main', {}).get('imports', set())
+try:
+    files = (ex / 'romfs_manifest.tsv').read_text(encoding='utf-8', errors='replace').lower()
+except OSError:
+    files = ''
+if ('eglCreateWindowSurface' in imp and 'nvnBootstrapLoader' not in imp and F['gl_names'] and not F['gl_src']
+        and not re.search(r'\.(vert|frag|glsl|fs|vs)\b', files)):
+    (dest / 'gl_capture.tsv').write_text('# OpenGL game: shaders recorded on the phone (Documents/gl_capture/<title ID>), none yet\n', encoding='utf-8')
+    print('OpenGL game with run-time shaders: gl_capture.tsv (empty) -> the package records them on the phone')
 print((dest / 'game.tsv').read_text(encoding='utf-8'))

@@ -24,13 +24,17 @@ param(
     [switch]$Full,                   # 整包裝（遊戲資料也放在 App 裡），不分開傳
     [switch]$SaveBackup,             # 只備份 iPad 上的存檔（要 -Ipa）
     [string]$SaveRestore = '',       # 只把這份存檔備份還原回 iPad（要 -Ipa）
+    [switch]$SaveMigrate,            # 把舊的單款 App、合包的存檔存到電腦，遊戲庫裝好了就放進去（-Ipa 是遊戲庫）
+    [switch]$PullLogs,
+    [switch]$GlSync,                 # OpenGL 遊戲：在 iPad 上建好記錄著色器的資料夾，把記下的拿回電腦（-Ipa 是遊戲庫）
+    [switch]$ReuseIfFresh,           # 有 -Out 而且它比遊戲檔和記下的著色器都新，就沿用、不重新打包               # 把 App 在 iPad 上的記錄拿回電腦，列出殼還沒做的功能（紅字）
     [switch]$NoSaveBackup,           # 安裝前不自動備份存檔
     [switch]$NoPause
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
-$saveMode = $SaveBackup -or $SaveRestore
+$saveMode = $SaveBackup -or $SaveRestore -or $SaveMigrate -or $PullLogs -or $GlSync
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
@@ -159,12 +163,51 @@ try {
             $shellZip = $Shell
         }
         Write-Host "殼：$shellZip"
+        # 測試殼（例如多遊戲殼）要用同一版的打包器：殼和打包器改寫遊戲程式、翻譯著色器的方式要對得上，
+        # 用正式版的打包器配新殼會缺新版的修正（Boomerang Fu 的 DLC 被當成另一款）。原始碼下載一次，放在殼旁邊的 src-<版本>\
+        if ($customShell -and (Split-Path $shellZip -Leaf) -match '^shell-\d+-([0-9a-f]{7,40})') {
+            $sha = $Matches[1]
+            $match = Join-Path (Split-Path $shellZip -Parent) "src-$sha"
+            if (-not (Test-Path (Join-Path $match 'scripts\nxn_pack.py'))) {
+                Write-Host "下載跟這個殼同一版（$sha）的打包器原始碼（只要一次）"
+                $zip = "$match.zip"; $tmp = "$match.new"
+                Invoke-WebRequest -Uri "https://codeload.github.com/Mono0713/ns2ios-shell/zip/$sha" -OutFile $zip -UseBasicParsing
+                if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+                Expand-Archive $zip $tmp; Remove-Item $zip
+                $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
+                if (Test-Path $match) { Remove-Item -Recurse -Force $match }
+                Move-Item $inner.FullName $match; Remove-Item -Recurse -Force $tmp
+            }
+            # 正式版打包器裡自己做的暫定設定檔（這一版沒有的 dm\games\<title ID>）也拿過來用
+            foreach ($d in Get-ChildItem (Join-Path $srcDir 'dm\games') -Directory -ErrorAction SilentlyContinue) {
+                $dst = Join-Path $match "dm\games\$($d.Name)"
+                if ($d.Name -match '^[0-9A-Fa-f]{16}$' -and -not (Test-Path $dst)) { Copy-Item -Recurse $d.FullName $dst }
+            }
+            $srcDir = $match
+            Write-Host "打包器：$sha（跟殼同一版）"
+        }
         $packer = Join-Path $srcDir 'scripts\nxn_pack.py'
         foreach ($p in @($srcDir, $shellZip, $packer)) {
             if (-not (Test-Path $p)) { throw "還沒準備好打包器（缺 $p），請先在 Switch Pad 按「安裝」。" }
         }
         $nx = Get-ChildItem (Join-Path $root 'tools') -Recurse -Filter 'nx_extract.exe' | Select-Object -First 1
         if (-not $nx) { throw "在 $root\tools 找不到 nx_extract.exe，請先在 Switch Pad 按「安裝」。" }
+
+        # OpenGL 遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
+        $glArg = @(); $glDir = $null
+        $tidGuess = Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Name -match '\[(01[0-9A-Fa-f]{11}000)\]' } | Sort-Object Length -Descending | Select-Object -First 1
+        if ($tidGuess -and $tidGuess.Name -match '\[(01[0-9A-Fa-f]{11}000)\]') {
+            $glDir = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
+            $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
+            if ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
+        }
+        if ($ReuseIfFresh -and $Out -and (Test-Path -LiteralPath $Out)) {
+            $part = Get-Item -LiteralPath $Out
+            $newest = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci|nsz|xcz)$' }) +
+                      @(if ($glDir) { Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue }) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $newest -or $part.LastWriteTime -ge $newest.LastWriteTime) { Finish "沿用打包好的 $($part.Name)（沒有新的遊戲檔或著色器）" Green; return }
+            Write-Host '有新的遊戲檔或 iPad 上新記下的著色器，重新打包'
+        }
 
         $outArg = @()
         $existing = @(Get-ChildItem $GameDir -Filter '*.ipa' -ErrorAction SilentlyContinue)
@@ -190,6 +233,43 @@ try {
         Step "打包 $(Split-Path $GameDir -Leaf)（這一步最久，大作可能一小時以上）"
         $pyExe = (& $Python -c 'import sys; print(sys.executable)').Trim()
         $before = @(Get-ChildItem $GameDir -Filter '*.ipa' | ForEach-Object { $_.FullName })
+        # NSZ / XCZ（壓縮過的 NSP / XCI）：打包器只讀 NSP / XCI，先用 nsz -D 解壓成同名的 .nsp / .xci 放在遊戲資料夾，
+        # 原檔收進 NSZ原檔\（打包器只看第一層，留在外面它會拒絕整個資料夾）。上游 nxnative 的 decompress_nsz 也是這樣做
+        $packed = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsz|xcz)$' })
+        if ($packed.Count) {
+            Write-Host "有 $($packed.Count) 個壓縮檔（NSZ / XCZ），先解壓成 NSP / XCI（只要一次）"
+            $ErrorActionPreference = 'Continue'
+            & $pyExe -c 'import nsz' 2>$null | Out-Null
+            if ($LASTEXITCODE) {
+                Write-Host '安裝解壓工具 nsz（只要一次）'
+                & $pyExe -m pip install --disable-pip-version-check --quiet nsz 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -and $_ -ne 'System.Management.Automation.RemoteException' } | ForEach-Object { Write-Host $_ }
+            }
+            $ErrorActionPreference = 'Stop'
+            $origDir = Join-Path $GameDir 'NSZ原檔'
+            New-Item -ItemType Directory -Force -Path $origDir | Out-Null
+            foreach ($f in $packed) {
+                $dstName = [IO.Path]::GetFileNameWithoutExtension($f.Name) + $(if ($f.Extension -ieq '.xcz') { '.xci' } else { '.nsp' })
+                $dst = Join-Path $GameDir $dstName
+                if (-not (Test-Path -LiteralPath $dst)) {
+                    # nsz 讀工作資料夾裡的 keys.txt：在暫存資料夾放一份 prod.keys，解完就刪掉；解到一半失敗不會留下半個檔案
+                    $tmp = Join-Path ([IO.Path]::GetTempPath()) "switchpad-nsz-$PID"
+                    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+                    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+                    try {
+                        Copy-Item -LiteralPath $Keys -Destination (Join-Path $tmp 'keys.txt')
+                        Push-Location $tmp
+                        try { $c = RunExe $pyExe @('-c', "import sys; sys.argv[0] = 'nsz'; from nsz import main; main()", '-D', '-o', $tmp, $f.FullName) }
+                        finally { Pop-Location }
+                        $made = Join-Path $tmp $dstName
+                        if ($c -or -not (Test-Path -LiteralPath $made)) { throw "解壓 $($f.Name) 失敗（結束碼 $c）。可以自己用 nsz -D 解壓後再拖進來。" }
+                        Move-Item -LiteralPath $made -Destination $dst
+                        Write-Host "解壓好了：$dstName"
+                    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+                Move-Item -LiteralPath $f.FullName -Destination (Join-Path $origDir $f.Name) -Force
+            }
+            Write-Host "原本的壓縮檔移到 $origDir（確定打包沒問題後可以刪掉）"
+        }
         # 先看 prod.keys 打不打得開這款（只讀每個 NCA 開頭 1 KB，一秒內），太舊就現在說，不用等解包幾分鐘後才失敗
         $keyCheck = Join-Path $here 'keys_check.py'
         $keyFiles = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|nsz)$' } | ForEach-Object { $_.FullName })
@@ -217,7 +297,7 @@ try {
         Push-Location $srcDir
         try {
             $env:PYTHONUTF8 = '1'
-            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg)
+            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
             # 上游沒有這款的設定檔（迴旋鏢當初也是）：用 make_provisional.py 從遊戲檔猜一份暫定的，再打包一次
             if ($code) {
                 $nsps = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci)$' })
@@ -238,7 +318,7 @@ try {
                     $code = RunExe $pyExe @($prov, $srcDir, $nx.DirectoryName, $Keys, $baseFile.FullName, $(if ($upd) { $upd.FullName } else { '-' }), $ver, $tid)
                     if ($code) { throw "做不出暫定設定檔（結束碼 $code）" }
                     Step "用暫定設定檔重新打包 $(Split-Path $GameDir -Leaf)"
-                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg)
+                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
                 }
             }
         } finally { Pop-Location }
@@ -261,6 +341,8 @@ try {
 
         $Ipa = $ipaFile.FullName
         Ok "IPA：$Ipa（$([int]($ipaFile.Length / 1MB)) MB）"
+    } elseif ($SaveMigrate -and -not (Test-Path $Ipa)) {
+        # 遊戲庫還沒合成也能先把舊存檔存到電腦
     } else {
         if (-not (Test-Path $Ipa)) { throw "找不到 IPA：$Ipa" }
         $Ipa = (Resolve-Path $Ipa).Path
@@ -269,7 +351,10 @@ try {
     if ($PackOnly) { Finish "打包完成：$Ipa" Green; return }
 
     # ---- 簽章並安裝 ----
-    if ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
+    if ($GlSync) { Step '同步 OpenGL 著色器（iPad 要用 USB 接著並解鎖）' }
+    elseif ($PullLogs) { Step '讀 iPad 記錄（iPad 要用 USB 接著並解鎖）' }
+    elseif ($SaveMigrate) { Step '搬舊 App 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
+    elseif ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
     elseif ($SaveBackup) { Step '備份 iPad 存檔（iPad 要用 USB 接著並解鎖）' }
     else { Step '簽章並安裝到 iPad（iPad 要用 USB 接著並解鎖；第一次會問要不要信任這台電腦）' }
     # plumesign 的 --udid 其實要的是 Apple 行動裝置服務（usbmuxd）給這次連線的編號（1、2、3…），
@@ -371,6 +456,26 @@ try {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
         $tpy = Transfer-Python
         if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，讀不到 iPad 上的存檔。' }
+        if ($GlSync) {
+            $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial)
+            if ($c -and $c -ne 3) { Warn "沒拿到 iPad 上記下的著色器（結束碼 $c），照舊打包" }
+            Finish '著色器同步好了' Green
+            return
+        }
+        if ($PullLogs) {
+            $logRoot = Join-Path $ipaDir 'iPad記錄'
+            $c = RunExe $tpy @('-I', $saveTool, 'logs', $Ipa, $logRoot, '--udid', $dev.Serial)
+            if ($c -eq 3) { throw 'iPad 上還沒有裝這個 App。' }
+            if ($c) { throw "讀記錄失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
+            Finish "記錄在 $logRoot" Green
+            return
+        }
+        if ($SaveMigrate) {
+            $c = RunExe $tpy @('-I', $saveTool, 'migrate', $Ipa, $saveRoot, '--udid', $dev.Serial)
+            if ($c) { throw "搬存檔失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
+            Finish "舊 App 的存檔在 $saveRoot\舊App存檔" Green
+            return
+        }
         if ($SaveRestore) {
             if (-not (Test-Path -LiteralPath $SaveRestore)) { throw "找不到存檔備份：$SaveRestore" }
             $c = RunExe $tpy @('-I', $saveTool, 'restore', $Ipa, $SaveRestore, $saveRoot, '--udid', $dev.Serial)
@@ -462,6 +567,11 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         $map | ConvertTo-Json -Depth 3 | Set-Content $db -Encoding UTF8
     } catch { Warn "記錄安裝紀錄失敗：$($_.Exception.Message)" }
 
+    # OpenGL 遊戲：先在 iPad 上建好記錄著色器的資料夾（殼只寫進已經有的資料夾），順便拿回上次記下的
+    if (Test-Path $saveTool) {
+        $tpy = Transfer-Python
+        if ($tpy) { $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial) }
+    }
     Finish "裝好了：$Ipa 已經在 iPad 上，可以直接開。（免費帳號 7 天後要重簽）" Green
 } catch {
     Finish "出錯了：$($_.Exception.Message)" Red

@@ -22,7 +22,9 @@ class FakeAfc:
     def _p(self, p): return os.path.join(self.root, p.lstrip('/'))
     async def exists(self, p): return os.path.exists(self._p(p))
     async def listdir(self, p): return sorted(os.listdir(self._p(p)))
-    async def stat(self, p): return {'st_ifmt': 'S_IFDIR' if os.path.isdir(self._p(p)) else 'S_IFREG'}
+    async def stat(self, p):
+        q = self._p(p)
+        return {'st_ifmt': 'S_IFDIR' if os.path.isdir(q) else 'S_IFREG', 'st_mtime': datetime.datetime.fromtimestamp(os.path.getmtime(q))}
     async def get_file_contents(self, p):
         with open(self._p(p), 'rb') as f: return f.read()
     async def set_file_contents(self, p, data):
@@ -91,6 +93,125 @@ class Saves(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.docs, 'romfs', 'big')))
         before = os.path.join(self.root, '20261030-120005-before-restore', 'save', '0', 'progress.bin')
         with open(before, 'rb') as f: self.assertEqual(f.read(), b'newer')
+
+
+A, B, C = '0100000000010000', '0100000000020000', '0100000000030000'
+
+
+class Migrate(unittest.TestCase):
+    """Old apps' saves collected to the computer, then put into the library's save/<title ID>/."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.join(self.tmp, 'backups')
+        self.lib = os.path.join(self.tmp, 'lib', 'Documents')
+        self.one = os.path.join(self.tmp, 'one', 'Documents')     # a one-game app of A
+        self.pack = os.path.join(self.tmp, 'pack', 'Documents')   # a package of A, B and C
+        write(os.path.join(self.one, 'save', '0', 'a.bin'), b'A from one')
+        write(os.path.join(self.one, 'save_device', 'd.bin'), b'A device')
+        write(os.path.join(self.pack, 'save', A, 'a.bin'), b'A from pack')
+        write(os.path.join(self.pack, 'save', B, 'b.bin'), b'B from pack')
+        write(os.path.join(self.pack, 'save', C, 'c.bin'), b'C not in library')
+        os.makedirs(os.path.join(self.lib, 'save', B))   # made at the library's first start, still empty
+        write(os.path.join(self.lib, 'save', 'FFFF000000000000', 'z.bin'), b'other game')
+
+    def tearDown(self): shutil.rmtree(self.tmp)
+
+    def age(self, path, sec):
+        for r, _, fs in os.walk(path):
+            for f in fs: os.utime(os.path.join(r, f), (sec, sec))
+
+    def collect(self):
+        olds = [('org.nxnative.' + A.lower(), 'Game A', A, FakeAfc(os.path.dirname(self.one))),
+                ('org.nxnative.games', '合包', None, FakeAfc(os.path.dirname(self.pack)))]
+        return asyncio.run(sd.collect(olds, self.root, now=at(0)))
+
+    def place(self, overwrite=False):
+        return asyncio.run(sd.place(FakeAfc(os.path.dirname(self.lib)), sd.collected(self.root), [A, B], self.root, overwrite, now=at(1)))
+
+    def read(self, *p):
+        with open(os.path.join(self.lib, *p), 'rb') as f: return f.read()
+
+    def test_collect_then_place_after_old_apps_are_gone(self):
+        self.age(self.pack, 1_000_000); self.age(self.one, 2_000_000)
+        made = self.collect()
+        self.assertEqual(len(made), 2)
+        shutil.rmtree(os.path.dirname(self.one)); shutil.rmtree(os.path.dirname(self.pack))   # deleted from the iPad
+        self.assertEqual(self.place(), [A, B])
+        self.assertEqual(self.read('save', A, '0', 'a.bin'), b'A from one')     # changed last
+        self.assertEqual(self.read('save', A + '_device', 'd.bin'), b'A device')
+        self.assertEqual(self.read('save', B, 'b.bin'), b'B from pack')
+        self.assertFalse(os.path.exists(os.path.join(self.lib, 'save', C)))
+        self.assertEqual(self.read('save', 'FFFF000000000000', 'z.bin'), b'other game')
+        self.assertTrue(os.path.isfile(os.path.join(made[1], 'save', C, 'c.bin')))   # kept on the computer
+        self.assertTrue(os.path.isdir(os.path.join(self.root, '20261030-120001-before-migrate')))
+
+    def test_pack_newer_wins(self):
+        self.age(self.one, 1_000_000); self.age(self.pack, 2_000_000)
+        self.collect(); self.place()
+        self.assertEqual(self.read('save', A, 'a.bin'), b'A from pack')
+
+    def test_library_save_kept_unless_overwrite(self):
+        write(os.path.join(self.lib, 'save', A, 'mine.bin'), b'played in library')
+        self.collect()
+        self.assertEqual(self.place(), [B])
+        self.assertEqual(self.read('save', A, 'mine.bin'), b'played in library')
+        self.assertEqual(self.place(overwrite=True), [A, B])
+        self.assertFalse(os.path.exists(os.path.join(self.lib, 'save', A, 'mine.bin')))
+
+    def test_backups_list_ignores_collected(self):
+        self.collect()
+        self.assertEqual(sd.backups(self.root), [])
+
+    def test_old_apps(self):
+        apps = {'org.nxnative.games.library.T1': {}, 'org.nxnative.0100000000010000.T1': {'CFBundleDisplayName': 'Game A'},
+                'org.nxnative.games.p1a2b3c4d.T1': {'CFBundleDisplayName': '合包'}, 'org.nxnative.games.T1': {}, 'com.other.app': {}}
+        self.assertEqual(sd.old_apps(apps, 'org.nxnative.games.library'),
+                         [('org.nxnative.0100000000010000.T1', 'Game A', A), ('org.nxnative.games.T1', 'org.nxnative.games.T1', None),
+                          ('org.nxnative.games.p1a2b3c4d.T1', '合包', None)])
+
+
+class Logs(unittest.TestCase):
+    def test_pull_and_group(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            docs = os.path.join(tmp, 'dev', 'Documents')
+            write(os.path.join(docs, 'log.txt'), ('boot: game 010088100DD42000 (Roof Rage) of the games in this package\n'
+                  '[RED] sf: SendSyncRequest on 0x1f (24 bytes), not a host session\n'
+                  '[RED] sf: SendSyncRequest on 0x2a (32 bytes), not a host session\n'
+                  '[RED] NVN unimplemented function called: nvnFoo\nordinary line\n').encode())
+            write(os.path.join(docs, 'save', 'x.bin'))
+            dest = asyncio.run(sd.pull_logs(FakeAfc(os.path.join(tmp, 'dev')), os.path.join(tmp, 'out'), now=at(0)))
+            self.assertEqual(os.listdir(dest), ['log.txt'])
+            with open(os.path.join(dest, 'log.txt'), encoding='utf-8') as f: groups, total = sd.red_summary(f.read())
+            self.assertEqual(total, 2)
+            self.assertEqual(groups[0][0], 2)
+            self.assertIn('SendSyncRequest', groups[0][1])
+        finally:
+            shutil.rmtree(tmp)
+
+
+class GlSync(unittest.TestCase):
+    def test_games_and_sync(self):
+        import zipfile
+        tmp = tempfile.mkdtemp()
+        try:
+            ipa = os.path.join(tmp, 'lib.ipa')
+            with zipfile.ZipFile(ipa, 'w') as z:
+                z.writestr('Payload/DmIOS.app/games/010088100DD42000/dm/env.txt', 'DM_MEM=1\nDM_GL_CAPTURE=gl_capture/010088100DD42000\n')
+                z.writestr('Payload/DmIOS.app/games/0100000000010000/dm/env.txt', 'DM_MEM=1\n')
+            games = sd.gl_games(ipa)
+            self.assertEqual(games, {'010088100DD42000': 'gl_capture/010088100DD42000'})
+            dev = os.path.join(tmp, 'dev'); os.makedirs(os.path.join(dev, 'Documents'))
+            out = os.path.join(tmp, 'out')
+            self.assertEqual(asyncio.run(sd.gl_sync(FakeAfc(dev), games, out)), {'010088100DD42000': 0})
+            rec = os.path.join(dev, 'Documents', 'gl_capture', '010088100DD42000')
+            self.assertTrue(os.path.isdir(rec))   # made for the host to write into
+            write(os.path.join(rec, '0123456789abcdef.vert'), b'#version 330')
+            write(os.path.join(rec, '0123456789abcdef.vert.12.tmp'), b'partial')
+            self.assertEqual(asyncio.run(sd.gl_sync(FakeAfc(dev), games, out)), {'010088100DD42000': 1})
+            self.assertEqual(os.listdir(os.path.join(out, '010088100DD42000')), ['0123456789abcdef.vert'])
+        finally:
+            shutil.rmtree(tmp)
 
 
 if __name__ == '__main__':
