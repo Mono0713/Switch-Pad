@@ -74,6 +74,15 @@ if npdm.is_file():
     meta = npdm.read_bytes()
     if meta[:4] == b'META' and not meta[0xC] & 1:
         sys.exit('這款是 32 位元（AArch32）的遊戲，打包器和殼目前只支援 64 位元的 Switch 遊戲，所以沒辦法打包。')
+# homebrew（用 libnx 做的，例如啟動 SD 卡上移植版的捷徑「Mario Kart: Double Dash!! (recomp)」）沒有 ExeFS/sdk：殼跑不了
+if (ex / 'ExeFS' / 'main').is_file() and not (ex / 'ExeFS' / 'sdk').is_file():
+    sys.exit('這是 homebrew（例如啟動 SD 卡上模擬器或移植版的捷徑），不是用 Nintendo SDK 做的遊戲，殼跑不了。')
+# 系統 22 之後做的模組可能用 ZBIC 壓縮（Super Bunny Man 1.3.0 的 main），profile_guess 只會讀 LZ4：先存成不壓縮（打包器也會這樣做）
+try:
+    import nso_zbic
+    if (ex / 'ExeFS').is_dir(): nso_zbic.normalize_exefs(ex / 'ExeFS')
+except ImportError:
+    pass   # 舊版打包器沒有 nso_zbic.py
 F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv')
 dv = re.search(r'display version (\S+)', r.stdout)
 # the title ID: given (Switch Pad passes the one the packer asked for), else from the file name's [0100…]

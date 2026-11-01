@@ -778,7 +778,7 @@ function Update-SelCount {
     $t = @("遊戲庫 $($mine.Count) 款")
     if ($conv.Count) { $t += "$($conv.Count) 款要轉換" }
     $pad = @(); if ($add.Count) { $pad += "加入 $(& $names $add)" }; if ($del.Count) { $pad += "拿掉 $(& $names $del)" }; if ($upd.Count) { $pad += "更新 $(& $names $upd)" }
-    $sub = if ($pad.Count) { "裝到 iPad 會" + ($pad -join '，') } elseif ($gl.Count) { '裝到 iPad 時會拿回 OpenGL 著色器' } elseif ($left) { 'iPad 已是最新' } else { '' }
+    $sub = if ($pad.Count) { "裝到 iPad 會" + ($pad -join '，') } elseif ($gl.Count) { '裝到 iPad 時會拿回 iPad 記下的著色器' } elseif ($left) { 'iPad 已是最新' } else { '' }
     $ui.SelCount.Text = $t -join ' · '; $ui.SelCount.ToolTip = $null
     $ui.SelSub.Text = $sub; $ui.SelSub.ToolTip = $(if ($sub) { $sub } else { $null }); $ui.SelSub.Visibility = $(if ($sub) { 'Visible' } else { 'Collapsed' })
     $ui.Start.Content = if ($conv.Count) { "放進遊戲庫（轉換 $($conv.Count) 款）" } else { '放進遊戲庫' }
@@ -1006,10 +1006,10 @@ function Build-Library {
         if ($state.Job -and $state.Job.Game.Dir -eq $g.Dir) { $st.Text = '● 轉換中'; $st.Foreground = $blue; $g.Order = 0 }
         elseif ($state.Running -and @(Busy-Dirs) -contains $g.Dir) { $st.Text = '● 排隊中'; $st.Foreground = $gray; $g.Order = 0 }
         elseif ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
-        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = 'OpenGL 遊戲：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
+        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = '著色器要在 iPad 上記下來的遊戲（OpenGL 或執行時才編譯著色器）：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
         elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 要重新轉換'; $st.Foreground = $orange; $st.ToolTip = '換了新的殼或遊戲檔有更新：按「放進遊戲庫」重新轉換，iPad 上的這款先照舊能玩'; $g.Order = 1 }
         elseif ($g.InLib -and $g.Newer) { $st.Text = '● 等更新到 iPad'; $st.Foreground = $blue; $st.ToolTip = 'iPad 上的是舊的版本（換了殼或重新轉換過），按「裝到 iPad」換成新的，存檔都留著'; $g.Order = 2 }
-        elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的 OpenGL 著色器 $glN 個" }; $g.Order = 4 }
+        elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的著色器 $glN 個" }; $g.Order = 4 }
         elseif ($g.InLib -and $g.Ready) { $st.Text = '● 等裝到 iPad'; $st.Foreground = $blue; $st.ToolTip = '轉換好了，iPad 接上後按「裝到 iPad」'; $g.Order = 2 }
         elseif ($g.InLib) { $st.Text = '● 等轉換'; $st.Foreground = $gray; $st.ToolTip = '按「放進遊戲庫」在電腦上轉換'; $g.Order = 3 }
         elseif ($g.OnPad) { $st.Text = '● 裝到 iPad 時拿掉'; $st.Foreground = $red; $g.Order = 0 }
@@ -2099,15 +2099,37 @@ function Library-Call($lib, $fail) {
     return @{ Call = $call; Skip = $skip }
 }
 
-# 打包失敗的原因：從記錄裡挑一行看得懂的
+# 打包失敗的原因：記錄裡認得的錯誤換成白話，說要做什麼；認不得的挑最後一行錯誤原文
+# 每條是打包器（nxn_pack.py、shader_split.py）或 nxn.ps1 會印的訊息；越前面越優先（真正的原因通常比後面跟著的「打包失敗」早出現）
+$failHints = @(
+    @{ Re = 'without type trees';                         Msg = '這款 Unity 遊戲的著色器格式，打包器內建的 Unity 2017～6000 格式都讀不出來。請把「最近的記錄」給 Claude 看' }
+    @{ Re = '32-bit|32 位元|aarch32';                     Msg = '32 位元的遊戲，殼還不支援（只能跑 64 位元的 Switch 遊戲）' }
+    @{ Re = 'no base game for';                           Msg = '資料夾裡只有更新檔或 DLC，沒有遊戲本體：把本體的 NSP / XCI 拖到這款遊戲上' }
+    @{ Re = 'no update for';                              Msg = '這款要搭配特定版本的更新檔，資料夾裡沒有：把更新檔的 NSP 拖到這款遊戲上' }
+    @{ Re = 'folder holds \d+ different games';          Msg = '資料夾裡混了不同遊戲的檔案：一個資料夾只放一款（本體、更新、DLC）' }
+    @{ Re = 'no game could be identified';                Msg = '認不出資料夾裡的遊戲：XCI 要跟 prod.keys 對得上，可以改用 NSP，或到設定的「金鑰」換新的 prod.keys' }
+    @{ Re = 'no \.nsp or \.xci';                        Msg = '資料夾裡沒有 NSP / XCI 檔' }
+    @{ Re = 'NSZ file\(s\)';                            Msg = 'NSZ 還沒解壓：再按一次「放進遊戲庫」會自動解壓；還是不行的話自己用 nsz -D 解壓後拖進來' }
+    @{ Re = 'not enough space on the disk';               Msg = '硬碟空間不夠：轉換時要放三份遊戲資料。清出空間（設定裡的「清理空間」）或把遊戲資料夾移到別顆硬碟' }
+    @{ Re = 'cannot dispatch the .* gate|older than this packer|built before the shell route|ignores dm/env\.txt|this is not a shell'; Msg = '殼太舊，跟打包器不合：到設定按「改用最新殼」再轉一次' }
+    @{ Re = 'run-time shader capture boots the game in the Mac host|cannot pack .* on Windows|captures them by booting the game on a Mac'; Msg = '這款的著色器是遊戲執行時才產生的（Vulkan / OpenGL），要先在 iPad 上錄：換支援錄著色器的殼再轉' }
+    @{ Re = 'no shader libraries were produced|none of the \d+ shaders .* translates|no shader translator'; Msg = '著色器轉成 iPad 格式那一步失敗。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'extracting .* failed \(exit|nx_extract did not appear'; Msg = '解包失敗：遊戲檔可能不完整，或 prod.keys 太舊。重新下載遊戲檔，或到設定的「金鑰」換新的 prod.keys' }
+    @{ Re = 'rewriting \S+ failed \(exit';                Msg = '改寫遊戲程式那一步失敗。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'no game profile for title ID|做不出暫定設定檔'; Msg = '這款沒有設定檔，自動推導也失敗了。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'zbic package could not be installed';          Msg = '這款用了新的壓縮格式（ZBIC），要的解壓套件裝不起來：確認電腦有網路後再轉一次' }
+    @{ Re = 'MemoryError|No space left on device|errno 28'; Msg = '電腦的記憶體或硬碟空間不夠，關掉別的程式、清出空間再試一次' }
+)
 function Fail-Reason($log) {
     $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
-    if ($lines -match 'without type trees') { return '這個 Unity 版本的著色器格式還不支援' }
-    if ($lines -match '32-bit|32 位元') { return '32 位元的遊戲，還不支援' }
+    foreach ($h in $failHints) { if ($lines -match $h.Re) { return $h.Msg } }
     $l = @($lines | Where-Object { $_ -match '\[x\] precheck: ' }) | Select-Object -Last 1
     if ($l) { return ($l -replace '^.*precheck:\s*', '').Trim() }
+    # nxn.ps1 自己的錯誤已經是中文（金鑰、Apple ID、iPad 連線），原樣顯示
+    $l = @($lines | Where-Object { $_ -match '出錯了：' -and $_ -notmatch '出錯了：打包失敗' -and $_ -match '[\u4e00-\u9fff]{2}' }) | Select-Object -Last 1
+    if ($l) { return ($l -replace '^.*出錯了：', '').Trim() }
     $l = @($lines | Where-Object { $_ -match '\[RED\]|\[x\]|Error|出錯了' -and $_ -notmatch '出錯了：打包失敗' }) | Select-Object -Last 1
-    if ($l) { return ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
+    if ($l) { return '沒見過的錯誤：' + ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
     return '打包失敗'
 }
 
