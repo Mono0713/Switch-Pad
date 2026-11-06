@@ -1051,7 +1051,7 @@ function Build-Library {
         else { $st.Text = '' }
         if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) {
             $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '💾 存檔待傳'
-            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消') -join "`n"
+            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「裝到 iPad」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })) -join "`n"
         }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
         if ($preWarn.Count -and -not $why) {
@@ -1576,15 +1576,23 @@ function Import-Save($g, $paths) {
         if ($script:saveNewest) { $notes += "（裡面有好幾份，用最新的：$(Split-Path $src -Leaf)）" }
         if (Test-Path -LiteralPath $pend) { $notes += '（這款已經有一份待傳的存檔，會換成這份）' }
         $msg = "把這份存檔放進「$($g.Name)」？`n`n$($files.Count) 個檔案，共 $kb KB`n最上層：$($top -join '、')$more`n" + $(if ($notes.Count) { ($notes -join "`n") + "`n" } else { '' }) + "`n" +
-               "⚠ 下次「裝到 iPad」時，會用它取代 iPad 上這款的存檔。iPad 上原本的存檔會先備份到電腦，在「還原存檔…」裡找得到（名稱有 before-import）。"
-        if ([Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'YesNo', 'Warning') -ne 'Yes') { return }
+               "下次「裝到 iPad」時放進 iPad：`n`n" +
+               "按「是」：另存成一份新的存檔，iPad 上現在的存檔不動。開遊戲前的設定畫面「存檔」裡可以切換。`n" +
+               "按「否」：取代 iPad 上這款現在使用中的存檔。`n`n" +
+               "不管選哪個，iPad 上原本的存檔都會先備份到電腦，在「還原存檔…」裡找得到（名稱有 before-import）。"
+        $ans = [Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'YesNoCancel', 'Question')
+        if ($ans -eq 'Cancel') { return }
+        # 另存成新的一份（殼的 SaveSlots.swift，saves_data.py put --slot）：名稱用來源和時間，iPad 上可以改名
+        $slot = if ($ans -eq 'Yes') { '匯入' + $(if ($script:saveFrom) { " $($script:saveFrom)" } else { '' }) + ' ' + (Get-Date).ToString('MM/dd HH:mm') } else { '' }
         # 先整份複製到暫存，再換掉舊的待傳（拖進來的可能就是待傳資料夾裡的東西）
         $stage = Join-Path $tmp 'stage'
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
         foreach ($c in $all) { Copy-Item -LiteralPath $c.FullName -Destination $stage -Recurse -Force }
         if (Test-Path -LiteralPath $pend) { Remove-Item -LiteralPath $pend -Recurse -Force }
         Move-Item -LiteralPath $stage -Destination $pend
-        Set-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -Value $tid -Encoding ASCII
+        # 第一行 title ID；第二行 slot=<名稱> 表示另存成新的一份存檔，沒有就是取代使用中的
+        $lines = @($tid) + $(if ($slot) { @("slot=$slot") } else { @() })
+        Set-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -Value $lines -Encoding UTF8
         Build-Library
     } catch {
         [void][Windows.MessageBox]::Show($win, "匯入存檔失敗：$($_.Exception.Message)", '匯入存檔')
