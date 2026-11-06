@@ -26,8 +26,8 @@ or glslc_capture/<title ID>, set in the game's dm/env.txt). It makes those folde
 the iPad (the host only writes files into one that exists) and copies what was recorded to <shaders folder>/<title ID>/,
 which the next pack of that game takes with --gl-capture (or --glslc-capture).
 
-logs copies the app's own logs (Documents/log.txt, log.prev.txt and the other top-level .txt / .log files) to
-<logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
+logs copies the app's own logs (Documents/log.txt, log.prev.txt, the other top-level .txt / .log files and each game's own
+last two runs in Documents/logs/) to <logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
 does not have yet are what a game stops on, and this is the list to implement next (Ryujinx's HLE, MIT, is the reference).
 
 migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
@@ -430,11 +430,21 @@ async def pull_logs(afc, root, now=None):
         os.makedirs(dest, exist_ok=True)
         with open(os.path.join(dest, name), 'wb') as f: f.write(await afc.get_file_contents(p))
         got.append(name)
+    # each game's own last two runs (the shell keeps them in Documents/logs/<title ID>.txt / .prev.txt, so a crash is not lost when another game is opened)
+    per_game = []
+    try: names = await afc.listdir((base or '') + '/logs')
+    except Exception: names = []
+    for name in sorted(names):
+        if not LOG_FILES.match(name): continue
+        os.makedirs(os.path.join(dest, 'logs'), exist_ok=True)
+        with open(os.path.join(dest, 'logs', name), 'wb') as f: f.write(await afc.get_file_contents((base or '') + '/logs/' + name))
+        per_game.append('logs/' + name)
+    got += per_game
     if not got:
         print('iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
         return None
     print('記錄存到 %s：%s' % (dest, '、'.join(got)))
-    for name in ('log.txt', 'log.prev.txt'):
+    for name in ['log.txt', 'log.prev.txt'] + per_game:
         f = os.path.join(dest, name)
         if not os.path.isfile(f): continue
         with open(f, encoding='utf-8', errors='replace') as fh: text = fh.read()
@@ -442,6 +452,8 @@ async def pull_logs(afc, root, now=None):
         groups, total = red_summary(text)
         print('\n== %s%s：%d 種紅字' % (name, '（%s）' % '、'.join(g[1] for g in games[-1:]) if games else '', total))
         for n, msg in groups: print('%5d  %s' % (n, msg[:200]))
+        crash = [l for l in text.splitlines() if '[dm] CRASH' in l or 'watchdog: no progress' in l]
+        if crash: print('  閃退：' + crash[0][:200])
     return dest
 
 
