@@ -581,9 +581,14 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         if (-not $tpy) { $saveNote = '待傳的存檔這次沒放進 iPad：傳檔工具裝不起來' }
         foreach ($gd in $(if ($tpy) { $pending } else { @() })) {
             $tidFile = Join-Path $gd '存檔待傳.txt'
-            $tid = if (Test-Path -LiteralPath $tidFile) { (Get-Content -LiteralPath $tidFile -Raw).Trim() } else { '' }
-            Step "把存檔放進 iPad：$(Split-Path $gd -Leaf)"
-            $c = RunExe $tpy @('-I', $saveTool, 'put', $Ipa, (Join-Path $gd '存檔待傳'), $saveRoot, '--tid', $tid, '--udid', $dev.Serial)
+            # 第一行 title ID，第二行 slot=<名稱> 時另存成那款的一份新存檔（不動使用中的）
+            $tl = if (Test-Path -LiteralPath $tidFile) { @(Get-Content -LiteralPath $tidFile -Encoding UTF8 | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+            $tid = if ($tl.Count) { $tl[0].TrimStart([char]0xFEFF) } else { '' }
+            $slot = @($tl | Where-Object { $_ -like 'slot=*' } | ForEach-Object { $_.Substring(5) }) | Select-Object -First 1
+            Step "把存檔放進 iPad：$(Split-Path $gd -Leaf)$(if ($slot) { "（另存成「$slot」）" })"
+            $pa = @('-I', $saveTool, 'put', $Ipa, (Join-Path $gd '存檔待傳'), $saveRoot, '--tid', $tid, '--udid', $dev.Serial)
+            if ($slot) { $pa += @('--slot', $slot) }
+            $c = RunExe $tpy $pa
             if ($c -eq 5) { Write-Host '這個 App 裡沒有這款，跳過'; continue }
             if ($c) { Warn "存檔沒放進去（結束碼 $c），待傳的還留著，下次裝到 iPad 會再試"; $saveNote = '有存檔沒放進 iPad，看上面的記錄'; continue }
             $done = Join-Path $gd ('存檔備份\已匯入\' + (Get-Date).ToString('yyyyMMdd-HHmmss'))
