@@ -463,6 +463,17 @@ def red_summary(text, top=40):
     return sorted(groups.values(), key=lambda g: -g[0])[:top], len(groups)
 
 
+async def fetch_log(afc, src, dst):
+    """One log file from the iPad; a file that cannot be read is reported and skipped, never ends the pull (written only once its contents arrive)."""
+    try: data = await afc.get_file_contents(src)
+    except Exception as e:
+        print('讀不到 iPad 上的 %s（%s），跳過' % (src.split('/', 2)[-1] if src.startswith('/') else src, str(e)[:120]))
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, 'wb') as f: f.write(data)
+    return True
+
+
 async def pull_logs(afc, root, now=None):
     base = await docs_base(afc)
     dest = os.path.join(root, (now or datetime.datetime.now()).strftime('%Y%m%d-%H%M%S'))
@@ -471,18 +482,14 @@ async def pull_logs(afc, root, now=None):
         if not LOG_FILES.match(name): continue
         p = base + '/' + name
         if (await afc.stat(p)).get('st_ifmt') == 'S_IFDIR': continue
-        os.makedirs(dest, exist_ok=True)
-        with open(os.path.join(dest, name), 'wb') as f: f.write(await afc.get_file_contents(p))
-        got.append(name)
+        if await fetch_log(afc, p, os.path.join(dest, name)): got.append(name)
     # each game's own last two runs (the shell keeps them in Documents/logs/<title ID>.txt / .prev.txt, so a crash is not lost when another game is opened)
     per_game = []
     try: names = await afc.listdir((base or '') + '/logs')
     except Exception: names = []
     for name in sorted(names):
         if not LOG_FILES.match(name): continue
-        os.makedirs(os.path.join(dest, 'logs'), exist_ok=True)
-        with open(os.path.join(dest, 'logs', name), 'wb') as f: f.write(await afc.get_file_contents((base or '') + '/logs/' + name))
-        per_game.append('logs/' + name)
+        if await fetch_log(afc, (base or '') + '/logs/' + name, os.path.join(dest, 'logs', name)): per_game.append('logs/' + name)
     got += per_game
     if not got:
         print('iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
