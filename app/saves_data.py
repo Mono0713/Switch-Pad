@@ -463,10 +463,14 @@ def red_summary(text, top=40):
     return sorted(groups.values(), key=lambda g: -g[0])[:top], len(groups)
 
 
+unreadable = []
+
+
 async def fetch_log(afc, src, dst):
     """One log file from the iPad; a file that cannot be read is reported and skipped, never ends the pull (written only once its contents arrive)."""
     try: data = await afc.get_file_contents(src)
     except Exception as e:
+        unreadable.append(src)
         print('讀不到 iPad 上的 %s（%s），跳過' % (src.split('/', 2)[-1] if src.startswith('/') else src, str(e)[:120]))
         return False
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -492,7 +496,7 @@ async def pull_logs(afc, root, now=None):
         if await fetch_log(afc, (base or '') + '/logs/' + name, os.path.join(dest, 'logs', name)): per_game.append('logs/' + name)
     got += per_game
     if not got:
-        print('iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
+        print('iPad 上有記錄但一個都讀不到（見上面）' if unreadable else 'iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
         return None
     print('記錄存到 %s：%s' % (dest, '、'.join(got)))
     for name in ['log.txt', 'log.prev.txt'] + per_game:
