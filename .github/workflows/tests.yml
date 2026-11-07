@@ -20,6 +20,7 @@ jobs:
       - name: Python helpers
         run: |
           python tests/test_keys_check.py -v
+          python tests/test_icon_read.py -v
           python tests/test_saves_data.py -v
       - name: PowerShell scripts parse
         shell: powershell

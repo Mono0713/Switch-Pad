@@ -11,14 +11,19 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py backup  <ipa> <backups folder> [--udid UDID] [--keep N] [--tag TEXT]
   saves_data.py restore <ipa> <one backup folder> <backups folder> [--udid UDID]
   saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
-  saves_data.py put     <ipa> <save folder> <backups folder> [--tid TITLEID] [--udid UDID]
+  saves_data.py put     <ipa> <save folder> <backups folder> [--tid TITLEID] [--slot NAME] [--udid UDID]
   saves_data.py logs    <ipa> <logs folder> [--udid UDID]
   saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
 
 put places one game's save from the PC (what Switch Pad takes when a save is dropped on a game card: an emulator's, JKSV's or
 Checkpoint's export, which are the same plain tree the shell keeps) as that game's save: save/ in a one-game app, save/<title
 ID> in the library or a package, which must have that game (exit 5 when it does not). The app's saves are backed up first, as
-restore does, and only that one game's folder (and its .work / .new) is replaced.
+restore does, and only that one game's folder (and its .work / .new) is replaced. With --slot the save in use is not touched: the
+save becomes a new save slot of that game, named NAME, which the player picks on the launcher (the shell's SaveSlots.swift).
+
+Save slots: the shell keeps the save in use where it always was and every other slot of that game in <save folder>.slots/<n>/save
+(and device), named in <save folder>.slots/slots.json ({"active": 1, "slots": [{"id": 1, "name": "..."}]}). In the library they
+are inside save/, so backup and restore take them along with the rest; a one-game app's save.slots is one of FOLDERS for that.
 
 glsync is for games whose shaders exist only while they run: an OpenGL game (Roof Rage) records each GLSL shader it
 compiles to Documents/<DM_GL_CAPTURE>, an NVN game compiling GLSL with GLSLC (Unrailed 2) each output to <DM_GLSLC_CAPTURE> (gl_capture/<title ID>
@@ -26,8 +31,8 @@ or glslc_capture/<title ID>, set in the game's dm/env.txt). It makes those folde
 the iPad (the host only writes files into one that exists) and copies what was recorded to <shaders folder>/<title ID>/,
 which the next pack of that game takes with --gl-capture (or --glslc-capture).
 
-logs copies the app's own logs (Documents/log.txt, log.prev.txt and the other top-level .txt / .log files) to
-<logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
+logs copies the app's own logs (Documents/log.txt, log.prev.txt, the other top-level .txt / .log files and each game's own
+last two runs in Documents/logs/) to <logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
 does not have yet are what a game stops on, and this is the list to implement next (Ryujinx's HLE, MIT, is the reference).
 
 migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
@@ -54,7 +59,7 @@ import shutil
 import sys
 import zipfile
 
-FOLDERS = ('save', 'save_device')
+FOLDERS = ('save', 'save_device', 'save.slots')
 DIGEST = '.digest'
 NOT_INSTALLED = 3
 NOT_IN_APP = 5
@@ -197,22 +202,61 @@ def local_files(folder):
     return sorted(os.path.relpath(os.path.join(r, f), folder).replace(os.sep, '/') for r, _, fs in os.walk(folder) for f in fs)
 
 
-async def put(afc, src, root, dest, now=None):
-    """Replace the save folder dest (relative to Documents) with the PC folder src, after backing up the app's saves."""
-    files = local_files(src)
-    if not files: raise SystemExit('這個資料夾裡沒有檔案：%s' % src)
-    await backup(afc, root, keep=0, tag='before-import', now=now)
-    base = await docs_base(afc)
-    p = base + '/' + dest
-    for leftover in (p, p + '.work', p + '.new'):
-        if await afc.exists(leftover): await afc.rm(leftover, force=True)
-    n = await push_tree(afc, src, p)
-    # read the sizes back: a save cut short is worse than none
+async def check_sizes(afc, src, p, files):
+    """Read the sizes back: a save cut short is worse than none."""
     bad = []
     for rel in files:
         st = await afc.stat(p + '/' + rel)
         if 'st_size' in st and int(st['st_size']) != os.path.getsize(os.path.join(src, *rel.split('/'))): bad.append(rel)
     if bad: raise SystemExit('這些檔案沒有完整傳到：%s' % '、'.join(bad[:5]))
+
+
+SLOTS = '.slots'
+SLOTS_JSON = 'slots.json'
+
+
+async def read_slots(afc, sd):
+    """slots.json of one game's slots folder, or the one the shell starts from (one slot, in use) when there is none yet."""
+    data = None
+    if await afc.exists(sd + '/' + SLOTS_JSON):
+        with contextlib.suppress(ValueError, UnicodeDecodeError):
+            data = json.loads((await afc.get_file_contents(sd + '/' + SLOTS_JSON)).decode('utf-8'))
+    if not isinstance(data, dict) or not isinstance(data.get('slots'), list) or not data['slots']:
+        data = {'active': 1, 'slots': [{'id': 1, 'name': '存檔 1'}]}
+    return data
+
+
+def next_slot(data, names):
+    """The number of a new slot: past every slot listed and every numbered folder there."""
+    ids = [int(x['id']) for x in data['slots'] if isinstance(x, dict) and str(x.get('id', '')).isdigit()]
+    ids += [int(n) for n in names if n.isdigit()]
+    return max(ids + [int(data.get('active', 1) or 1)]) + 1
+
+
+async def put(afc, src, root, dest, slot='', now=None):
+    """Replace the save folder dest (relative to Documents) with the PC folder src, after backing up the app's saves; with slot,
+    add src as a new save slot of that game named slot instead, leaving the save in use as it is."""
+    files = local_files(src)
+    if not files: raise SystemExit('這個資料夾裡沒有檔案：%s' % src)
+    await backup(afc, root, keep=0, tag='before-import', now=now)
+    base = await docs_base(afc)
+    if slot:
+        sd = base + '/' + dest + SLOTS
+        data = await read_slots(afc, sd)
+        names = [n for n in await afc.listdir(sd) if n not in ('.', '..', '')] if await afc.exists(sd) else []
+        k = next_slot(data, names)
+        p = '%s/%d/save' % (sd, k)
+        n = await push_tree(afc, src, p)
+        await check_sizes(afc, src, p, files)
+        data['slots'].append({'id': k, 'name': slot})
+        await afc.set_file_contents(sd + '/' + SLOTS_JSON, json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
+        print('存檔放進 iPad 了：%d 個檔案 → %s 的新存檔「%s」（在遊戲開始前的設定畫面「存檔」裡切換）' % (n, dest, slot))
+        return
+    p = base + '/' + dest
+    for leftover in (p, p + '.work', p + '.new'):
+        if await afc.exists(leftover): await afc.rm(leftover, force=True)
+    n = await push_tree(afc, src, p)
+    await check_sizes(afc, src, p, files)
     print('存檔放進 iPad 了：%d 個檔案 → %s' % (n, dest))
 
 
@@ -430,11 +474,21 @@ async def pull_logs(afc, root, now=None):
         os.makedirs(dest, exist_ok=True)
         with open(os.path.join(dest, name), 'wb') as f: f.write(await afc.get_file_contents(p))
         got.append(name)
+    # each game's own last two runs (the shell keeps them in Documents/logs/<title ID>.txt / .prev.txt, so a crash is not lost when another game is opened)
+    per_game = []
+    try: names = await afc.listdir((base or '') + '/logs')
+    except Exception: names = []
+    for name in sorted(names):
+        if not LOG_FILES.match(name): continue
+        os.makedirs(os.path.join(dest, 'logs'), exist_ok=True)
+        with open(os.path.join(dest, 'logs', name), 'wb') as f: f.write(await afc.get_file_contents((base or '') + '/logs/' + name))
+        per_game.append('logs/' + name)
+    got += per_game
     if not got:
         print('iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
         return None
     print('記錄存到 %s：%s' % (dest, '、'.join(got)))
-    for name in ('log.txt', 'log.prev.txt'):
+    for name in ['log.txt', 'log.prev.txt'] + per_game:
         f = os.path.join(dest, name)
         if not os.path.isfile(f): continue
         with open(f, encoding='utf-8', errors='replace') as fh: text = fh.read()
@@ -442,6 +496,8 @@ async def pull_logs(afc, root, now=None):
         groups, total = red_summary(text)
         print('\n== %s%s：%d 種紅字' % (name, '（%s）' % '、'.join(g[1] for g in games[-1:]) if games else '', total))
         for n, msg in groups: print('%5d  %s' % (n, msg[:200]))
+        crash = [l for l in text.splitlines() if '[dm] CRASH' in l or 'watchdog: no progress' in l]
+        if crash: print('  閃退：' + crash[0][:200])
     return dest
 
 
@@ -474,7 +530,7 @@ def main():
     p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
     p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
     p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root')
-    p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default='')
+    p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default=''); p.add_argument('--slot', default='')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
     try: import pymobiledevice3  # noqa: F401
@@ -490,7 +546,7 @@ def main():
         if not dest:
             print('這個 App 裡沒有 %s 這款' % (a.tid or '這'))
             return NOT_IN_APP
-        work = lambda afc: put(afc, a.src, a.root, dest)
+        work = lambda afc: put(afc, a.src, a.root, dest, a.slot)
     elif a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
     else: work = lambda afc: restore(afc, a.src, a.root)
     return asyncio.run(on_device(a, work))

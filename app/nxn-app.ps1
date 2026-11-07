@@ -60,7 +60,7 @@ function Move-ToAppDir {
     $appDir = Join-Path $base $appDirName
     $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'nxn[\w-]*\.ps1' })
-    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
+    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
         ForEach-Object { Get-ChildItem -LiteralPath $base -File -Filter $_ -ErrorAction SilentlyContinue }
     $dirs = @('work', '工具') | ForEach-Object { Join-Path $base $_ } | Where-Object { Test-Path -LiteralPath $_ }
     if (-not ($plain.Count + @($dirs).Count)) { return }
@@ -566,7 +566,8 @@ function Support-Of($g) {
 }
 
 # ---------------------------------------------------------------- 遊戲圖示：一律用遊戲檔案裡的圖示（自己換的 cover.* 優先）
-# 快取在 work\covers\<名稱>.png：先從資料夾裡的 IPA 拿（就是遊戲圖示），沒有 IPA 就在背景用 nx_extract 從本體讀出來
+# 快取在 work\covers\<名稱>.png：先從資料夾裡的 IPA 拿（就是遊戲圖示），沒有 IPA 就在背景用 icon_read.py 直接從本體讀出來
+# （NSP / XCI / NSZ / XCZ 都行，只讀 Control NCA，一兩秒），讀不到才退回用 nx_extract 解
 # 讀過的圖示留在記憶體（跟著檔案的修改時間）：每次重畫卡片都從磁碟解一次 PNG 會卡
 $bmpCache = @{}
 function Load-Bitmap($path) {
@@ -611,14 +612,15 @@ function Cover-For($g) {
 function Icon-Sig($file) {
     $i = Get-Item -LiteralPath $file -ErrorAction SilentlyContinue
     if (-not $i) { return '' }
-    # 開頭的 2：從 NSZ / XCZ 也會抓之後，舊的 .none 都要再試一次
-    "2|$($i.FullName)|$($i.Length)|$($i.LastWriteTimeUtc.Ticks)"
+    # 開頭的 3：改成 icon_read.py 直接讀之後，舊的 .none 都要再試一次
+    "3|$($i.FullName)|$($i.Length)|$($i.LastWriteTimeUtc.Ticks)"
 }
 
-# 從本體讀圖示：nx_extract 會先寫 control.nacp 和 icon.jpg 再解程式，看到 icon.jpg 就把它停掉（--manifest 不解 RomFS）
+# 從本體讀圖示：先用 icon_read.py 直接讀；讀不到再用 nx_extract（它會先寫 control.nacp 和 icon.jpg 再解程式，看到 icon.jpg 就把它停掉，--manifest 不解 RomFS）
 $iconQueue = New-Object System.Collections.Queue
 $iconJob = $null
 $nxExtract = Join-Path $work 'tools\nx_extract.exe'
+$iconRead = Join-Path $here 'icon_read.py'
 # prod.keys：Switch Pad 自己的（拖進視窗的會放在 work\）→ Ryujinx → yuzu 系的模擬器（跟 nxn.ps1 的 Find-Keys 一樣）
 function Find-Keys {
     $c = @((Join-Path $work 'prod.keys'), (Join-Path $base 'prod.keys'), "$env:APPDATA\Ryujinx\system\prod.keys")
@@ -628,7 +630,8 @@ function Find-Keys {
 }
 function Queue-Icon($g, $dest) {
     $prodKeys = Find-Keys
-    if (-not (Test-Path $nxExtract) -or -not $prodKeys) { return }
+    # 還沒下載打包工具也能讀（icon_read.py 只要 Python）
+    if (-not $prodKeys -or -not ((Test-Path $iconRead) -or (Test-Path $nxExtract))) { return }
     if ($iconJob -and $iconJob.Dest -eq $dest) { return }
     foreach ($q in $iconQueue) { if ($q.Dest -eq $dest) { return } }
     $iconQueue.Enqueue(@{ Dir = $g.Dir; File = $g.BaseFile; Dest = $dest; Keys = $prodKeys })
@@ -669,6 +672,16 @@ function End-IconJob($j, $ok) {
 $iconTimer.Add_Tick({
     if ($script:iconJob) {
         $j = $script:iconJob
+        if ($j.Stage -eq 'py') {
+            if ($j.Proc.HasExited -or ((Get-Date) - $j.Start).TotalSeconds -gt 60) {
+                if (-not $j.Proc.HasExited) { try { $j.Proc.Kill() } catch { } }
+                $got = Join-Path $j.Out 'icon.jpg'
+                if (Test-Path -LiteralPath $got) { End-IconJob $j $true }
+                elseif (Test-Path $nxExtract) { try { Start-OldIcon $j } catch { End-IconJob $j $false } }
+                else { End-IconJob $j $false }
+            }
+            return
+        }
         if ($j.Stage -eq 'nsz') {
             # 只有 NSZ / XCZ：nx_extract 讀不了壓縮過的 NCA，先解到暫存資料夾（不動遊戲資料夾），再從解好的檔抓圖示
             if ($j.Proc.HasExited) {
@@ -689,17 +702,31 @@ $iconTimer.Add_Tick({
     $q = $iconQueue.Dequeue()
     $tmp = Join-Path $env:TEMP ('switchpad-icon-' + [guid]::NewGuid().ToString('N'))
     $j = @{ Proc = $null; Tmp = $tmp; Out = $tmp; Dest = $q.Dest; Dir = $q.Dir; File = $q.File; Keys = $q.Keys; Stage = ''; Start = Get-Date }
-    try {
-        if ($q.File -match '\.(nsz|xcz)$') {
-            # nsz 讀工作資料夾裡的 keys.txt（跟 nxn.ps1 解壓 NSZ 一樣），解完就刪
+    if (Test-Path $iconRead) {
+        # 先直接從本體讀（不解包、NSZ 也不用先解壓）
+        try {
             New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-            Copy-Item -LiteralPath $q.Keys -Destination (Join-Path $tmp 'keys.txt')
-            $j.Proc = Start-Hidden (Get-Python) "-c `"import sys; sys.argv[0] = 'nsz'; from nsz import main; main()`" -D -o `"$(Join-Path $tmp 'out')`" `"$($q.File)`"" $tmp
-            $j.Stage = 'nsz'
-        } else { Start-IconExtract $j $q.File; $j.Out = Join-Path $tmp 'icon' }
-        $script:iconJob = $j
-    } catch { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+            $j.Proc = Start-Hidden (Get-Python) "-I `"$iconRead`" `"$($q.Keys)`" `"$($q.File)`" `"$(Join-Path $tmp 'icon.jpg')`""
+            $j.Stage = 'py'; $j.Out = $tmp
+            $script:iconJob = $j; return
+        } catch { }   # 找不到 Python 之類的：改用舊的讀法
+    }
+    if (Test-Path $nxExtract) {
+        try { Start-OldIcon $j; $script:iconJob = $j; return } catch { }
+    }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 })
+# 舊的讀法（icon_read.py 讀不到時）：nx_extract 解出 icon.jpg；NSZ / XCZ 要先用 nsz 解壓
+function Start-OldIcon($j) {
+    $j.Start = Get-Date
+    if ($j.File -match '\.(nsz|xcz)$') {
+        # nsz 讀工作資料夾裡的 keys.txt（跟 nxn.ps1 解壓 NSZ 一樣），解完就刪
+        New-Item -ItemType Directory -Force -Path $j.Tmp | Out-Null
+        Copy-Item -LiteralPath $j.Keys -Destination (Join-Path $j.Tmp 'keys.txt')
+        $j.Proc = Start-Hidden (Get-Python) "-c `"import sys; sys.argv[0] = 'nsz'; from nsz import main; main()`" -D -o `"$(Join-Path $j.Tmp 'out')`" `"$($j.File)`"" $j.Tmp
+        $j.Stage = 'nsz'
+    } else { Start-IconExtract $j $j.File }
+}
 $tileColors = '#FF453A', '#FF9F0A', '#30D158', '#0A84FF', '#BF5AF2', '#FF375F', '#64D2FF', '#FFD60A'
 function Paint-Icon($border, $letterBlock, $g, $bmp) {
     if ($bmp) {
@@ -1024,7 +1051,7 @@ function Build-Library {
         else { $st.Text = '' }
         if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) {
             $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '💾 存檔待傳'
-            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消') -join "`n"
+            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「裝到 iPad」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })) -join "`n"
         }
         if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
         if ($preWarn.Count -and -not $why) {
@@ -1549,15 +1576,23 @@ function Import-Save($g, $paths) {
         if ($script:saveNewest) { $notes += "（裡面有好幾份，用最新的：$(Split-Path $src -Leaf)）" }
         if (Test-Path -LiteralPath $pend) { $notes += '（這款已經有一份待傳的存檔，會換成這份）' }
         $msg = "把這份存檔放進「$($g.Name)」？`n`n$($files.Count) 個檔案，共 $kb KB`n最上層：$($top -join '、')$more`n" + $(if ($notes.Count) { ($notes -join "`n") + "`n" } else { '' }) + "`n" +
-               "⚠ 下次「裝到 iPad」時，會用它取代 iPad 上這款的存檔。iPad 上原本的存檔會先備份到電腦，在「還原存檔…」裡找得到（名稱有 before-import）。"
-        if ([Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'YesNo', 'Warning') -ne 'Yes') { return }
+               "下次「裝到 iPad」時放進 iPad：`n`n" +
+               "按「是」：另存成一份新的存檔，iPad 上現在的存檔不動。開遊戲前的設定畫面「存檔」裡可以切換。`n" +
+               "按「否」：取代 iPad 上這款現在使用中的存檔。`n`n" +
+               "不管選哪個，iPad 上原本的存檔都會先備份到電腦，在「還原存檔…」裡找得到（名稱有 before-import）。"
+        $ans = [Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'YesNoCancel', 'Question')
+        if ($ans -eq 'Cancel') { return }
+        # 另存成新的一份（殼的 SaveSlots.swift，saves_data.py put --slot）：名稱用來源和時間，iPad 上可以改名
+        $slot = if ($ans -eq 'Yes') { '匯入' + $(if ($script:saveFrom) { " $($script:saveFrom)" } else { '' }) + ' ' + (Get-Date).ToString('MM/dd HH:mm') } else { '' }
         # 先整份複製到暫存，再換掉舊的待傳（拖進來的可能就是待傳資料夾裡的東西）
         $stage = Join-Path $tmp 'stage'
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
         foreach ($c in $all) { Copy-Item -LiteralPath $c.FullName -Destination $stage -Recurse -Force }
         if (Test-Path -LiteralPath $pend) { Remove-Item -LiteralPath $pend -Recurse -Force }
         Move-Item -LiteralPath $stage -Destination $pend
-        Set-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -Value $tid -Encoding ASCII
+        # 第一行 title ID；第二行 slot=<名稱> 表示另存成新的一份存檔，沒有就是取代使用中的
+        $lines = @($tid) + $(if ($slot) { @("slot=$slot") } else { @() })
+        Set-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -Value $lines -Encoding UTF8
         Build-Library
     } catch {
         [void][Windows.MessageBox]::Show($win, "匯入存檔失敗：$($_.Exception.Message)", '匯入存檔')
