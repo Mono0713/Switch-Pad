@@ -549,6 +549,13 @@ def main():
     if a.cmd == 'migrate': return asyncio.run(migrate_on_device(a))
     if a.cmd == 'glsync':
         games = gl_games(a.ipa)
+        # an empty folder of a game that no longer records (Unrailed 2 once did, before its precompiled Godot shaders were read) would keep its card on
+        # "到 iPad 上玩一下" and queue it on every library run (nxn-app.ps1 counts folders)
+        if os.path.isdir(a.root):
+            for n in os.listdir(a.root):
+                d = os.path.join(a.root, n)
+                if n.upper() not in games and os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d); print('%s：不用在 iPad 上記著色器了，拿掉空的記錄資料夾' % n)
         if not games: return 0
         work = lambda afc: gl_sync(afc, games, a.root)
     elif a.cmd == 'logs': work = lambda afc: pull_logs(afc, a.root)
