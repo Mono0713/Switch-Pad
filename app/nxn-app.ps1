@@ -789,27 +789,26 @@ $cardXaml = @'
         Margin="4" CornerRadius="16" Background="Transparent" BorderThickness="0" BorderBrush="Transparent"
         AllowDrop="True">
   <Grid>
-    <DockPanel Margin="10,14,10,16">
-      <StackPanel VerticalAlignment="Top">
-        <!-- 圖示正中間（右邊空一欄和左邊一樣寬，對齊下面的名字）；左邊那欄是小框框（狀態、版本、DLC、要注意…），不會疊到圖示 -->
-        <Grid HorizontalAlignment="Center">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions>
-          <StackPanel x:Name="Badges" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
-          <Border Grid.Column="1" Width="116" Height="116">
-            <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
-            <Border x:Name="Icon" CornerRadius="26" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
-              <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="50" FontWeight="SemiBold" Foreground="#F5F5F7"/>
-            </Border>
-          </Border>
-        </Grid>
-        <TextBlock x:Name="Title" Margin="0,12,0,0" FontSize="14" FontWeight="SemiBold" Foreground="#F5F5F7" TextWrapping="Wrap"
+    <!-- 左邊窄窄一欄小框框（狀態、版本、DLC、要注意…），右邊是圖示，名字和按鈕對齊圖示；整組置中，格子不用很寬 -->
+    <Grid Margin="6,12,6,14" HorizontalAlignment="Center" VerticalAlignment="Top">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="8"/><ColumnDefinition Width="140"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <StackPanel x:Name="Badges" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+      <Border Grid.Row="0" Grid.Column="2" Width="108" Height="108" HorizontalAlignment="Center">
+        <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="4" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
+        <Border x:Name="Icon" CornerRadius="24" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
+          <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="46" FontWeight="SemiBold" Foreground="#F5F5F7"/>
+        </Border>
+      </Border>
+      <StackPanel Grid.Row="1" Grid.Column="2">
+        <TextBlock x:Name="Title" Margin="0,10,0,0" FontSize="13.5" FontWeight="SemiBold" Foreground="#F5F5F7" TextWrapping="Wrap"
                    TextAlignment="Center" MaxHeight="38" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="Detail" Margin="0,2,0,0" FontSize="12" Foreground="#8E8E93" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="State" Margin="0,5,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
-        <Button x:Name="Act" HorizontalAlignment="Center" Margin="0,10,0,0" FontSize="12.5" Padding="20,5"/>
+        <Button x:Name="Act" HorizontalAlignment="Center" Margin="0,9,0,0" FontSize="12.5" Padding="20,5"/>
       </StackPanel>
-    </DockPanel>
+    </Grid>
     <Border x:Name="Pending" CornerRadius="9" Padding="10,3" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" Visibility="Collapsed">
       <TextBlock x:Name="PendingText" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
     </Border>
@@ -2741,7 +2740,7 @@ $win.Add_Closing({ param($s, $e)
 
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
-    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 300))   # 圖示加兩邊各一欄，再留一點空
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 232))   # 一格：小框框那欄 58 + 圖示和名字 140 + 一點空
     if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel

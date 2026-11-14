@@ -13,7 +13,7 @@ foreach ($f in 'Head-Count', 'Add-Badge', 'State-Badges') {
 }
 $win = [Windows.Markup.XamlReader]::Parse($xamlText.Replace('__RES__', $styles))
 $win.Width = 1220; $win.Height = 820
-$win.FindName('Library').Columns = 4; $win.FindName('Others').Columns = 4
+$win.FindName('Library').Columns = 5; $win.FindName('Others').Columns = 5
 $fake = @(@('All You Need Is Help', 'v1.2.0 · 1 DLC', '● 在 iPad 上', '#30D158', $true), @('ANIMAL WELL', 'v1.0.7', '● 在 iPad 上', '#30D158', $true),
           @('Balatro', 'v1.1.3', '● 等裝到 iPad', '#0A84FF', $true), @('Boomerang Fu', 'v1.3.6 · 2 DLC', '● 要重新轉換', '#FF9F0A', $true),
           @('CloverPit', 'v1.4.2', '● 轉換失敗', '#FF453A', $true), @('gang beasts', 'v1.26.0', '● 在 iPad 上', '#30D158', $true),
