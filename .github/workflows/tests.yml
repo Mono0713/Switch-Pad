@@ -35,6 +35,11 @@ jobs:
       - name: UI loads (XAML) and preview
         shell: powershell
         run: powershell -NoProfile -STA -File tests/ui_preview.ps1 -Out ui-preview.png
+      - name: UI preview as text (for viewers without artifact access)
+        shell: powershell
+        run: |
+          $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes('ui-preview.png'))
+          for ($i = 0; $i -lt $b.Length; $i += 4000) { Write-Host ("PNG64 " + $b.Substring($i, [Math]::Min(4000, $b.Length - $i))) }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
