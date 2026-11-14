@@ -26,6 +26,9 @@ param(
     [string]$SaveRestore = '',       # 只把這份存檔備份還原回 iPad（要 -Ipa）
     [switch]$SaveMigrate,            # 把舊的單款 App、合包的存檔存到電腦，遊戲庫裝好了就放進去（-Ipa 是遊戲庫）
     [switch]$PullLogs,
+    [string]$ReportTid = '',         # 跟 -PullLogs 一起：把這款的記錄、摘要和 -ReportExtra 資料夾裡的檔案包成問題回報 -ReportZip
+    [string]$ReportZip = '',
+    [string]$ReportExtra = '',
     [switch]$GlSync,                 # OpenGL 遊戲：在 iPad 上建好記錄著色器的資料夾，把記下的拿回電腦（-Ipa 是遊戲庫）
     [switch]$ReuseIfFresh,           # 有 -Out 而且它比遊戲檔和記下的著色器都新，就沿用、不重新打包               # 把 App 在 iPad 上的記錄拿回電腦，列出殼還沒做的功能（紅字）
     [switch]$NoSaveBackup,           # 安裝前不自動備份存檔
@@ -469,9 +472,18 @@ try {
         }
         if ($PullLogs) {
             $logRoot = Join-Path $ipaDir 'iPad記錄'
-            $c = RunExe $tpy @('-I', $saveTool, 'logs', $Ipa, $logRoot, '--udid', $dev.Serial)
+            $la = @('-I', $saveTool, 'logs', $Ipa, $logRoot, '--udid', $dev.Serial)
+            if ($ReportTid) { $la += @('--report', $ReportTid, '--zip', $ReportZip); if ($ReportExtra) { $la += @('--extra', $ReportExtra) } }
+            $c = RunExe $tpy $la
             if ($c -eq 3) { throw 'iPad 上還沒有裝這個 App。' }
+            if ($c -eq 7) { throw 'iPad 上還沒有這款的記錄：先在 iPad 上打開它一次（打不開或閃退也算），再匯出一次。' }
             if ($c) { throw "讀記錄失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
+            if ($ReportTid -and (Test-Path -LiteralPath $ReportZip)) {
+                # 打開資料夾並選好那個檔，直接拖進訊息或 GitHub issue 就好
+                Start-Process explorer.exe "/select,`"$ReportZip`""
+                Finish "問題回報做好了：$ReportZip（只有這款的記錄、摘要和電腦這邊的打包記錄，沒有存檔、金鑰或遊戲檔）" Green
+                return
+            }
             Finish "記錄在 $logRoot" Green
             return
         }
