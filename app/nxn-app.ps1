@@ -864,6 +864,7 @@ function Fill-CardMenu($cm, $g) {
     $ms = Get-MultiShell
     Menu-Item $cm '📂  遊戲資料夾' $g.Dir 'folder'
     Menu-Item $cm '📄  最近的記錄' $g.Dir 'log' $hasLog
+    Menu-Item $cm '📦  匯出問題回報（閃退、打不開時）' $g.Dir 'report' ([bool]$g.Tid -and (Test-Path -LiteralPath (Library-Ipa)) -and -not $state.Running)
     if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) { Menu-Item $cm '↩  取消待傳的存檔' $g.Dir 'unsave' }
     Menu-Item $cm '🔁  下次更新時重新打包' $g.Dir 'repack' ($ms -and (Test-Path -LiteralPath (Part-For $g (Multi-Id $ms)).Path) -and -not $state.Running)
     [void]$cm.Items.Add((New-Sep))
@@ -967,6 +968,7 @@ function Card-Action($action, $dir) {
         'savebackup'  { Run-Saves $g (Save-Ipa $g) $false }
         'saverestore' { Run-Saves $g (Save-Ipa $g) $true }
         'log'    { $l = Latest-Log $g; if ($l) { Start-Process notepad.exe "`"$($l.FullName)`"" } }
+        'report' { Start-Report $g }
         # 遊戲包是快取：刪掉，下次按「放進遊戲庫」就從遊戲檔重新轉換這款
         'repack' { $ms = Get-MultiShell; if ($ms) { Remove-Item -LiteralPath (Part-For $g (Multi-Id $ms)).Path -ErrorAction SilentlyContinue }; Build-Library }
         'cover'  {
@@ -1794,7 +1796,7 @@ function Quote($s) { "'" + ($s -replace "'", "''") + "'" }
 
 function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
     $row = [Windows.Markup.XamlReader]::Parse($jobXaml)
-    $row.FindName('Title').Text = if ($mode -eq 'glsync') { "$($g.Name) · 拿回 iPad 錄的著色器" } else { $g.Name }
+    $row.FindName('Title').Text = if ($mode -eq 'glsync') { "$($g.Name) · 拿回 iPad 錄的著色器" } elseif ($mode -eq 'report') { "$($g.Name) · 匯出問題回報" } else { $g.Name }
     Paint-Icon $row.FindName('Icon') $row.FindName('Letter') $g (Cover-For $g)
     # @(...)：只有一個步驟時 switch 會把陣列攤成一個字串，$names[0] 就只剩第一個字（「同步」變「同」）
     $names = @(switch ($mode) {
@@ -1806,7 +1808,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         'merge+install' { @('合成', '檢查帳號', '簽章安裝', '傳資料') }
         'install' { @('檢查帳號', '簽章安裝', '傳資料') }
         { $_ -in 'savebackup', 'saverestore', 'savemigrate' } { @('存檔') }
-        'pulllogs' { @('記錄') }
+        { $_ -in 'pulllogs', 'report' } { @('記錄') }
         default   { @('檢查帳號', '解包', '轉換程式', '著色器', '打包', '簽章安裝', '傳資料') }
     })
     $pills = @()
@@ -1825,6 +1827,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         'saverestore' { $a += @('-Ipa', (Quote $ipa), '-SaveRestore', (Quote $out)) }
         'savemigrate' { $a += @('-Ipa', (Quote $ipa), '-SaveMigrate') }
         'pulllogs'    { $a += @('-Ipa', (Quote $ipa), '-PullLogs') }
+        'report'      { $a += @('-Ipa', (Quote $ipa), '-PullLogs', '-ReportTid', $g.Tid, '-ReportZip', (Quote $out), '-ReportExtra', (Quote $shellPath)) }   # Shell 欄位這裡放電腦這邊要附上的檔案的資料夾
         'glsync'      { $a += @('-Ipa', (Quote $ipa), '-GlSync') }
         { $_ -in 'merge', 'merge+install', 'setup' } { }   # 這幾種只跑 Call；mergepart 是一般打包，要走下面
         default {
@@ -1838,7 +1841,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         }
     }
     if ($cfg.Udid) { $a += @('-Udid', (Quote $cfg.Udid)) }
-    $job = [pscustomobject]@{ Game = $g; Row = $row; Steps = $pills; StepNames = $names; Args = $a; Call = ''; NeedAllOk = $false; Log = ''; Pos = 0; Dec = $null
+    $job = [pscustomobject]@{ Game = $g; Row = $row; Steps = $pills; StepNames = $names; Args = $a; Call = ''; NeedAllOk = $false; Log = ''; Pos = 0; Report = $(if ($mode -eq 'report') { $out } else { '' }); Dec = $null
                              Started = $null; Cur = -1; Text = $row.FindName('Log'); Msg = $row.FindName('Msg'); Time = $row.FindName('Time') }
     Set-Step $job -1 'todo'
     $job.Msg.Text = '排隊中'
@@ -1998,7 +2001,7 @@ $timer.Add_Tick({
             $state.Ok++
             if ($job.Game.Dir) { $addFail.Remove($job.Game.Dir) }
             Set-Step $job $job.StepNames.Count 'done'
-            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '同步') { '著色器同步好了' } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
+            $job.Msg.Text = if ($job.StepNames -contains '簽章安裝') { '裝好了，可以在 iPad 上打開' } elseif ($job.StepNames -contains '打包器') { '準備好了' } elseif ($job.StepNames -contains '存檔') { '存檔好了' } elseif ($job.StepNames -contains '同步') { '著色器同步好了' } elseif ($job.Report) { "問題回報做好了，資料夾已經打開：$(Split-Path $job.Report -Leaf)" } elseif ($job.StepNames -contains '記錄') { '記錄拿回來了，展開「記錄」看紅字清單' } else { '打包完成' }
             $job.Msg.Foreground = Brush '#30D158'
             if ($job.StepNames -contains '合成') {
                 $freed = Clean-AfterMerge
@@ -2442,6 +2445,10 @@ function Free-Space($owner) {
 
 # ---------------------------------------------------------------- 診斷資訊：回報問題時貼上（照 NX2Apple 的 Copy diagnostics）。不含金鑰內容、Apple ID 或遊戲檔
 function Copy-Diagnostics($owner) {
+    [Windows.Clipboard]::SetText((Diagnostics-Text))
+    [void][Windows.MessageBox]::Show($owner, '診斷資訊複製好了，貼到 GitHub issue 或訊息裡就可以。裡面沒有金鑰內容、Apple ID 或遊戲檔。', '複製診斷資訊')
+}
+function Diagnostics-Text {
     $read = { param($f) if (Test-Path $f) { (Get-Content $f -Raw -ErrorAction SilentlyContinue).Trim() } else { '（沒有）' } }
     $py = Get-Python
     $pyv = '（找不到）'
@@ -2475,8 +2482,26 @@ function Copy-Diagnostics($owner) {
         "=== 最近的記錄（$(if ($last) { $last.Name } else { '沒有' })，最後 40 行）==="
         $tail
     ) -join "`r`n"
-    [Windows.Clipboard]::SetText($text)
-    [void][Windows.MessageBox]::Show($owner, '診斷資訊複製好了，貼到 GitHub issue 或訊息裡就可以。裡面沒有金鑰內容、Apple ID 或遊戲檔。', '複製診斷資訊')
+    return $text
+}
+
+# ---------------------------------------------------------------- 問題回報：一款遊戲閃退或打不開時，一鍵把要給人看的東西包成一個 zip
+# iPad 那邊（saves_data.py logs --report）：這款最近兩次的記錄、殼另外留的最近兩次閃退記錄、紅字和閃退摘要
+# 電腦這邊（這裡先放進暫存資料夾）：診斷資訊、這款最近的打包記錄、它用的設定檔 game.tsv（暫定設定檔的話看得出是推導的）
+function Start-Report($g) {
+    if ($state.Running -or -not $g.Tid) { return }
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $extra = Join-Path $work "report\$stamp"
+    New-Item -ItemType Directory -Force -Path $extra | Out-Null
+    try { [IO.File]::WriteAllText((Join-Path $extra '診斷資訊.txt'), (Diagnostics-Text), (New-Object Text.UTF8Encoding $true)) } catch { }
+    $l = Latest-Log $g
+    if ($l) { Copy-Item -LiteralPath $l.FullName -Destination (Join-Path $extra ('打包記錄-' + $l.Name)) -ErrorAction SilentlyContinue }
+    $prof = @(Get-ChildItem -Path (Join-Path $work "multigame\*\src-*\dm\games\$($g.Tid)\game.tsv") -ErrorAction SilentlyContinue) +
+            @(Get-ChildItem -Path (Join-Path $work "src\dm\games\$($g.Tid)\game.tsv") -ErrorAction SilentlyContinue) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($prof) { Copy-Item -LiteralPath $prof.FullName -Destination (Join-Path $extra 'game.tsv') -ErrorAction SilentlyContinue }
+    $safe = ($g.Name -replace '[\\/:*?"<>|]', '_')
+    $zip = Join-Path $base "問題回報\$safe-$stamp.zip"
+    Start-Run @(@{ Game = $g; Mode = 'report'; Ipa = (Library-Ipa); Out = $zip; Shell = $extra })
 }
 
 # ---------------------------------------------------------------- 設定視窗
