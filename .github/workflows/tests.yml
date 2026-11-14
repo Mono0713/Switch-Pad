@@ -32,3 +32,12 @@ jobs:
             foreach ($e in $errs) { Write-Host "$($f.Name):$($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
           }
           if ($bad) { exit 1 }
+      - name: UI loads (XAML) and preview
+        shell: powershell
+        run: powershell -NoProfile -STA -File tests/ui_preview.ps1 -Out ui-preview.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-preview
+          path: ui-preview.png
+          if-no-files-found: ignore
