@@ -14,17 +14,38 @@ game's games/<tid>/romfs and msl as Documents/games/<tid>/...; an older shell re
 Each moved folder gets an id, a hash of its entries' names, sizes and CRCs, kept in Documents/.romfs-id (JSON) and
 written for a folder only after all its files are in: a copy cut short is redone, and only folders whose id changed
 are sent again (a new shell's shaders, a game added to a package). A game taken out of a package has its folders removed.
+
+A package nxn_merge.py made with --link holds no game data: its zip comment records, for each folder, the game's own
+package it comes from, the entries' prefix there and the folder's id. Such a package is already the app to sign (info
+says "linked"), and push reads each folder it has to send from that game package. Files go over several AFC
+connections at once (NXN_PUSH_CONN, default 4): a Unity game's shaders are tens of thousands of small files, and one
+connection spends most of its time waiting for the iPad's answer to each open, write and close.
 """
 import argparse
 import asyncio
+import base64
 import hashlib
 import json
+import os
 import re
+import shutil
 import sys
+import time
 import zipfile
+import zlib
 
 MIN_BYTES = 64 << 20       # below this a separate copy saves nothing worth the extra step (ANIMAL WELL's RomFS is one placeholder)
 MARK = '.romfs-id'
+
+
+def read_link(z):
+    """nxn_merge.py --link's record of where the game data is: {'games/<tid>/romfs': {ipa, size, mtime, prefix, id, bytes, files}}"""
+    c = z.comment or b''
+    try:
+        if c.startswith(b'NXNLINK1'): return json.loads(c[8:].decode('utf-8')).get('parts', {})
+        if c.startswith(b'NXNLINKZ'): return json.loads(zlib.decompress(base64.b64decode(c[8:])).decode('utf-8')).get('parts', {})
+    except Exception as e: raise SystemExit('the data record of %s cannot be read: %s' % (z.filename, e))
+    return None
 
 
 def layout(z):
@@ -58,6 +79,13 @@ def dest_of(parts, name):
 
 def cmd_info(a):
     with zipfile.ZipFile(a.ipa) as z:
+        link = read_link(z)
+        if link is not None:
+            pl = layout(z)[1]
+            ids = hashlib.sha1(json.dumps(sorted((d, r['id']) for d, r in link.items())).encode()).hexdigest()[:16]
+            print(json.dumps({'lite': True, 'linked': True, 'several': True, 'id': ids, 'bytes': sum(r['bytes'] for r in link.values()),
+                              'files': sum(r['files'] for r in link.values()), 'parts': sorted(link), 'bundle': pl.get('CFBundleIdentifier', '')}))
+            return
         app, pl, parts, files, several = layout(z)
         size = sum(i.file_size for i in files)
         print(json.dumps({'lite': size >= MIN_BYTES, 'several': several, 'id': data_id(files), 'bytes': size, 'files': len(files),
@@ -65,6 +93,9 @@ def cmd_info(a):
 
 
 def cmd_lite(a):
+    with zipfile.ZipFile(a.ipa) as z: linked = read_link(z) is not None
+    if linked:   # already without its data
+        shutil.copyfile(a.ipa, a.out); print('lite package written: %s (a linked package, copied as it is)' % a.out); return
     with zipfile.ZipFile(a.ipa) as z, zipfile.ZipFile(a.out, 'w', zipfile.ZIP_STORED, allowZip64=True) as o:
         app, pl, parts, files, several = layout(z)
         if not parts: raise SystemExit('this shell reads a package of several games only from inside')
@@ -81,18 +112,49 @@ def cmd_lite(a):
     print('lite package written: %s' % a.out)
 
 
+class Sources:
+    """The zip files the data comes from, opened once each"""
+    def __init__(self): self.open = {}
+    def get(self, path):
+        if path not in self.open: self.open[path] = zipfile.ZipFile(path)
+        return self.open[path]
+
+
+def linked_files(srcs, app, d, r):
+    """[(zip, ZipInfo, path under Documents)] of one linked folder, read from the game package nxn_merge.py recorded"""
+    p = r['ipa']
+    if not os.path.isfile(p):
+        raise SystemExit('找不到遊戲包 %s（遊戲庫裡 %s 的資料在那裡）：請再按一次「放進遊戲庫」' % (p, d))
+    z = srcs.get(p)
+    pre = r.get('prefix') or ''
+    out = [(z, i, d + '/' + i.filename[len(pre):]) for i in z.infolist() if pre and i.filename.startswith(pre) and not i.is_dir()]
+    h = hashlib.sha1()
+    for n, size, crc in sorted((app + dst, i.file_size, i.CRC) for _, i, dst in out): h.update(('%s\0%d\0%08x\n' % (n, size, crc)).encode())
+    got = h.hexdigest()[:16]
+    if got != r['id']:
+        raise SystemExit('遊戲包 %s 在合成遊戲庫之後改過了（%s 對不上）：請再按一次「放進遊戲庫」' % (os.path.basename(p), d))
+    return out
+
+
 async def push(a):
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
     from pymobiledevice3.services.house_arrest import HouseArrestService
 
     z = zipfile.ZipFile(a.ipa)
+    link = read_link(z)
     app, pl, parts, files, several = layout(z)
     orig = pl.get('CFBundleIdentifier', '')
+    srcs = Sources()
     # each folder that moves (romfs, msl, or a game's in a package) has its own id, so a change sends only what changed:
     # a new shell's shaders without the game files, or a game added to a package without the games already there
-    by_part = {d: [i for i in files if i.filename.startswith(p)] for p, d in parts}
-    want = {d: data_id(fs) for d, fs in by_part.items()}
+    if link is not None:
+        want = {d: r['id'] for d, r in link.items()}
+        jobs_of = lambda d: linked_files(srcs, app, d, link[d])
+    else:
+        by_part = {d: [i for i in files if i.filename.startswith(p)] for p, d in parts}
+        want = {d: data_id(fs) for d, fs in by_part.items()}
+        jobs_of = lambda d: [(z, i, dest_of(parts, i.filename)) for i in by_part[d]]
 
     ld = await create_using_usbmux(serial=a.udid or None)
     async with ld:
@@ -122,37 +184,60 @@ async def push(a):
                 if gone: await afc.set_file_contents(mark, json.dumps(want).encode())
                 print('game files already on the iPad')
                 return
-            send = [i for d in todo for i in by_part[d]]
-            total = sum(i.file_size for i in send)
-            print('copying to the iPad: %s (%d files, %d MB)' % (', '.join(todo), len(send), total >> 20))
+            send = {d: jobs_of(d) for d in todo}   # (a linked folder whose game package changed stops here, before anything is removed)
+            total = sum(i.file_size for js in send.values() for _, i, _ in js)
+            nfiles = sum(len(js) for js in send.values())
+            print('copying to the iPad: %s (%d files, %d MB)' % (', '.join(todo), nfiles, total >> 20))
             # forget the parts about to be replaced first, so a copy cut short is redone next time
             keep = {d: v for d, v in have.items() if d in want and d not in todo}
             await afc.set_file_contents(mark, json.dumps(keep).encode())
             for d in todo:
                 if await afc.exists(base + '/' + d): await afc.rm(base + '/' + d, force=True)
-            made, sent, shown = set(), 0, -1
-            for d in todo:
-                for i in sorted(by_part[d], key=lambda i: i.filename):
-                    rel = base + '/' + dest_of(parts, i.filename)
-                    dd = rel.rsplit('/', 1)[0]
-                    if dd not in made: await afc.makedirs(dd); made.add(dd)
-                    h = await afc.fopen(rel, 'w')
-                    try:
-                        with z.open(i) as src:
-                            while True:
-                                b = src.read(4 << 20)
-                                if not b: break
-                                await afc.fwrite(h, b)
-                                sent += len(b)
-                                pct = sent * 100 // max(total, 1)
-                                if pct != shown and (pct % 2 == 0 or pct == 100):
-                                    shown = pct
-                                    print('傳送遊戲資料 %d%%（%d / %d MB）' % (pct, sent >> 20, total >> 20), flush=True)
-                    finally:
-                        await afc.fclose(h)
-                keep[d] = want[d]
-                await afc.set_file_contents(mark, json.dumps(keep).encode())
-            print('game files in place')
+
+            # extra connections to the app's Documents: AFC answers one request at a time per connection
+            want_conn = max(1, min(16, int(os.environ.get('NXN_PUSH_CONN', '4') or 4)))
+            conns = [afc]
+            for _ in range(want_conn - 1):
+                try: conns.append(await (await HouseArrestService.create(lockdown=ld, bundle_id=bid, documents_only=True)).__aenter__())
+                except Exception as e:
+                    print('note: only %d connection(s) to the iPad (%s)' % (len(conns), e)); break
+            t0 = time.time()
+            state = {'sent': 0, 'shown': -1}
+            try:
+                for d in todo:
+                    js = send[d]
+                    for dd in sorted({(base + '/' + dst).rsplit('/', 1)[0] for _, _, dst in js}):
+                        await afc.makedirs(dd)
+                    queue = asyncio.Queue()
+                    for job in sorted(js, key=lambda j: -j[1].file_size): queue.put_nowait(job)   # big files first, so none is left alone at the end
+
+                    async def worker(c):
+                        while True:
+                            try: zz, i, dst = queue.get_nowait()
+                            except asyncio.QueueEmpty: return
+                            h = await c.fopen(base + '/' + dst, 'w')
+                            try:
+                                with zz.open(i) as src:
+                                    while True:
+                                        b = src.read(4 << 20) if i.file_size < (8 << 20) else await asyncio.to_thread(src.read, 4 << 20)
+                                        if not b: break
+                                        await c.fwrite(h, b)
+                                        state['sent'] += len(b)
+                                        pct = state['sent'] * 100 // max(total, 1)
+                                        if pct != state['shown'] and (pct % 2 == 0 or pct == 100):
+                                            state['shown'] = pct
+                                            print('傳送遊戲資料 %d%%（%d / %d MB）' % (pct, state['sent'] >> 20, total >> 20), flush=True)
+                            finally:
+                                await c.fclose(h)
+                    await asyncio.gather(*(worker(c) for c in conns))
+                    keep[d] = want[d]
+                    await afc.set_file_contents(mark, json.dumps(keep).encode())
+            finally:
+                for c in conns[1:]:
+                    try: await c.__aexit__(None, None, None)
+                    except Exception: pass
+            el = max(time.time() - t0, 0.001)
+            print('game files in place (%d files, %d MB in %.0f s over %d connections, %.1f MB/s)' % (nfiles, total >> 20, el, len(conns), total / el / 2**20))
 
 
 def main():

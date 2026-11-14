@@ -2198,6 +2198,22 @@ function Run-Convert($dirs) {
     Start-Run $jobs
 }
 
+# 遊戲庫只放 App 本身（--link）：遊戲資料（romfs、著色器，幾十 GB）留在各遊戲包裡，裝到 iPad 時 romfs_data.py 從那裡直接傳。
+# 合成不用再把全部遊戲資料重寫一份（26 款要寫 45 GB、5 分鐘），也不用另外做小 App。打包器帶的舊版 nxn_merge.py 沒有這個選項就照舊
+function Merge-CanLink($mg) {
+    try { return [bool](Select-String -LiteralPath $mg -Pattern "add_argument\('--link'" -Quiet) } catch { return $false }
+}
+# 遊戲庫是不是已經是連結式的：zip 的註解（檔案最後面）有 nxn_merge.py 的 NXNLINK 記錄
+function Lib-IsLinked($ipa) {
+    try {
+        $fs = [IO.File]::OpenRead($ipa)
+        try {
+            $n = [int][Math]::Min($fs.Length, 70000); [void]$fs.Seek(-$n, 'End')
+            $b = New-Object byte[] $n; $o = 0; while ($o -lt $n) { $r = $fs.Read($b, $o, $n - $o); if ($r -le 0) { break }; $o += $r }
+            return [Text.Encoding]::ASCII.GetString($b).Contains('NXNLINK')
+        } finally { $fs.Dispose() }
+    } catch { return $false }
+}
 # 遊戲庫合成的指令：用打包成功的遊戲包，加上本來就在遊戲庫、這次沒重包成功但舊的遊戲包還在的
 function Library-Call($lib, $fail) {
     $libIpa = Library-Ipa
@@ -2211,14 +2227,17 @@ function Library-Call($lib, $fail) {
     $libT = (Get-Item -LiteralPath $libIpa -ErrorAction SilentlyContinue).LastWriteTime
     $newer = @($use | Where-Object { $_.WasIn -and (-not $libT -or (Get-Item -LiteralPath $_.Path).LastWriteTime -gt $libT) })
     $newShell = Shell-Changed $lib.Shell
-    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    # 還是舊式（遊戲資料整份在包裡）的遊戲庫：重新合成一次換成連結式，電腦上少 40 幾 GB，iPad 上的資料對得上不會重傳
+    $relink = (Test-Path -LiteralPath $libIpa) -and (Merge-CanLink $lib.Merge) -and -not (Lib-IsLinked $libIpa)
+    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $relink)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
     $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
             $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' }) +
-            $(if ($newShell) { '，換新殼' } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
+            $(if ($newShell) { '，換新殼' } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } elseif ($relink) { '，改成遊戲資料不重複存一份' } else { '' })
     $tmp = "$libIpa.new"
     $icon = Join-Path $here 'LibraryIcon.png'
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
             "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
+            $(if (Merge-CanLink $lib.Merge) { ' --link' } else { '' }) +
             $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
             "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +

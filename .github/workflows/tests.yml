@@ -22,6 +22,7 @@ jobs:
           python tests/test_keys_check.py -v
           python tests/test_icon_read.py -v
           python tests/test_saves_data.py -v
+          python tests/test_merge_link.py -v
       - name: PowerShell scripts parse
         shell: powershell
         run: |
