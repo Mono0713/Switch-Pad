@@ -172,12 +172,24 @@ $styles = @'
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="Button">
-          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}">
+          <!-- 按下去會微縮、放開彈回（docs/DESIGN.zh-TW.md 的「按下」） -->
+          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+            <Border.RenderTransform><ScaleTransform/></Border.RenderTransform>
             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <ControlTemplate.Triggers>
             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.82"/></Trigger>
-            <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="b" Property="Opacity" Value="0.7"/>
+              <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.95" Duration="0:0:0.08"/>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.95" Duration="0:0:0.08"/>
+              </Storyboard></BeginStoryboard></Trigger.EnterActions>
+              <Trigger.ExitActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.25"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.5"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.25"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.5"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+              </Storyboard></BeginStoryboard></Trigger.ExitActions>
+            </Trigger>
             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
@@ -360,10 +372,10 @@ $xamlText = @'
     <ScrollViewer x:Name="LibraryView" Grid.Row="2" VerticalScrollBarVisibility="Auto">
       <StackPanel Margin="0,0,0,24">
         <TextBlock x:Name="GamesHead" Text="遊戲庫" FontSize="26" FontWeight="Bold" Margin="0,4,0,2"/>
-        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="iPad 上「SwitchPad」App 裡的遊戲。按「移除」拿掉。"/>
+        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text=""/>
         <UniformGrid x:Name="Library" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
         <TextBlock x:Name="OutHead" Text="還沒加入" FontSize="26" FontWeight="Bold" Margin="0,18,0,2"/>
-        <TextBlock x:Name="OutHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="電腦上有、還不在遊戲庫的遊戲。按「＋ 加入」放進去；把 NSP / XCI / NSZ 拖進視窗可以新增遊戲。"/>
+        <TextBlock x:Name="OutHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="把 NSP / XCI / NSZ 拖進視窗就能新增遊戲"/>
         <UniformGrid x:Name="Others" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
         <TextBlock x:Name="PacksHead" Text="合包" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4" Visibility="Collapsed"
                    ToolTip="好幾款遊戲合成的一個 App。點一下看裡面有哪些遊戲"/>
@@ -436,6 +448,17 @@ function Dark-TitleBar($w) {
             $h = (New-Object Windows.Interop.WindowInteropHelper $s).Handle; $on = 1
             if ([SwitchPad.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$on, 4) -ne 0) { [void][SwitchPad.Dwm]::DwmSetWindowAttribute($h, 19, [ref]$on, 4) }
         } catch { } })
+}
+# 換畫面（遊戲庫 ↔ 進度）時淡入、從下面滑上來一點（docs/DESIGN.zh-TW.md 的動畫）
+function Fade-In($el) {
+    try {
+        $ease = New-Object Windows.Media.Animation.QuadraticEase; $ease.EasingMode = 'EaseOut'
+        $t = New-Object Windows.Media.TranslateTransform 0, 14; $el.RenderTransform = $t
+        $a = New-Object Windows.Media.Animation.DoubleAnimation 0, 1, ([Windows.Duration][TimeSpan]::FromMilliseconds(220)); $a.EasingFunction = $ease
+        $m = New-Object Windows.Media.Animation.DoubleAnimation 14, 0, ([Windows.Duration][TimeSpan]::FromMilliseconds(280)); $m.EasingFunction = $ease
+        $el.BeginAnimation([Windows.UIElement]::OpacityProperty, $a)
+        $t.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $m)
+    } catch { $el.BeginAnimation([Windows.UIElement]::OpacityProperty, $null); $el.Opacity = 1 }
 }
 function Load-Window([string]$text) { $w = [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)); if ($w -is [Windows.Window]) { Dark-TitleBar $w }; $w }
 # 自己的工作列身分，工作列才會用 Switch Pad 的圖示，不是 PowerShell 的
@@ -790,13 +813,25 @@ $cardXaml = @'
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Margin="4" CornerRadius="16" Background="Transparent" BorderThickness="0" BorderBrush="Transparent"
         AllowDrop="True">
+  <!-- 滑鼠移上去，圖示輕輕浮起來 -->
+  <Border.Triggers>
+    <EventTrigger RoutedEvent="MouseEnter"><BeginStoryboard><Storyboard>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.05" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.4"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.05" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.4"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+    </Storyboard></BeginStoryboard></EventTrigger>
+    <EventTrigger RoutedEvent="MouseLeave"><BeginStoryboard><Storyboard>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.18"><DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.18"><DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+    </Storyboard></BeginStoryboard></EventTrigger>
+  </Border.Triggers>
   <Grid>
     <!-- 左邊窄窄一欄小框框（狀態、版本、DLC、要注意…），右邊是圖示，名字和按鈕對齊圖示；整組置中，格子不用很寬 -->
     <Grid Margin="6,12,6,14" HorizontalAlignment="Center" VerticalAlignment="Top">
       <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="8"/><ColumnDefinition Width="140"/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <StackPanel x:Name="Badges" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-      <Border Grid.Row="0" Grid.Column="2" Width="108" Height="108" HorizontalAlignment="Center">
+      <Border x:Name="IconBox" Grid.Row="0" Grid.Column="2" Width="108" Height="108" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+        <Border.RenderTransform><ScaleTransform/></Border.RenderTransform>
         <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="4" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
         <Border x:Name="Icon" CornerRadius="24" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
           <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="46" FontWeight="SemiBold" Foreground="#F5F5F7"/>
@@ -1195,8 +1230,8 @@ function Build-Library {
     $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
     $onPad = @($ui.Library.Children | Where-Object { $_.Tag.OnPad }).Count
     Head-Count $ui.GamesHead '遊戲庫' $nIn; Head-Count $ui.OutHead '還沒加入' $nOut
-    if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「放進遊戲庫」。' }
-    else { $ui.InHint.Text = "iPad 上 $onPad 款" + $(if ($nIn - $onPad) { "，還有 $($nIn - $onPad) 款沒裝上去" } else { '' }) + '。滑鼠移到卡片的狀態上可以看說明。' }
+    if (-not $nIn) { $ui.InHint.Text = '在下面的遊戲按「加入」，再按「放進遊戲庫」' }
+    else { $ui.InHint.Text = "iPad 上 $onPad 款" + $(if ($nIn - $onPad) { " · $($nIn - $onPad) 款等裝到 iPad" } else { '' }) }
     if (-not $nOut) {
         $t = New-Object Windows.Controls.TextBlock
         $t.Text = if ($cards.Count) { '電腦上的遊戲都在遊戲庫裡了。把 NSP / XCI / NSZ 拖進視窗新增遊戲。' } else { '把 NSP / XCI / NSZ 拖進來新增遊戲' }
@@ -1984,6 +2019,7 @@ function Add-Jobs($jobs) {
     }
 }
 function Show-Progress {
+    if ($ui.ProgressView.Visibility -ne 'Visible') { Fade-In $ui.ProgressView }
     $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'
     $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'
     $ui.Stop.Visibility = 'Visible'; $ui.Back.Content = '回遊戲庫'; $ui.Back.Visibility = 'Visible'
@@ -2483,7 +2519,7 @@ $backTimer.Add_Tick({
 })
 $ui.Back.Add_Click({
     $backTimer.Stop()
-    $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'
+    $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'; Fade-In $ui.LibraryView
     $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Sync.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
     # 還在跑：回遊戲庫看、加遊戲排隊，「查看進度」回來
     if ($state.Running) { $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Visible' }
