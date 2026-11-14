@@ -2740,7 +2740,7 @@ $win.Add_Closing({ param($s, $e)
 
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
-    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 232))   # 一格：小框框那欄 58 + 圖示和名字 140 + 一點空
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 218))   # 一格：小框框那欄 58 + 8 + 圖示和名字 140 + 邊距 12
     if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel
