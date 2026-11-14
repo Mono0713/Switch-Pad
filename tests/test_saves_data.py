@@ -209,6 +209,87 @@ class Put(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(b, 'save', '0100AAAA00000000', 'old.bin')))
 
 
+class Sync(unittest.TestCase):
+    """Each game's 存檔 folder and its save slots on the iPad: only the side that changed is copied, both changed keeps both."""
+    TID = '0100AAAA00000000'
+
+    def setUp(self):
+        import zipfile
+        self.tmp = tempfile.mkdtemp()
+        self.dev = os.path.join(self.tmp, 'dev'); self.root = os.path.join(self.tmp, 'backups')
+        self.docs = os.path.join(self.dev, 'Documents')
+        self.live = os.path.join(self.docs, 'save', self.TID)
+        write(os.path.join(self.live, 'a.bin'), b'v1')
+        self.games = os.path.join(self.tmp, 'games'); self.game = os.path.join(self.games, 'Foo [%s]' % self.TID)
+        os.makedirs(self.game)
+        os.makedirs(os.path.join(self.games, 'Other game'))   # no title ID: left alone
+        self.ipa = os.path.join(self.tmp, 'app.ipa')
+        with zipfile.ZipFile(self.ipa, 'w') as z:
+            z.writestr('Payload/A.app/Info.plist', b''); z.writestr('Payload/A.app/games/%s/game.json' % self.TID, b'{}')
+        self.afc = FakeAfc(self.dev); self.n = 0
+
+    def tearDown(self): shutil.rmtree(self.tmp)
+
+    def sync(self):
+        self.n += 1
+        asyncio.run(sd.sync(self.afc, self.ipa, self.games, self.root, now=at(self.n)))
+        return sorted(n for n in os.listdir(os.path.join(self.game, '存檔')) if not n.startswith('.'))
+
+    def pc(self, *parts): return os.path.join(self.game, '存檔', *parts)
+    def read(self, path):
+        with open(path, 'rb') as f: return f.read()
+    def slots(self):
+        import json
+        with open(os.path.join(self.docs, 'save', self.TID + '.slots', 'slots.json'), encoding='utf-8') as f: return json.load(f)
+
+    def test_two_way(self):
+        self.assertEqual(self.sync(), ['存檔 1'])                          # the iPad's save comes down
+        self.assertEqual(self.read(self.pc('存檔 1', 'a.bin')), b'v1')
+        self.assertFalse(os.path.exists(os.path.join(self.games, 'Other game', '存檔')))
+        write(self.pc('朋友的', 'a.bin'), b'friend')                         # a folder dropped on the PC
+        import zipfile
+        with zipfile.ZipFile(self.pc('ryu.zip'), 'w') as z: z.writestr('0/a.bin', b'ryu'); z.writestr('1/a.bin', b'tmp')
+        self.assertEqual(self.sync(), ['ryu', '存檔 1', '朋友的'])
+        names = {x['name']: x['id'] for x in self.slots()['slots']}
+        self.assertEqual(set(names), {'存檔 1', 'ryu', '朋友的'})
+        parked = lambda n: os.path.join(self.docs, 'save', self.TID + '.slots', str(names[n]), 'save', 'a.bin')
+        self.assertEqual(self.read(parked('ryu')), b'ryu')                  # Ryujinx's 0/ kept, 1/ dropped
+        self.assertEqual(self.read(os.path.join(self.live, 'a.bin')), b'v1')   # the save in use untouched
+        write(os.path.join(self.live, 'a.bin'), b'v2'); write(self.pc('朋友的', 'a.bin'), b'friend2')   # each side changes one
+        self.sync()
+        self.assertEqual(self.read(self.pc('存檔 1', 'a.bin')), b'v2')
+        self.assertEqual(self.read(parked('朋友的')), b'friend2')
+        write(os.path.join(self.live, 'a.bin'), b'ipad3'); write(self.pc('存檔 1', 'a.bin'), b'pc3')   # both change one
+        self.assertIn('存檔 1（電腦版）', self.sync())
+        self.assertEqual(self.read(os.path.join(self.live, 'a.bin')), b'ipad3')
+        self.assertEqual(self.read(self.pc('存檔 1', 'a.bin')), b'ipad3')
+        self.assertEqual(self.read(self.pc('存檔 1（電腦版）', 'a.bin')), b'pc3')
+        self.assertIn('存檔 1（電腦版）', [x['name'] for x in self.slots()['slots']])
+        before = len(sd.backups(self.root))
+        self.sync()                                                          # nothing changed: nothing written
+        self.assertEqual(len(sd.backups(self.root)), before)
+        self.assertTrue(all(b.endswith('-before-sync') for b in sd.backups(self.root)))
+
+    def test_deleted_on_ipad_and_renamed_on_pc(self):
+        write(self.pc('朋友的', 'a.bin'), b'friend'); write(self.pc('舊的', 'a.bin'), b'old')
+        self.sync()
+        data = self.slots(); gone = next(x['id'] for x in data['slots'] if x['name'] == '舊的')
+        data['slots'] = [x for x in data['slots'] if x['id'] != gone]
+        import json
+        with open(os.path.join(self.docs, 'save', self.TID + '.slots', 'slots.json'), 'w', encoding='utf-8') as f: json.dump(data, f)
+        shutil.rmtree(os.path.join(self.docs, 'save', self.TID + '.slots', str(gone)))
+        os.rename(self.pc('朋友的'), self.pc('阿明'))
+        self.assertEqual(self.sync(), ['存檔 1', '阿明'])
+        self.assertEqual(sorted(x['name'] for x in self.slots()['slots']), ['存檔 1', '阿明'])
+        self.assertTrue(os.path.isdir(os.path.join(self.root, '已刪除')))
+
+    def test_put_slot(self):
+        src = os.path.join(self.tmp, 'import'); write(os.path.join(src, 'a.bin'), b'imp')
+        asyncio.run(sd.put(self.afc, src, self.root, 'save/' + self.TID, slot='匯入', now=at(0)))
+        self.assertEqual(self.read(os.path.join(self.live, 'a.bin')), b'v1')
+        self.assertEqual([x['name'] for x in self.slots()['slots']], ['存檔 1', '匯入'])
+
+
 class Logs(unittest.TestCase):
     def test_pull_and_group(self):
         tmp = tempfile.mkdtemp()
