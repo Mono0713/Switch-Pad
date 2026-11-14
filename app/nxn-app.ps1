@@ -2282,6 +2282,9 @@ $failHints = @(
 )
 function Fail-Reason($log) {
     $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
+    # 打包器自己已經用中文說明的失敗（解包：金鑰太舊、哪個檔案損毀），原樣顯示
+    $l = @($lines | Where-Object { $_ -match '\[x\] .*[\u4e00-\u9fff]{2}' }) | Select-Object -Last 1
+    if ($l) { return ($l -replace '^.*?\[x\]\s*', '').Trim() }
     foreach ($h in $failHints) { if ($lines -match $h.Re) { return $h.Msg } }
     $l = @($lines | Where-Object { $_ -match '\[x\] precheck: ' }) | Select-Object -Last 1
     if ($l) { return ($l -replace '^.*precheck:\s*', '').Trim() }
