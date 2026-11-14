@@ -151,7 +151,7 @@ $cfg = @{ Shell = ''; Udid = ''; Overwrite = $false; Mode = 'both'; Library = $t
 try { (Get-Content $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
 function Save-Settings { try { [pscustomobject]$cfg | ConvertTo-Json | Set-Content $settingsFile -Encoding UTF8 } catch { } }
 
-# ---------------------------------------------------------------- 樣式：照殼的設定頁（深色、iOS 分組卡片、藍色主按鈕）
+# ---------------------------------------------------------------- 樣式：Apple 簡約風（深色、圓角方形按鈕、沒有外框的遊戲格子、小色點狀態、左上角小標籤）
 $styles = @'
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
@@ -161,19 +161,20 @@ $styles = @'
   <SolidColorBrush x:Key="Sub" Color="#8E8E93"/>
   <SolidColorBrush x:Key="Accent" Color="#0A84FF"/>
   <Style TargetType="Button">
-    <Setter Property="Foreground" Value="White"/>
-    <Setter Property="Background" Value="#2C2C2E"/>
+    <Setter Property="Foreground" Value="#F5F5F7"/>
+    <Setter Property="Background" Value="#2A2A2D"/>
     <Setter Property="Padding" Value="16,8"/>
     <Setter Property="FontSize" Value="14"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
     <Setter Property="Cursor" Value="Hand"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="Button">
-          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}">
             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <ControlTemplate.Triggers>
-            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.82"/></Trigger>
             <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
           </ControlTemplate.Triggers>
@@ -184,8 +185,27 @@ $styles = @'
   <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
     <Setter Property="Background" Value="#0A84FF"/>
     <Setter Property="FontWeight" Value="SemiBold"/>
-    <Setter Property="FontSize" Value="17"/>
-    <Setter Property="Padding" Value="34,11"/>
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="Padding" Value="26,10"/>
+  </Style>
+  <!-- 遊戲格子上的小按鈕：像 App Store 的「取得」，灰底圓角 -->
+  <Style x:Key="Pill" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="FontSize" Value="12.5"/>
+    <Setter Property="Padding" Value="20,5"/>
+    <Setter Property="Foreground" Value="#EBEBF5"/>
+  </Style>
+  <Style x:Key="Get" TargetType="Button" BasedOn="{StaticResource Pill}">
+    <Setter Property="Foreground" Value="#0A84FF"/>
+    <Setter Property="FontWeight" Value="Bold"/>
+  </Style>
+  <!-- 標題列的圓形小按鈕 -->
+  <Style x:Key="Round" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="Width" Value="34"/>
+    <Setter Property="Height" Value="34"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="Foreground" Value="#C7C7CC"/>
   </Style>
   <!-- 分段選擇（像 iOS 的 segmented control） -->
   <Style x:Key="Seg" TargetType="RadioButton">
@@ -276,7 +296,7 @@ $styles = @'
     </Style.Triggers>
   </Style>
   <Style TargetType="ToolTip">
-    <Setter Property="Background" Value="#2C2C2E"/><Setter Property="Foreground" Value="White"/><Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Background" Value="#2C2C2E"/><Setter Property="Foreground" Value="#F5F5F7"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="10,6"/>
   </Style>
 </ResourceDictionary>
 '@
@@ -285,10 +305,10 @@ $xamlText = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Switch Pad" Width="1220" Height="820" MinWidth="820" MinHeight="560"
-        Background="#000000" Foreground="White" AllowDrop="True"
-        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterScreen">
+        Background="#141416" Foreground="#F5F5F7" AllowDrop="True"
+        FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterScreen">
   <Window.Resources>__RES__</Window.Resources>
-  <Grid Margin="28,20,28,0">
+  <Grid Margin="32,20,32,0">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -299,15 +319,20 @@ $xamlText = @'
     <!-- 標題列 -->
     <DockPanel Grid.Row="0" Margin="0,0,0,14">
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-        <Ellipse x:Name="AcctDot" Width="9" Height="9" Fill="#8E8E93" Margin="0,0,8,0" VerticalAlignment="Center"/>
-        <TextBlock x:Name="Account" Text="…" Foreground="#8E8E93" VerticalAlignment="Center" Margin="0,0,14,0"/>
-        <Button x:Name="Login" Content="登入 Apple ID" Margin="0,0,8,0"/>
-        <Button x:Name="Refresh" Content="⟳" ToolTip="重新整理" Margin="0,0,8,0" Padding="13,8"/>
-        <Button x:Name="Settings" Content="⚙" ToolTip="設定" Padding="13,8"/>
+        <Border Background="#232326" CornerRadius="9" Padding="14,7" Margin="0,0,8,0" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal">
+            <Ellipse x:Name="AcctDot" Width="7" Height="7" Fill="#8E8E93" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="Account" Text="…" Foreground="#C7C7CC" FontSize="13" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Border>
+        <Button x:Name="Login" Content="登入 Apple ID" Margin="0,0,8,0" FontSize="13" Padding="14,7"/>
+        <Button x:Name="Refresh" Content="⟳" ToolTip="重新整理" Margin="0,0,8,0" Style="{StaticResource Round}"/>
+        <Button x:Name="Settings" Content="⚙" ToolTip="設定" Style="{StaticResource Round}"/>
       </StackPanel>
       <StackPanel>
         <StackPanel Orientation="Horizontal">
-          <TextBlock Text="Switch Pad" FontSize="30" FontWeight="Bold" ToolTip="按「＋ 加入」放進遊戲庫，按「放進遊戲庫」轉換，iPad 接上後按「裝到 iPad」；把 NSP / XCI / NSZ 拖到遊戲上加進那款，拖到空白處新增一款"/>
+          <Image x:Name="AppLogo" Width="34" Height="34" Margin="0,0,12,0" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
+          <TextBlock Text="Switch Pad" FontSize="25" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="按「＋ 加入」放進遊戲庫，按「放進遊戲庫」轉換，iPad 接上後按「裝到 iPad」；把 NSP / XCI / NSZ 拖到遊戲上加進那款，拖到空白處新增一款"/>
           <Border Background="#1C1C1E" CornerRadius="10" Margin="24,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
             <StackPanel Orientation="Horizontal">
               <RadioButton x:Name="TabGames" GroupName="tab" Style="{StaticResource Seg}" Content="遊戲" IsChecked="True"/>
@@ -332,10 +357,10 @@ $xamlText = @'
     <!-- 遊戲庫 -->
     <ScrollViewer x:Name="LibraryView" Grid.Row="2" VerticalScrollBarVisibility="Auto">
       <StackPanel Margin="0,0,0,24">
-        <TextBlock x:Name="GamesHead" Text="遊戲庫" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,2"/>
-        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="iPad 上「遊戲庫」App 裡的遊戲。按「移除」拿掉。"/>
+        <TextBlock x:Name="GamesHead" Text="遊戲庫" FontSize="26" FontWeight="Bold" Margin="0,4,0,2"/>
+        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="iPad 上「SwitchPad」App 裡的遊戲。按「移除」拿掉。"/>
         <UniformGrid x:Name="Library" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
-        <TextBlock x:Name="OutHead" Text="還沒加入" FontSize="22" FontWeight="SemiBold" Margin="0,8,0,2"/>
+        <TextBlock x:Name="OutHead" Text="還沒加入" FontSize="26" FontWeight="Bold" Margin="0,18,0,2"/>
         <TextBlock x:Name="OutHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="電腦上有、還不在遊戲庫的遊戲。按「＋ 加入」放進去；把 NSP / XCI / NSZ 拖進視窗可以新增遊戲。"/>
         <UniformGrid x:Name="Others" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
         <TextBlock x:Name="PacksHead" Text="合包" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4" Visibility="Collapsed"
@@ -363,7 +388,7 @@ $xamlText = @'
     </DockPanel>
 
     <!-- 底部列 -->
-    <Border Grid.Row="3" Background="#1C1C1E" CornerRadius="18,18,0,0" Padding="22,14" Margin="-28,0,-28,0">
+    <Border Grid.Row="3" Background="#1C1C1E" BorderBrush="#2A2A2D" BorderThickness="0,1,0,0" Padding="32,14" Margin="-32,0,-32,0">
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
           <Button x:Name="ShowProg" Content="查看進度" Margin="0,0,10,0" Visibility="Collapsed"/>
@@ -376,8 +401,8 @@ $xamlText = @'
                   ToolTip="第二步，iPad 接著電腦時按：用轉換好的遊戲合成遊戲庫，裝到 iPad（存檔都留著）"/>
         </StackPanel>
         <StackPanel x:Name="Options" VerticalAlignment="Center" Margin="0,0,16,0">
-          <TextBlock x:Name="SelCount" Text="" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-          <TextBlock x:Name="SelSub" Text="" FontSize="13" Foreground="#8E8E93" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+          <TextBlock x:Name="SelCount" Text="" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="SelSub" Text="" FontSize="12" Foreground="#8E8E93" Margin="0,2,0,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
           <!-- 只剩遊戲庫一種做法：舊的模式切換留著不顯示，程式裡還認得它們 -->
           <Border Background="#2C2C2E" CornerRadius="10" Margin="8,0,0,0" Visibility="Collapsed">
             <StackPanel Orientation="Horizontal">
@@ -401,7 +426,16 @@ $xamlText = @'
 </Window>
 '@
 # 樣式要在載入前就放進 Window.Resources，StaticResource 才找得到
-function Load-Window([string]$text) { [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)) }
+# Windows 的標題列也用深色（Windows 10 1809 以後；舊版不支援就照舊）
+try { Add-Type -Namespace SwitchPad -Name Dwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);' } catch { }
+function Dark-TitleBar($w) {
+    $w.Add_SourceInitialized({ param($s, $e)
+        try {
+            $h = (New-Object Windows.Interop.WindowInteropHelper $s).Handle; $on = 1
+            if ([SwitchPad.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$on, 4) -ne 0) { [void][SwitchPad.Dwm]::DwmSetWindowAttribute($h, 19, [ref]$on, 4) }
+        } catch { } })
+}
+function Load-Window([string]$text) { $w = [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)); if ($w -is [Windows.Window]) { Dark-TitleBar $w }; $w }
 # 自己的工作列身分，工作列才會用 Switch Pad 的圖示，不是 PowerShell 的
 try {
     Add-Type -Namespace SwitchPad -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);'
@@ -413,6 +447,14 @@ if (Test-Path $appIcon) {
     try {
         $fs = [IO.File]::OpenRead($appIcon)
         try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create($fs, 'None', 'OnLoad') } finally { $fs.Dispose() }
+    } catch { }
+    # 標題旁的小圖示：用 .ico 裡最大的那張，縮小才清楚
+    try {
+        $fs = [IO.File]::OpenRead($appIcon)
+        try {
+            $dec = [Windows.Media.Imaging.BitmapDecoder]::Create($fs, 'None', 'OnLoad')
+            $win.FindName('AppLogo').Source = $dec.Frames | Sort-Object { $_.PixelWidth } -Descending | Select-Object -First 1
+        } finally { $fs.Dispose() }
     } catch { }
     # 不自己建桌面捷徑（使用者不要）；只把舊版建的「PowerShell 開 nxn-app.ps1」捷徑改指向 Switch Pad.exe
     try {
@@ -431,7 +473,7 @@ if (Test-Path $appIcon) {
     } catch { }
 }
 $ui = @{}
-foreach ($n in 'AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
+foreach ($n in 'AppLogo','AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
                'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Sync','Options','SelCount',
                'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg','DoneBox','DoneJobs') { $ui[$n] = $win.FindName($n) }
 
@@ -744,30 +786,37 @@ function Paint-Icon($border, $letterBlock, $g, $bmp) {
 # ---------------------------------------------------------------- 遊戲卡
 $cardXaml = @'
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Margin="6" CornerRadius="18" Background="#1C1C1E" BorderThickness="3" BorderBrush="Transparent"
+        Margin="4" CornerRadius="16" Background="Transparent" BorderThickness="0" BorderBrush="Transparent"
         AllowDrop="True">
   <Grid>
-    <DockPanel Margin="14,16,14,14">
-      <Button x:Name="Act" DockPanel.Dock="Bottom" HorizontalAlignment="Stretch" Margin="0,12,0,0" Padding="12,7" FontWeight="SemiBold"/>
-      <StackPanel>
-        <Border x:Name="Icon" Width="112" Height="112" CornerRadius="26" HorizontalAlignment="Center" Background="#2C2C2E">
-          <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="52" FontWeight="Bold" Foreground="White"/>
+    <!-- 左邊窄窄一欄小框框（狀態、版本、DLC、要注意…），右邊是圖示，名字和按鈕對齊圖示；整組置中，格子不用很寬 -->
+    <Grid Margin="6,12,6,14" HorizontalAlignment="Center" VerticalAlignment="Top">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="8"/><ColumnDefinition Width="140"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <StackPanel x:Name="Badges" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+      <Border Grid.Row="0" Grid.Column="2" Width="108" Height="108" HorizontalAlignment="Center">
+        <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="4" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
+        <Border x:Name="Icon" CornerRadius="24" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
+          <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="46" FontWeight="SemiBold" Foreground="#F5F5F7"/>
         </Border>
-        <TextBlock x:Name="Title" Margin="0,12,0,0" FontSize="15" FontWeight="SemiBold" Foreground="White" TextWrapping="Wrap"
-                   TextAlignment="Center" MaxHeight="40" TextTrimming="CharacterEllipsis" Height="40"/>
-        <TextBlock x:Name="Detail" Margin="0,2,0,0" FontSize="12" MinHeight="16" Foreground="#8E8E93" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
-        <TextBlock x:Name="State" Margin="0,6,0,0" FontSize="13" FontWeight="SemiBold" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
-        <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      </Border>
+      <StackPanel Grid.Row="1" Grid.Column="2">
+        <TextBlock x:Name="Title" Margin="0,10,0,0" FontSize="13.5" FontWeight="SemiBold" Foreground="#F5F5F7" TextWrapping="Wrap"
+                   TextAlignment="Center" MaxHeight="38" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="Detail" Margin="0,2,0,0" FontSize="12" Foreground="#8E8E93" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="State" Margin="0,5,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+        <Button x:Name="Act" HorizontalAlignment="Center" Margin="0,9,0,0" FontSize="12.5" Padding="20,5"/>
       </StackPanel>
-    </DockPanel>
+    </Grid>
     <Border x:Name="Pending" CornerRadius="9" Padding="10,3" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" Visibility="Collapsed">
       <TextBlock x:Name="PendingText" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
     </Border>
-    <Border x:Name="Check" Width="30" Height="30" CornerRadius="15" Background="#0A84FF" HorizontalAlignment="Right"
+    <Border x:Name="Check" Width="26" Height="26" CornerRadius="13" Background="#0A84FF" HorizontalAlignment="Right"
             VerticalAlignment="Top" Margin="0,10,10,0" Visibility="Collapsed">
       <TextBlock Text="✓" Foreground="White" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
-    <Border x:Name="DropHint" CornerRadius="17" Background="#D90A84FF" Visibility="Collapsed">
+    <Border x:Name="DropHint" CornerRadius="16" Background="#D90A84FF" Visibility="Collapsed">
       <TextBlock Text="放開就加進這款（遊戲檔或存檔）" Foreground="White" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
   </Grid>
@@ -780,11 +829,54 @@ $selected = New-Object System.Collections.Generic.List[string]
 function Card-Paint($card) {
     $g = $card.Tag; $in = $selected.Contains($g.Dir)
     $act = $card.FindName('Act'); $pend = $card.FindName('Pending'); $pt = $card.FindName('PendingText')
-    $act.Style = $win.FindResource([Windows.Controls.Button])
+    $act.Style = $win.FindResource('Pill')
     $pend.Visibility = 'Collapsed'; $card.BorderBrush = [Windows.Media.Brushes]::Transparent   # 狀態只看卡片上那一行「●」
-    if ($in) { $act.Content = '移除' } else { $act.Content = '＋ 加入'; $act.Style = $win.FindResource('Primary') }
+    if ($in) { $act.Content = '移除' } else { $act.Content = '加入'; $act.Style = $win.FindResource('Get') }
     $act.IsEnabled = [bool]($in -or $g.Base -or $g.Ready)
     $act.ToolTip = if (-not $in -and -not $g.Base -and -not $g.Ready) { '資料夾裡沒有遊戲本體（NSP / XCI / NSZ）' } else { $null }
+}
+# 狀態那行「● 在 iPad 上」：只有點是彩色的，字用灰色（失敗的紅字照舊，要看得到）
+function Dot-State($st) {
+    $t = "$($st.Text)"
+    if (-not $t.StartsWith('● ') -or "$($st.Foreground)" -eq '#FFFF453A') { return }
+    $c = $st.Foreground
+    $st.Inlines.Clear()
+    $d = New-Object Windows.Documents.Run '●  '; $d.Foreground = $c; $d.FontSize = 9; $d.BaselineAlignment = 'Center'
+    $r = New-Object Windows.Documents.Run $t.Substring(2); $r.Foreground = Brush '#AEAEB2'
+    $st.Inlines.Add($d); $st.Inlines.Add($r)
+}
+# 遊戲格子左上角的小標籤（圓角小框，淡色底配同色字）
+function Add-Badge($card, $text, $bg, $fg, $tip, $dot = $null, $at = -1) {
+    $b = New-Object Windows.Controls.Border
+    $b.CornerRadius = '5'; $b.Padding = '7,2'; $b.Margin = '0,0,0,4'; $b.Background = Brush $bg; $b.HorizontalAlignment = 'Right'
+    $t = New-Object Windows.Controls.TextBlock
+    $t.FontSize = 11; $t.FontWeight = 'SemiBold'; $t.Foreground = Brush $fg; $t.TextTrimming = 'CharacterEllipsis'
+    if ($dot) { $d = New-Object Windows.Documents.Run '● '; $d.Foreground = $dot; $d.FontSize = 8; $d.BaselineAlignment = 'Center'; $t.Inlines.Add($d) }
+    $t.Inlines.Add((New-Object Windows.Documents.Run $text))
+    $b.Child = $t
+    $b.ToolTip = if ($tip) { $tip } else { $text }   # 框框太窄被截掉時也看得到全文
+    $p = $card.FindName('Badges')
+    if ($at -ge 0 -and $at -le $p.Children.Count) { [void]$p.Children.Insert($at, $b) } else { [void]$p.Children.Add($b) }
+}
+# 狀態那行（State）和版本（Detail）改成左邊的小框框：狀態第一個（帶彩色小點），版本、DLC 接著；原本的兩行不顯示
+function State-Badges($card, $parts) {
+    $st = $card.FindName('State'); $t = "$($st.Text)"
+    $at = 0
+    if ($t -and $t -ne '● 在 iPad 上') {   # 在 iPad 上是正常狀態，不用標
+        $red = "$($st.Foreground)" -eq '#FFFF453A'
+        $txt = if ($t.StartsWith('● ')) { $t.Substring(2) } else { $t }
+        Add-Badge $card $txt $(if ($red) { '#33FF453A' } else { '#232326' }) $(if ($red) { '#FF6961' } else { '#D1D1D6' }) $st.ToolTip $(if ($red) { $null } else { $st.Foreground }) $at
+        $at++
+    }
+    foreach ($x in @($parts)) { if ($x) { Add-Badge $card $x '#232326' '#AEAEB2' $null $null $at; $at++ } }
+    $card.FindName('State').Visibility = 'Collapsed'; $card.FindName('Detail').Visibility = 'Collapsed'
+}
+# 標題：名字白色粗體，數量灰色
+function Head-Count($tb, $name, $n) {
+    $tb.Inlines.Clear()
+    $tb.Inlines.Add((New-Object Windows.Documents.Run $name))
+    $c = New-Object Windows.Documents.Run "  $n"; $c.Foreground = Brush '#8E8E93'; $c.FontWeight = 'Medium'
+    $tb.Inlines.Add($c)
 }
 # 遊戲庫清單（電腦上的）存在設定裡；第一次用的時候從 iPad 上那份遊戲庫讀
 function Save-Want { $cfg.Want = @($selected); $cfg.WantSet = $true; Save-Settings }
@@ -892,8 +984,8 @@ function Save-Ipa($g) {
 function Pick-Backup($title, $list) {
     $bx = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="460" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
-        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+        Width="460" SizeToContent="Height" Background="#141416" Foreground="#F5F5F7" ResizeMode="NoResize"
+        FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
   <Window.Resources>__RES__</Window.Resources>
   <StackPanel Margin="22">
     <TextBlock Foreground="#8E8E93" TextWrapping="Wrap" Margin="0,0,0,10"
@@ -1052,26 +1144,23 @@ function Build-Library {
         elseif ($g.Ready) { $st.Text = '● 轉換過了，加入就能裝'; $st.Foreground = $gray; $g.Order = 2 }
         else { $st.Text = '' }
         if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) {
-            $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '💾 存檔待傳'
-            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「裝到 iPad」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })) -join "`n"
+            Add-Badge $card '存檔待傳' '#330A84FF' '#64D2FF' $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「裝到 iPad」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })
         }
-        if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
-        if ($preWarn.Count -and -not $why) {
-            if ($st.Text -and $st.Text -notlike '*⚠') { $st.Text += ' · ⚠' } elseif (-not $st.Text) { $st.Text = '⚠ 要注意'; $st.Foreground = $orange }
-            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + @($preWarn | ForEach-Object { "⚠ $_" })) -join "`n"
-        }
-        # 支援程度只在「還沒加入」顯示，幫你挑；已經在遊戲庫的看上面那行就好
-        $sb = $card.FindName('Support')
+        $warn = @()
+        if ($g.Stray) { $warn += "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
+        if ($preWarn.Count -and -not $why) { $warn += $preWarn }
+        if ($warn.Count) { Add-Badge $card '要注意' '#33FF9F0A' '#FF9F0A' (($warn | ForEach-Object { "⚠ $_" }) -join "`n") }
+        State-Badges $card $parts
+        # 支援程度只在「還沒加入」顯示，幫你挑：左上角的小標籤；已經在遊戲庫的看狀態那行就好
         if (-not $g.InLib) {
             $sup = Support-Of $g
-            if ($sup.Text -eq '● 已驗證') { $sb.Text = '✓ 已驗證'; $sb.Foreground = $green }
-            elseif ($sup.Text) { $sb.Text = '未驗證，可能打不開'; $sb.Foreground = $gray }
-            if ($sup.Tip) { $sb.ToolTip = $sup.Tip }
-        } else { $sb.Visibility = 'Collapsed' }
+            if ($sup.Text -eq '● 已驗證') { Add-Badge $card '已驗證' '#2630D158' '#30D158' $sup.Tip }
+            elseif ($sup.Text) { Add-Badge $card '未驗證' '#33FFD60A' '#FFD60A' $(if ($sup.Tip) { $sup.Tip } else { '還沒有人確認這款能玩，可能打不開' }) }
+        }
         Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $g (Cover-For $g)
 
-        $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#2C2C2E' })
-        $card.Add_MouseLeave({ param($s, $e) $s.Background = Brush '#1C1C1E' })
+        $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#1F1F22' })
+        $card.Add_MouseLeave({ param($s, $e) $s.Background = [Windows.Media.Brushes]::Transparent })
         $act = $card.FindName('Act'); $act.Tag = $card
         $act.Add_Click({ param($s, $e)
             $c = $s.Tag; $dir = $c.Tag.Dir
@@ -1103,7 +1192,7 @@ function Build-Library {
     }
     $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
     $onPad = @($ui.Library.Children | Where-Object { $_.Tag.OnPad }).Count
-    $ui.GamesHead.Text = "遊戲庫 · $nIn 款"; $ui.OutHead.Text = "還沒加入 · $nOut 款"
+    Head-Count $ui.GamesHead '遊戲庫' $nIn; Head-Count $ui.OutHead '還沒加入' $nOut
     if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「放進遊戲庫」。' }
     else { $ui.InHint.Text = "iPad 上 $onPad 款" + $(if ($nIn - $onPad) { "，還有 $($nIn - $onPad) 款沒裝上去" } else { '' }) + '。滑鼠移到卡片的狀態上可以看說明。' }
     if (-not $nOut) {
@@ -1188,8 +1277,8 @@ function Build-Packs($inst) {
             $st.Foreground = Brush $(if ($mine.Left -le 2) { '#FF9F0A' } else { '#30D158' })
         }
         Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $p (Cover-For $p)
-        $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#2C2C2E' })
-        $card.Add_MouseLeave({ param($s, $e) $s.Background = Brush '#1C1C1E' })
+        $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#1F1F22' })
+        $card.Add_MouseLeave({ param($s, $e) $s.Background = [Windows.Media.Brushes]::Transparent })
         $card.Add_MouseLeftButtonUp({ param($s, $e) Show-Pack $s.Tag })
         $cm = New-Object Windows.Controls.ContextMenu
         $cm.Style = $win.FindResource([Windows.Controls.ContextMenu])
@@ -1261,8 +1350,8 @@ function Rename-Pack($p, $name) {
 function Ask-Text($title, $prompt, $default) {
     $ax = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="440" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
-        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+        Width="440" SizeToContent="Height" Background="#141416" Foreground="#F5F5F7" ResizeMode="NoResize"
+        FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
   <Window.Resources>__RES__</Window.Resources>
   <StackPanel Margin="22">
     <TextBlock x:Name="Prompt" Foreground="#8E8E93" TextWrapping="Wrap" Margin="0,0,0,10"/>
@@ -1286,8 +1375,8 @@ function Ask-Text($title, $prompt, $default) {
 function Show-Pack($p) {
     $px = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="520" SizeToContent="Height" MaxHeight="760" Background="#000000" Foreground="White" ResizeMode="NoResize"
-        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+        Width="520" SizeToContent="Height" MaxHeight="760" Background="#141416" Foreground="#F5F5F7" ResizeMode="NoResize"
+        FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
   <Window.Resources>__RES__</Window.Resources>
   <DockPanel Margin="22">
     <TextBlock x:Name="Head" DockPanel.Dock="Top" FontSize="22" FontWeight="Bold"/>
@@ -1394,7 +1483,7 @@ function Update-Notice {
 # 程式更新放在設定裡；有新版時齒輪變藍色提醒
 function Update-UpdateBtn {
     $upd = Update-Available
-    $ui.Settings.Foreground = Brush $(if ($upd) { '#0A84FF' } else { '#FFFFFF' })
+    $ui.Settings.Foreground = Brush $(if ($upd) { '#0A84FF' } else { '#C7C7CC' })
     $ui.Settings.ToolTip = if ($upd) { "設定（有新版本：$upd）" } else { '設定' }
 }
 # 背景問 GitHub（不卡住畫面）；問不到就算了，下次開再問
@@ -1503,6 +1592,7 @@ function Update-Banner($inst) {
     $ui.RenewBtn.ToolTip = "免費 Apple ID 簽的 App 7 天後就打不開。按這裡把 iPad 上的遊戲庫重簽一次，遊戲和存檔都不動。"
     $ms = Get-MultiShell
     if ($ms -and (Shell-Changed $ms.FullName)) { $ui.RenewBtn.ToolTip += "`n換了新殼，這次會先用新殼重新合成遊戲庫再裝。" }
+    elseif (Look-Changed) { $ui.RenewBtn.ToolTip += "`nApp 的名字或圖示換了，這次會先重新合成遊戲庫再裝。" }
     $ui.RenewBtn.Visibility = 'Visible'
 }
 
@@ -1635,7 +1725,7 @@ function Update-Account {
     try {
         $out = (& $plume account list 2>&1 | ForEach-Object { "$_" }) -join "`n"
         $mail = [regex]::Match($out, '[\w.+-]+@[\w-]+(\.[\w-]+)+').Value
-        if ($mail) { $ui.Account.Text = $mail; $ui.Account.Foreground = Brush '#EBEBF5'; $ui.AcctDot.Fill = Brush '#30D158'; $ui.Login.Content = '換帳號' }
+        if ($mail) { $ui.Account.Text = $mail; $ui.Account.Foreground = Brush '#C7C7CC'; $ui.AcctDot.Fill = Brush '#30D158'; $ui.Login.Content = '換帳號' }
         else { $ui.Account.Text = '還沒登入 Apple ID'; $ui.AcctDot.Fill = Brush '#FF453A'; $ui.Login.Content = '登入 Apple ID' }
     } catch { $ui.Account.Text = '無法確認 Apple ID' }
 }
@@ -1643,8 +1733,8 @@ function Update-Account {
 function Show-Login {
     $lx = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="420" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
-        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner" Title="Apple ID">
+        Width="420" SizeToContent="Height" Background="#141416" Foreground="#F5F5F7" ResizeMode="NoResize"
+        FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner" Title="Apple ID">
   <Window.Resources>__RES__</Window.Resources>
   <StackPanel Margin="22">
     <TextBlock Text="登入 Apple ID" FontSize="22" FontWeight="Bold" Margin="0,0,0,14"/>
@@ -2081,7 +2171,8 @@ function Add-ToPack($p, $dirs, $mode) {
 # 每款遊戲用多遊戲殼打包成 <資料夾>-multi-<殼版本>.ipa（遊戲包，留在遊戲資料夾當快取），按開始時把勾的遊戲包合成
 # 合包\遊戲庫.ipa 再安裝。bundle ID 固定，所以加減遊戲都是更新同一個 App，存檔留著；遊戲資料（romfs、著色器）照 romfs_data.py
 # 放在 App 的 Documents，只傳新加的遊戲，拿掉的遊戲它的資料會被刪掉（存檔留著）。圖示固定用 LibraryIcon.png。
-$libName = '遊戲庫'
+$libName = '遊戲庫'          # 合包\遊戲庫.ipa 的檔名（電腦上找它用，不改）
+$libAppName = 'SwitchPad'    # iPad 主畫面上 App 的名字
 $libBid = 'org.nxnative.games.library'
 function Library-Ipa { Join-Path (Join-Path $base '合包') "$libName.ipa" }
 # 遊戲庫上次是用哪個殼合成的（合成好時記在 遊戲庫.ipa.shell）；換了殼，遊戲包沒變也要重新合成，iPad 才用得到新殼
@@ -2092,6 +2183,19 @@ function Shell-Changed($shell) {
     $rec = "$lib.shell"
     if (Test-Path -LiteralPath $rec) { return ((Get-Content -LiteralPath $rec -Raw -Encoding UTF8).Trim() -ne $sh.Name) }
     return [bool]($sh -and $sh.LastWriteTime -gt $li.LastWriteTime)   # 還沒有記錄的舊遊戲庫：殼比遊戲庫新就算換過
+}
+# App 的名字和圖示（合成好時記在 遊戲庫.ipa.look）；換了就要重新合成一次，iPad 上才會換
+function Library-Look {
+    $icon = Join-Path $here 'LibraryIcon.png'
+    $h = if (Test-Path -LiteralPath $icon) { (Get-FileHash -LiteralPath $icon -Algorithm SHA256).Hash.Substring(0, 16) } else { '' }
+    "$libAppName|$h"
+}
+function Look-Changed {
+    $lib = Library-Ipa
+    if (-not (Test-Path -LiteralPath $lib)) { return $false }
+    $rec = "$lib.look"
+    if (-not (Test-Path -LiteralPath $rec)) { return $true }   # 改名前合成的遊戲庫
+    return ((Get-Content -LiteralPath $rec -Raw -Encoding UTF8).Trim() -ne (Library-Look))
 }
 function Library-Tids {
     $f = Get-Item -LiteralPath (Library-Ipa) -ErrorAction SilentlyContinue
@@ -2207,18 +2311,20 @@ function Library-Call($lib, $fail) {
     $libT = (Get-Item -LiteralPath $libIpa -ErrorAction SilentlyContinue).LastWriteTime
     $newer = @($use | Where-Object { $_.WasIn -and (-not $libT -or (Get-Item -LiteralPath $_.Path).LastWriteTime -gt $libT) })
     $newShell = Shell-Changed $lib.Shell
-    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    $newLook = Look-Changed
+    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $newLook)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
     $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
             $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' }) +
-            $(if ($newShell) { '，換新殼' } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
+            $(if ($newShell) { '，換新殼' } elseif ($newLook) { "，App 改名 $libAppName、換圖示" } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
     $tmp = "$libIpa.new"
     $icon = Join-Path $here 'LibraryIcon.png'
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
-            "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
+            "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libAppName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
             $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
             "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +
-            "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; Write-Host '遊戲庫合成好了'"
+            "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; " +
+            "Set-Content -LiteralPath $(Quote "$libIpa.look") -Value $(Quote (Library-Look)) -Encoding UTF8; Write-Host '遊戲庫合成好了'"
     if ($lib.Mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $libIpa) -NoPause" }
     return @{ Call = $call; Skip = $skip }
 }
@@ -2332,7 +2438,7 @@ $ui.Sync.Add_Click({
 $ui.RenewBtn.Add_Click({
     if ($state.Running) { return }
     $ms = Get-MultiShell
-    if ($ms -and (Shell-Changed $ms.FullName) -and -not @(Setup-Missing).Count) { Sync-Library } else { Run-Library @() 'install' } })
+    if ($ms -and ((Shell-Changed $ms.FullName) -or (Look-Changed)) -and -not @(Setup-Missing).Count) { Sync-Library } else { Run-Library @() 'install' } })
 
 $ui.Stop.Add_Click({
     $state.Queue.Clear()
@@ -2479,8 +2585,8 @@ function Copy-Diagnostics($owner) {
 $ui.Settings.Add_Click({
     $sx = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="設定" Width="560" SizeToContent="Height" Background="#000000" Foreground="White" ResizeMode="NoResize"
-        FontFamily="Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+        Title="設定" Width="560" SizeToContent="Height" Background="#141416" Foreground="#F5F5F7" ResizeMode="NoResize"
+        FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
   <Window.Resources>__RES__</Window.Resources>
   <StackPanel Margin="22">
     <TextBlock Text="遊戲庫" Foreground="#8E8E93" Margin="4,0,0,6"/>
@@ -2630,7 +2736,7 @@ $win.Add_Closing({ param($s, $e)
 
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
-    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 236))
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 218))   # 一格：小框框那欄 58 + 8 + 圖示和名字 140 + 邊距 12
     if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel

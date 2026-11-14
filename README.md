@@ -26,7 +26,7 @@
 
 ### 遊戲庫（iPad 上只放一個 App）
 
-下方選「遊戲庫」：勾哪些遊戲，iPad 上的「遊戲庫」App 裡就有哪些，取消勾選再按「開始」就拿掉。只有一款時會直接開遊戲，
+下方選「遊戲庫」：勾哪些遊戲，iPad 上的「SwitchPad」App 裡就有哪些，取消勾選再按「開始」就拿掉。只有一款時會直接開遊戲，
 兩款以上先選遊戲。bundle ID 固定，加減遊戲都是更新同一個 App，存檔留著；遊戲資料放在 App 的 Documents，只傳新加的那款。
 
 - 每款遊戲第一次會用多遊戲殼打包成遊戲包（`<名稱>-multi-<殼版本>.ipa`，留在遊戲資料夾），之後加減遊戲只重新合成、重簽小 App。
@@ -76,7 +76,7 @@ Switch Pad 打開時會到 GitHub 問有沒有新版；有的話設定（齒輪�
 | `saves_data.py` | 備份和還原 iPad 上的存檔（經 App 的 Documents），也把拖進遊戲卡的存檔放進去 |
 | `keys_check.py` | 打包前檢查 prod.keys 打不打得開這款（移植自 NX2Apple） |
 | `nxn_merge.py` | 把遊戲包合成遊戲庫（ns2ios-shell 的同一支，加了 `--icon`） |
-| `LibraryIcon.png` | 遊戲庫 App 的圖示 |
+| `LibraryIcon.png` | iPad 上 SwitchPad App 的圖示（換了會在下次裝到 iPad 時自動重新合成） |
 | `NOTICE.txt` | 第三方程式碼與授權 |
 
 程式在 [`app/`](app)，測試在 [`tests/`](tests)（`python tests/test_keys_check.py`、`python tests/test_saves_data.py`）。改動 `app/` 推到 `main` 後，[`release.yml`](.github/workflows/release.yml) 會自動把它壓成
