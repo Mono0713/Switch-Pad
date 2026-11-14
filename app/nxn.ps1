@@ -388,9 +388,38 @@ try {
             }
         } finally { $tcp.Close() }
     }
+    # Microsoft Store 版「Apple 裝置」的背景程序（AppleMobileDeviceProcess）有時會卡死：27015 還連得上，但問什麼都不回，
+    # Apple 裝置 App 和這裡都看不到 iPad。結束它的程序再把 App 開起來，背景程序會重新跑
+    function Restart-AppleDevices {
+        $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*\WindowsApps\AppleInc.AppleDevices_*' })
+        if (-not $procs.Count) { return $false }
+        Warn "Apple 裝置的背景程序沒有回應，幫你重新啟動（$(@($procs | ForEach-Object { $_.Name } | Select-Object -Unique) -join '、')）"
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $pkg = Get-AppxPackage -Name 'AppleInc.AppleDevices' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pkg) {
+            $appId = 'App'
+            try { $m = [xml](Get-Content -LiteralPath (Join-Path $pkg.InstallLocation 'AppxManifest.xml') -Raw); $a = @($m.Package.Applications.Application)[0]; if ($a.Id) { $appId = $a.Id } } catch { }
+            Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!$appId" -ErrorAction SilentlyContinue
+        }
+        # 等它重新在 127.0.0.1:27015 聽
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            $t = New-Object Net.Sockets.TcpClient
+            try { $t.Connect('127.0.0.1', 27015); return $true } catch { } finally { $t.Close() }
+        }
+        return $true
+    }
     function Find-Device {
         try { $devs = @(Get-MuxDevices) }
-        catch { throw "問不到 Apple 行動裝置服務（$($_.Exception.Message)）。請安裝 Apple Devices 或 iTunes。" }
+        catch {
+            $why = $_.Exception.Message
+            if (-not (Restart-AppleDevices)) { throw "問不到 Apple 行動裝置服務（$why）。請安裝 Apple Devices 或 iTunes。" }
+            Start-Sleep -Seconds 3   # 接著的 iPad 要一下子才會重新出現
+            try { $devs = @(Get-MuxDevices) }
+            catch { throw "重新啟動 Apple 裝置之後還是問不到 iPad（$($_.Exception.Message)）。請把 iPad 的傳輸線拔掉再插回去；還是不行就重開電腦。" }
+            if (-not @($devs).Count) { Start-Sleep -Seconds 5; try { $devs = @(Get-MuxDevices) } catch { } }
+        }
         $norm = { param($x) ($x -replace '-', '').ToUpper() }
         if ($Udid) { $pick = @($devs | Where-Object { (& $norm $_.Serial) -eq (& $norm $Udid) }) }
         else {
