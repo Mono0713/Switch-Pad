@@ -791,12 +791,17 @@ $cardXaml = @'
   <Grid>
     <DockPanel Margin="10,14,10,16">
       <StackPanel VerticalAlignment="Top">
-        <Border Width="116" Height="116" HorizontalAlignment="Center">
-          <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
-          <Border x:Name="Icon" CornerRadius="26" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
-            <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="50" FontWeight="SemiBold" Foreground="#F5F5F7"/>
+        <!-- 圖示置中；左邊那欄是小框框（狀態、版本、DLC、要注意…），自己一欄，不會疊到圖示 -->
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel x:Name="Badges" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
+          <Border Grid.Column="1" Width="116" Height="116">
+            <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
+            <Border x:Name="Icon" CornerRadius="26" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
+              <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="50" FontWeight="SemiBold" Foreground="#F5F5F7"/>
+            </Border>
           </Border>
-        </Border>
+        </Grid>
         <TextBlock x:Name="Title" Margin="0,12,0,0" FontSize="14" FontWeight="SemiBold" Foreground="#F5F5F7" TextWrapping="Wrap"
                    TextAlignment="Center" MaxHeight="38" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="Detail" Margin="0,2,0,0" FontSize="12" Foreground="#8E8E93" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
@@ -805,8 +810,6 @@ $cardXaml = @'
         <Button x:Name="Act" HorizontalAlignment="Center" Margin="0,10,0,0" FontSize="12.5" Padding="20,5"/>
       </StackPanel>
     </DockPanel>
-    <!-- 左上角的小標籤：未驗證、要注意、存檔待傳…（滑鼠移上去看說明） -->
-    <WrapPanel x:Name="Badges" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" MaxWidth="120"/>
     <Border x:Name="Pending" CornerRadius="9" Padding="10,3" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" Visibility="Collapsed">
       <TextBlock x:Name="PendingText" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
     </Border>
@@ -844,14 +847,30 @@ function Dot-State($st) {
     $st.Inlines.Add($d); $st.Inlines.Add($r)
 }
 # 遊戲格子左上角的小標籤（圓角小框，淡色底配同色字）
-function Add-Badge($card, $text, $bg, $fg, $tip) {
+function Add-Badge($card, $text, $bg, $fg, $tip, $dot = $null, $at = -1) {
     $b = New-Object Windows.Controls.Border
-    $b.CornerRadius = '5'; $b.Padding = '7,2'; $b.Margin = '0,0,4,4'; $b.Background = Brush $bg
+    $b.CornerRadius = '5'; $b.Padding = '7,2'; $b.Margin = '0,0,0,4'; $b.Background = Brush $bg; $b.HorizontalAlignment = 'Right'
     $t = New-Object Windows.Controls.TextBlock
-    $t.Text = $text; $t.FontSize = 11; $t.FontWeight = 'SemiBold'; $t.Foreground = Brush $fg
+    $t.FontSize = 11; $t.FontWeight = 'SemiBold'; $t.Foreground = Brush $fg; $t.TextTrimming = 'CharacterEllipsis'
+    if ($dot) { $d = New-Object Windows.Documents.Run '● '; $d.Foreground = $dot; $d.FontSize = 8; $d.BaselineAlignment = 'Center'; $t.Inlines.Add($d) }
+    $t.Inlines.Add((New-Object Windows.Documents.Run $text))
     $b.Child = $t
-    if ($tip) { $b.ToolTip = $tip }
-    [void]$card.FindName('Badges').Children.Add($b)
+    $b.ToolTip = if ($tip) { $tip } else { $text }   # 框框太窄被截掉時也看得到全文
+    $p = $card.FindName('Badges')
+    if ($at -ge 0 -and $at -le $p.Children.Count) { [void]$p.Children.Insert($at, $b) } else { [void]$p.Children.Add($b) }
+}
+# 狀態那行（State）和版本（Detail）改成左邊的小框框：狀態第一個（帶彩色小點），版本、DLC 接著；原本的兩行不顯示
+function State-Badges($card, $parts) {
+    $st = $card.FindName('State'); $t = "$($st.Text)"
+    $at = 0
+    if ($t) {
+        $red = "$($st.Foreground)" -eq '#FFFF453A'
+        $txt = if ($t.StartsWith('● ')) { $t.Substring(2) } else { $t }
+        Add-Badge $card $txt $(if ($red) { '#33FF453A' } else { '#232326' }) $(if ($red) { '#FF6961' } else { '#D1D1D6' }) $st.ToolTip $(if ($red) { $null } else { $st.Foreground }) $at
+        $at++
+    }
+    foreach ($x in @($parts)) { if ($x) { Add-Badge $card $x '#232326' '#AEAEB2' $null $null $at; $at++ } }
+    $card.FindName('State').Visibility = 'Collapsed'; $card.FindName('Detail').Visibility = 'Collapsed'
 }
 # 標題：名字白色粗體，數量灰色
 function Head-Count($tb, $name, $n) {
@@ -1130,14 +1149,13 @@ function Build-Library {
         if ($g.Stray) { $warn += "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
         if ($preWarn.Count -and -not $why) { $warn += $preWarn }
         if ($warn.Count) { Add-Badge $card '要注意' '#33FF9F0A' '#FF9F0A' (($warn | ForEach-Object { "⚠ $_" }) -join "`n") }
-        Dot-State $st
+        State-Badges $card $parts
         # 支援程度只在「還沒加入」顯示，幫你挑：左上角的小標籤；已經在遊戲庫的看狀態那行就好
         if (-not $g.InLib) {
             $sup = Support-Of $g
             if ($sup.Text -eq '● 已驗證') { Add-Badge $card '已驗證' '#2630D158' '#30D158' $sup.Tip }
             elseif ($sup.Text) { Add-Badge $card '未驗證' '#33FFD60A' '#FFD60A' $(if ($sup.Tip) { $sup.Tip } else { '還沒有人確認這款能玩，可能打不開' }) }
         }
-        foreach ($n in 'Detail', 'State') { $t = $card.FindName($n); if (-not "$($t.Text)") { $t.Visibility = 'Collapsed' } }   # 空的那行不佔位置
         Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $g (Cover-For $g)
 
         $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#1F1F22' })
@@ -2723,7 +2741,7 @@ $win.Add_Closing({ param($s, $e)
 
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
-    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 236))
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 330))   # 夠寬才放得下圖示左邊那欄小框框
     if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel

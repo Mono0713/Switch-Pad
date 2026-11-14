@@ -8,11 +8,12 @@ function Here($name) { if ($src -match "(?s)\`$$name = @'\r?\n(.*?)\r?\n'@") { r
 $styles = Here 'styles'; $xamlText = Here 'xamlText'; $cardXaml = Here 'cardXaml'
 function Brush($c) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($c)) }
 # 介面用到的小函式直接從 nxn-app.ps1 拿，畫出來的和程式一樣
-foreach ($f in 'Dot-State', 'Head-Count', 'Add-Badge') {
+foreach ($f in 'Head-Count', 'Add-Badge', 'State-Badges') {
     if ($src -match "(?s)(function $f\(.*?\r?\n\})") { . ([scriptblock]::Create($Matches[1])) } else { throw "找不到 $f" }
 }
 $win = [Windows.Markup.XamlReader]::Parse($xamlText.Replace('__RES__', $styles))
 $win.Width = 1220; $win.Height = 820
+$win.FindName('Library').Columns = 3; $win.FindName('Others').Columns = 3
 $fake = @(@('All You Need Is Help', 'v1.2.0 · 1 DLC', '● 在 iPad 上', '#30D158', $true), @('ANIMAL WELL', 'v1.0.7', '● 在 iPad 上', '#30D158', $true),
           @('Balatro', 'v1.1.3', '● 等裝到 iPad', '#0A84FF', $true), @('Boomerang Fu', 'v1.3.6 · 2 DLC', '● 要重新轉換', '#FF9F0A', $true),
           @('CloverPit', 'v1.4.2', '● 轉換失敗', '#FF453A', $true), @('gang beasts', 'v1.26.0', '● 在 iPad 上', '#30D158', $true),
@@ -23,14 +24,14 @@ foreach ($f in $fake) {
     $c = [Windows.Markup.XamlReader]::Parse($cardXaml)
     $c.Resources.MergedDictionaries.Add([Windows.Markup.XamlReader]::Parse($styles))
     $c.FindName('Title').Text = $f[0]; $c.FindName('Detail').Text = $f[1]
-    $st = $c.FindName('State'); $st.Text = $f[2]; $st.Foreground = Brush $f[3]; Dot-State $st
+    $st = $c.FindName('State'); $st.Text = $f[2]; $st.Foreground = Brush $f[3]
     $c.FindName('Icon').Background = Brush $colors[$i % $colors.Count]; $c.FindName('Letter').Text = $f[0].Substring(0, 1)
     $act = $c.FindName('Act')
     if ($f[4]) { $act.Content = '移除'; $act.Style = $win.FindResource('Pill') } else { $act.Content = '加入'; $act.Style = $win.FindResource('Get') }
     if ($i -eq 2) { $c.Background = Brush '#1F1F22' }
     if ($i -eq 4 -or $i -eq 7) { Add-Badge $c '要注意' '#33FF9F0A' '#FF9F0A' 'x' }
     if (-not $f[4]) { Add-Badge $c '未驗證' '#33FFD60A' '#FFD60A' 'x' }
-    foreach ($n in 'Detail', 'State') { $t = $c.FindName($n); if (-not "$($t.Text)") { $t.Visibility = 'Collapsed' } }
+    State-Badges $c @($f[1] -split ' · ')
     [void]$(if ($f[4]) { $win.FindName('Library') } else { $win.FindName('Others') }).Children.Add($c)
     $i++
 }
