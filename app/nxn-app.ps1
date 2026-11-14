@@ -333,7 +333,7 @@ $xamlText = @'
     <ScrollViewer x:Name="LibraryView" Grid.Row="2" VerticalScrollBarVisibility="Auto">
       <StackPanel Margin="0,0,0,24">
         <TextBlock x:Name="GamesHead" Text="遊戲庫" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,2"/>
-        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="iPad 上「遊戲庫」App 裡的遊戲。按「移除」拿掉。"/>
+        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="iPad 上「SwitchPad」App 裡的遊戲。按「移除」拿掉。"/>
         <UniformGrid x:Name="Library" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
         <TextBlock x:Name="OutHead" Text="還沒加入" FontSize="22" FontWeight="SemiBold" Margin="0,8,0,2"/>
         <TextBlock x:Name="OutHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="電腦上有、還不在遊戲庫的遊戲。按「＋ 加入」放進去；把 NSP / XCI / NSZ 拖進視窗可以新增遊戲。"/>
@@ -1501,6 +1501,7 @@ function Update-Banner($inst) {
     $ui.RenewBtn.ToolTip = "免費 Apple ID 簽的 App 7 天後就打不開。按這裡把 iPad 上的遊戲庫重簽一次，遊戲和存檔都不動。"
     $ms = Get-MultiShell
     if ($ms -and (Shell-Changed $ms.FullName)) { $ui.RenewBtn.ToolTip += "`n換了新殼，這次會先用新殼重新合成遊戲庫再裝。" }
+    elseif (Look-Changed) { $ui.RenewBtn.ToolTip += "`nApp 的名字或圖示換了，這次會先重新合成遊戲庫再裝。" }
     $ui.RenewBtn.Visibility = 'Visible'
 }
 
@@ -2085,7 +2086,8 @@ function Add-ToPack($p, $dirs, $mode) {
 # 每款遊戲用多遊戲殼打包成 <資料夾>-multi-<殼版本>.ipa（遊戲包，留在遊戲資料夾當快取），按開始時把勾的遊戲包合成
 # 合包\遊戲庫.ipa 再安裝。bundle ID 固定，所以加減遊戲都是更新同一個 App，存檔留著；遊戲資料（romfs、著色器）照 romfs_data.py
 # 放在 App 的 Documents，只傳新加的遊戲，拿掉的遊戲它的資料會被刪掉（存檔留著）。圖示固定用 LibraryIcon.png。
-$libName = '遊戲庫'
+$libName = '遊戲庫'          # 合包\遊戲庫.ipa 的檔名（電腦上找它用，不改）
+$libAppName = 'SwitchPad'    # iPad 主畫面上 App 的名字
 $libBid = 'org.nxnative.games.library'
 function Library-Ipa { Join-Path (Join-Path $base '合包') "$libName.ipa" }
 # 遊戲庫上次是用哪個殼合成的（合成好時記在 遊戲庫.ipa.shell）；換了殼，遊戲包沒變也要重新合成，iPad 才用得到新殼
@@ -2096,6 +2098,19 @@ function Shell-Changed($shell) {
     $rec = "$lib.shell"
     if (Test-Path -LiteralPath $rec) { return ((Get-Content -LiteralPath $rec -Raw -Encoding UTF8).Trim() -ne $sh.Name) }
     return [bool]($sh -and $sh.LastWriteTime -gt $li.LastWriteTime)   # 還沒有記錄的舊遊戲庫：殼比遊戲庫新就算換過
+}
+# App 的名字和圖示（合成好時記在 遊戲庫.ipa.look）；換了就要重新合成一次，iPad 上才會換
+function Library-Look {
+    $icon = Join-Path $here 'LibraryIcon.png'
+    $h = if (Test-Path -LiteralPath $icon) { (Get-FileHash -LiteralPath $icon -Algorithm SHA256).Hash.Substring(0, 16) } else { '' }
+    "$libAppName|$h"
+}
+function Look-Changed {
+    $lib = Library-Ipa
+    if (-not (Test-Path -LiteralPath $lib)) { return $false }
+    $rec = "$lib.look"
+    if (-not (Test-Path -LiteralPath $rec)) { return $true }   # 改名前合成的遊戲庫
+    return ((Get-Content -LiteralPath $rec -Raw -Encoding UTF8).Trim() -ne (Library-Look))
 }
 function Library-Tids {
     $f = Get-Item -LiteralPath (Library-Ipa) -ErrorAction SilentlyContinue
@@ -2211,18 +2226,20 @@ function Library-Call($lib, $fail) {
     $libT = (Get-Item -LiteralPath $libIpa -ErrorAction SilentlyContinue).LastWriteTime
     $newer = @($use | Where-Object { $_.WasIn -and (-not $libT -or (Get-Item -LiteralPath $_.Path).LastWriteTime -gt $libT) })
     $newShell = Shell-Changed $lib.Shell
-    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    $newLook = Look-Changed
+    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $newLook)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
     $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
             $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' }) +
-            $(if ($newShell) { '，換新殼' } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
+            $(if ($newShell) { '，換新殼' } elseif ($newLook) { "，App 改名 $libAppName、換圖示" } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
     $tmp = "$libIpa.new"
     $icon = Join-Path $here 'LibraryIcon.png'
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
-            "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
+            "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libAppName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
             $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
             "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +
-            "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; Write-Host '遊戲庫合成好了'"
+            "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; " +
+            "Set-Content -LiteralPath $(Quote "$libIpa.look") -Value $(Quote (Library-Look)) -Encoding UTF8; Write-Host '遊戲庫合成好了'"
     if ($lib.Mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $libIpa) -NoPause" }
     return @{ Call = $call; Skip = $skip }
 }
@@ -2336,7 +2353,7 @@ $ui.Sync.Add_Click({
 $ui.RenewBtn.Add_Click({
     if ($state.Running) { return }
     $ms = Get-MultiShell
-    if ($ms -and (Shell-Changed $ms.FullName) -and -not @(Setup-Missing).Count) { Sync-Library } else { Run-Library @() 'install' } })
+    if ($ms -and ((Shell-Changed $ms.FullName) -or (Look-Changed)) -and -not @(Setup-Missing).Count) { Sync-Library } else { Run-Library @() 'install' } })
 
 $ui.Stop.Add_Click({
     $state.Queue.Clear()
