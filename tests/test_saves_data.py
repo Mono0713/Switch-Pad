@@ -283,6 +283,19 @@ class Sync(unittest.TestCase):
         self.assertEqual(sorted(x['name'] for x in self.slots()['slots']), ['存檔 1', '阿明'])
         self.assertTrue(os.path.isdir(os.path.join(self.root, '已刪除')))
 
+    def test_open_game_is_not_overwritten(self):
+        self.sync()
+        write(self.pc('存檔 1', 'a.bin'), b'pc'); write(os.path.join(self.live + '.work', 'a.bin'), b'playing')
+        self.n += 1
+        r = asyncio.run(sd.sync(self.afc, self.ipa, self.games, self.root, now=at(self.n)))
+        self.assertEqual(r, sd.SYNC_PARTIAL)
+        self.assertEqual(self.read(os.path.join(self.live, 'a.bin')), b'v1')
+        self.assertEqual(self.read(os.path.join(self.live + '.work', 'a.bin')), b'playing')
+        shutil.rmtree(self.live + '.work')   # the game closed: the next sync takes the PC's
+        self.n += 1
+        self.assertEqual(asyncio.run(sd.sync(self.afc, self.ipa, self.games, self.root, now=at(self.n))), 0)
+        self.assertEqual(self.read(os.path.join(self.live, 'a.bin')), b'pc')
+
     def test_put_slot(self):
         src = os.path.join(self.tmp, 'import'); write(os.path.join(src, 'a.bin'), b'imp')
         asyncio.run(sd.put(self.afc, src, self.root, 'save/' + self.TID, slot='匯入', now=at(0)))

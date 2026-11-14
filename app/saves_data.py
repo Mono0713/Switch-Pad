@@ -271,6 +271,7 @@ async def put(afc, src, root, dest, slot='', now=None):
 
 
 SYNC_DIR = '存檔'
+SYNC_PARTIAL = 6
 SYNC_STATE = '.sync.json'
 JUNK = ('desktop.ini', 'thumbs.db', '.ds_store')
 
@@ -401,7 +402,7 @@ async def sync_game(afc, base, dest, gdir, root, scratch, now, backed):
         dev[i] = {'name': str(x.get('name') or i), 'dir': tmp, 'digest': tree_digest(tmp)}
     pc = {n: tree_digest(os.path.join(sd, n)) for n in os.listdir(sd) if not n.startswith('.') and os.path.isdir(os.path.join(sd, n))}
     mapped = {v['folder'] for v in state.values() if v.get('folder') in pc}
-    new_state, changed_json, n_up, n_down = {}, False, 0, 0
+    new_state, changed_json, n_up, n_down, busy = {}, False, 0, 0, 0
     stamp = now.strftime('%m/%d %H:%M')
 
     def to_pc(i, folder):
@@ -431,7 +432,14 @@ async def sync_game(afc, base, dest, gdir, root, scratch, now, backed):
             elif gp == was:   # only the iPad changed
                 to_pc(i, folder); print('%s：「%s」iPad 上比較新，更新電腦這份' % (dest, d['name']))
             elif gd == was:   # only the PC changed
-                await backed(); await push_slot(afc, os.path.join(sd, folder), dev_path(i)); n_up += 1
+                live = dev_path(i)
+                if i == active and (await afc.exists(live + '.work') or await afc.exists(live + '.new')):
+                    # the game is open (or was killed mid-save): its .work / .new is this session's save, which the copy would
+                    # replace and no backup holds. Leave the slot as it is, remembered as last synced, so the next sync tries again
+                    print('%s：「%s」電腦上比較新，但遊戲在 iPad 上還開著，這次先不換；把遊戲關掉再同步一次' % (dest, d['name']))
+                    new_state[str(i)] = dict(st, folder=folder); busy += 1
+                    continue
+                await backed(); await push_slot(afc, os.path.join(sd, folder), live); n_up += 1
                 print('%s：「%s」電腦上比較新，更新 iPad 那份' % (dest, d['name']))
             else:             # both changed: keep both, the PC's as a new slot
                 other = os.path.basename(unique_dir(sd, folder + '（電腦版）'))
@@ -467,7 +475,7 @@ async def sync_game(afc, base, dest, gdir, root, scratch, now, backed):
         await afc.makedirs(slots_dev)
         await afc.set_file_contents(slots_dev + '/' + SLOTS_JSON, json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
     with open(stf, 'w', encoding='utf-8') as fh: json.dump({'slots': new_state}, fh, ensure_ascii=False, indent=1)
-    return n_up, n_down
+    return n_up, n_down, busy
 
 
 async def sync(afc, ipa, games, root, now=None):
@@ -488,12 +496,18 @@ async def sync(afc, ipa, games, root, now=None):
             if t: pairs.append((save_dest(ipa, t), g))
     import tempfile
     up = down = 0
+    failed = []
     for dest, g in pairs:
         with tempfile.TemporaryDirectory() as scratch:
-            try: a, b = await sync_game(afc, base, dest, g, root, scratch, now, backed)
-            except (OSError, ValueError) as e: print('%s 同步失敗：%s' % (os.path.basename(g), e)); continue
+            try: a, b, busy = await sync_game(afc, base, dest, g, root, scratch, now, backed)
+            except (OSError, ValueError) as e: print('%s 同步失敗：%s' % (os.path.basename(g), e)); failed.append(os.path.basename(g)); continue
             up += a; down += b
+            if busy: failed.append(os.path.basename(g))
     print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
+    if failed:   # the rest are done; a nonzero exit makes Switch Pad say so (nxn.ps1)
+        print('沒同步完的：%s' % '、'.join(failed))
+        return SYNC_PARTIAL
+    return 0
 
 
 SINGLE = re.compile(r'org\.nxnative\.([0-9a-fA-F]{16})(?:\.|$)')
@@ -764,8 +778,8 @@ async def on_device(a, work):
             print('iPad 上沒有這個 App（%s），沒有存檔可以備份' % orig)
             return NOT_INSTALLED
         async with await HouseArrestService.create(lockdown=ld, bundle_id=ids[0], documents_only=True) as afc:
-            await work(afc)
-    return 0
+            r = await work(afc)
+    return r if r == SYNC_PARTIAL else 0   # only sync's partial result is an exit code; the others return what they made
 
 
 def main():
