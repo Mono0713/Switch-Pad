@@ -781,7 +781,7 @@ $cardXaml = @'
         AllowDrop="True">
   <Grid>
     <DockPanel Margin="10,14,10,16">
-      <Button x:Name="Act" DockPanel.Dock="Bottom" HorizontalAlignment="Center" Margin="0,10,0,0" Style="{StaticResource Pill}"/>
+      <Button x:Name="Act" DockPanel.Dock="Bottom" HorizontalAlignment="Center" Margin="0,10,0,0" FontSize="12.5" Padding="18,5"/>
       <StackPanel>
         <Border Width="116" Height="116" HorizontalAlignment="Center">
           <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
