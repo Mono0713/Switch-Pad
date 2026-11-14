@@ -417,7 +417,7 @@ try {
             if (-not (Restart-AppleDevices)) { throw "問不到 Apple 行動裝置服務（$why）。請安裝 Apple Devices 或 iTunes。" }
             Start-Sleep -Seconds 3   # 接著的 iPad 要一下子才會重新出現
             try { $devs = @(Get-MuxDevices) }
-            catch { throw "重新啟動 Apple 裝置之後還是問不到 iPad（$($_.Exception.Message)）。請把 iPad 的傳輸線拔掉再插回去；還是不行就重開電腦。" }
+            catch { throw "重新啟動 Apple 裝置之後還是問不到 iPad（$($_.Exception.Message)）。Apple 裝置的背景程序卡到重啟也救不回來，請重新開機電腦，開好後先解鎖 iPad 再插線。" }
             if (-not @($devs).Count) { Start-Sleep -Seconds 5; try { $devs = @(Get-MuxDevices) } catch { } }
         }
         $norm = { param($x) ($x -replace '-', '').ToUpper() }
