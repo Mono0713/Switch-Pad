@@ -791,9 +791,9 @@ $cardXaml = @'
   <Grid>
     <DockPanel Margin="10,14,10,16">
       <StackPanel VerticalAlignment="Top">
-        <!-- 圖示和左邊固定寬的一欄一起置中；那一欄是小框框（狀態、版本、DLC、要注意…），不會疊到圖示 -->
+        <!-- 圖示正中間（右邊空一欄和左邊一樣寬，對齊下面的名字）；左邊那欄是小框框（狀態、版本、DLC、要注意…），不會疊到圖示 -->
         <Grid HorizontalAlignment="Center">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions>
           <StackPanel x:Name="Badges" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
           <Border Grid.Column="1" Width="116" Height="116">
             <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
@@ -2741,7 +2741,7 @@ $win.Add_Closing({ param($s, $e)
 
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
-    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 290))   # 圖示加左邊那欄小框框，兩邊留一點空
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 300))   # 圖示加兩邊各一欄，再留一點空
     if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel
