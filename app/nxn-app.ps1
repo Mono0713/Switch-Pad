@@ -102,10 +102,12 @@ try {
     Move-ToAppDir
     $appDir = Join-Path $base $appDirName
     $exe = Join-Path $base 'Switch Pad.exe'
-    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path -LiteralPath $exe)) {
-        $ico = Join-Path $appDir '工具\SwitchPad.ico'
-        if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
-        Build-Launcher $exe $ico
+    $ico = Join-Path $appDir '工具\SwitchPad.ico'
+    if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
+    # 換了圖示（SwitchPad.ico 比 Switch Pad.exe 新）也要重做，不然桌面上一直是舊圖示
+    $stale = (Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $ico) -and (Get-Item -LiteralPath $ico).LastWriteTime -gt (Get-Item -LiteralPath $exe).LastWriteTime
+    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and (-not (Test-Path -LiteralPath $exe) -or $stale)) {
+        try { Build-Launcher $exe $ico } catch { if (-not $stale) { throw } }
     }
     # 這次是從最上層開的，搬好了就從 程式\ 重開
     if ($here -eq $base -and (Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path (Join-Path $base 'nxn-app.ps1'))) {
@@ -1122,27 +1124,54 @@ function Build-Library {
 # 合包裡每款在 Payload/<App>.app/games/<title ID>/：game.json（id、name、version…）和 icon.png
 $packCache = @{}      # IPA 路徑|修改時間 → 讀到的遊戲清單（讀 zip 目錄要一點時間，不要每次重畫都讀）
 function Read-Pack($ipa) {
-    $key = "$($ipa.FullName)|$($ipa.LastWriteTimeUtc.Ticks)"
+    $key = "$($ipa.FullName)|$($ipa.LastWriteTimeUtc.Ticks)|$($ipa.Length)"
     if ($packCache.ContainsKey($key)) { return $packCache[$key] }
+    # 讀過的遊戲庫清單存在 work\covers\packindex-<雜湊>.json：遊戲庫幾萬個檔，每次開 Switch Pad 都整個掃一遍要好幾秒，畫面會卡住「沒有回應」
+    $md5 = [Security.Cryptography.MD5]::Create()
+    $h = -join ($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))[0..7] | ForEach-Object { $_.ToString('x2') })
+    $idx = Join-Path $coverDir "packindex-$h.json"
+    if (Test-Path -LiteralPath $idx) {
+        try {
+            $arr = ConvertFrom-Json (Get-Content -LiteralPath $idx -Raw -Encoding UTF8)   # PowerShell 5.1 用管線接會把整個陣列當成一筆
+            $games = @(foreach ($x in @($arr)) {
+                $icon = Join-Path $coverDir "pack-$($x.Tid).png"
+                [pscustomobject]@{ Tid = [string]$x.Tid; Name = [string]$x.Name; Version = [string]$x.Version; Icon = $(if (Test-Path -LiteralPath $icon) { $icon } else { '' }) } })
+            $packCache[$key] = $games
+            return $games
+        } catch { }
+    }
     $games = @()
+    $ok = $false
     try {
         $z = [IO.Compression.ZipFile]::OpenRead($ipa.FullName)
         try {
-            foreach ($e in $z.Entries) {
-                if ($e.FullName -notmatch '^Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/game\.json$') { continue }
-                $tid = $Matches[1].ToUpper()
+            # 先一次拿出全部檔名再用 -match 篩（在 .NET 裡跑），不要在 PowerShell 裡一個一個看
+            $names = @([string[]]@($z.Entries.FullName) -match '^Payload/[^/]+\.app/games/[0-9A-Fa-f]{16}/game\.json$')
+            foreach ($n in $names) {
+                $e = $z.GetEntry($n); if (-not $e) { continue }
+                $tid = ($n -split '/')[3].ToUpper()
                 $sr = New-Object IO.StreamReader($e.Open(), [Text.Encoding]::UTF8)
                 try { $j = $sr.ReadToEnd() | ConvertFrom-Json } finally { $sr.Dispose() }
                 $icon = Join-Path $coverDir "pack-$tid.png"
-                $ie = $z.GetEntry(($e.FullName -replace 'game\.json$', 'icon.png'))
+                $ie = $z.GetEntry(($n -replace 'game\.json$', 'icon.png'))
                 if ($ie -and -not (Test-Path -LiteralPath $icon)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($ie, $icon, $true) }
                 $games += [pscustomobject]@{ Tid = $tid; Name = $(if ($j.name) { $j.name } else { $tid }); Version = [string]$j.version
                                             Icon = $(if (Test-Path -LiteralPath $icon) { $icon } else { '' }) }
             }
+            $ok = $true
         } finally { $z.Dispose() }
     } catch { }
     $games = @($games | Sort-Object Name)
     $packCache[$key] = $games
+    if ($ok) {
+        try {
+            # 合成新的遊戲庫後舊清單就用不到，放超過 30 天的清掉
+            Get-ChildItem -LiteralPath $coverDir -Filter 'packindex-*.json' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } | Remove-Item -ErrorAction SilentlyContinue
+            ConvertTo-Json -InputObject @($games | ForEach-Object { [pscustomobject]@{ Tid = $_.Tid; Name = $_.Name; Version = $_.Version } }) -Depth 3 |
+                Set-Content -LiteralPath $idx -Encoding UTF8
+        } catch { }
+    }
     return $games
 }
 # 合包在 iPad 上的圖示（nxn_merge.py 把幾款的圖示拼成一張），跟著檔案的修改時間快取
