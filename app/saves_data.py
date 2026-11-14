@@ -12,6 +12,7 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py restore <ipa> <one backup folder> <backups folder> [--udid UDID]
   saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
   saves_data.py put     <ipa> <save folder> <backups folder> [--tid TITLEID] [--slot NAME] [--udid UDID]
+  saves_data.py sync    <ipa> <games folder> <backups folder> [--udid UDID]
   saves_data.py logs    <ipa> <logs folder> [--udid UDID] [--report TITLEID --zip FILE [--extra DIR]]
   saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
 
@@ -20,6 +21,15 @@ Checkpoint's export, which are the same plain tree the shell keeps) as that game
 ID> in the library or a package, which must have that game (exit 5 when it does not). The app's saves are backed up first, as
 restore does, and only that one game's folder (and its .work / .new) is replaced. With --slot the save in use is not touched: the
 save becomes a new save slot of that game, named NAME, which the player picks on the launcher (the shell's SaveSlots.swift).
+
+sync keeps each game's save slots and a folder on the PC the same, both ways, without overwriting: <game folder>/存檔/<name>/ is
+one slot (the files at its top are the save's top). For each slot it remembers the files both sides had when they last matched
+(存檔/.sync.json), so only the side that changed since is copied to the other; a slot changed on both sides is kept twice, as
+two slots. A folder put in 存檔/ by hand (or a .zip, or a Ryujinx 0/ 1/ tree) becomes a new slot on the iPad; a slot made on
+the iPad becomes a new folder. A slot deleted on the iPad moves its PC folder to 存檔備份/已刪除/ if the PC copy was not changed
+since; a PC folder deleted by hand is copied back from the iPad (delete slots on the iPad). <games folder> is the one holding a
+folder per game (遊戲/), whose title ID is found in its file names (or <title ID>_pack, or 存檔待傳.txt); for a one-game app,
+pass its own game folder. Device saves (save_device, <title ID>_device) are left as they are. The app is backed up first.
 
 Save slots: the shell keeps the save in use where it always was and every other slot of that game in <save folder>.slots/<n>/save
 (and device), named in <save folder>.slots/slots.json ({"active": 1, "slots": [{"id": 1, "name": "..."}]}). In the library they
@@ -67,7 +77,7 @@ FOLDERS = ('save', 'save_device', 'save.slots')
 DIGEST = '.digest'
 NOT_INSTALLED = 3
 NOT_IN_APP = 5
-NO_REPORT = 6   # logs --report: nothing of that game on the iPad
+NO_REPORT = 7   # logs --report: nothing of that game on the iPad
 
 
 def skipped(name):
@@ -263,6 +273,246 @@ async def put(afc, src, root, dest, slot='', now=None):
     n = await push_tree(afc, src, p)
     await check_sizes(afc, src, p, files)
     print('存檔放進 iPad 了：%d 個檔案 → %s' % (n, dest))
+
+
+SYNC_DIR = '存檔'
+SYNC_PARTIAL = 6
+SYNC_STATE = '.sync.json'
+JUNK = ('desktop.ini', 'thumbs.db', '.ds_store')
+
+
+def clean_files(folder):
+    """The save files under folder, as relative paths: hidden and Windows' own files left out."""
+    out = []
+    for r, ds, fs in os.walk(folder):
+        ds[:] = [d for d in ds if not d.startswith('.')]
+        for f in fs:
+            if f.startswith('.') or f.lower() in JUNK: continue
+            out.append(os.path.relpath(os.path.join(r, f), folder).replace(os.sep, '/'))
+    return sorted(out)
+
+
+def tree_digest(folder):
+    h = hashlib.sha1()
+    for rel in clean_files(folder) if os.path.isdir(folder) else []:
+        h.update(rel.encode() + b'\0')
+        with open(os.path.join(folder, *rel.split('/')), 'rb') as fh:
+            for b in iter(lambda: fh.read(1 << 20), b''): h.update(b)
+        h.update(b'\0')
+    return h.hexdigest()
+
+
+def safe_name(name):
+    return re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', name).strip(' .') or '存檔'
+
+
+def unique_dir(parent, name):
+    name = safe_name(name)
+    p, k = os.path.join(parent, name), 1
+    while os.path.exists(p): k += 1; p = os.path.join(parent, '%s (%d)' % (name, k))
+    return p
+
+
+def game_tid(folder, tids):
+    """The library's title ID that a game folder holds: from its file and folder names, else 存檔待傳.txt."""
+    names = os.listdir(folder) + [os.path.basename(os.path.normpath(folder))]
+    for n in names:
+        for m in re.finditer(r'(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])', n):
+            t = m.group(1).upper()
+            for c in (t, t[:-3] + '000'):
+                if c in tids: return c
+    with contextlib.suppress(OSError):
+        with open(os.path.join(folder, '存檔待傳.txt'), encoding='utf-8-sig') as fh:
+            t = fh.readline().strip().upper()
+            if t in tids: return t
+    return None
+
+
+def tidy_pc(sd, now):
+    """What was dropped straight into 存檔/: a .zip becomes the folder it holds, loose files a folder of their own, and a Ryujinx
+    save (0/ and 1/) its 0/. Returns nothing; the folders are then slots like any other."""
+    stamp = now.strftime('%m%d-%H%M')
+    loose = []
+    for n in sorted(os.listdir(sd)):
+        p = os.path.join(sd, n)
+        if n.startswith('.') or n.lower() in JUNK: continue
+        if os.path.isfile(p) and n.lower().endswith('.zip'):
+            dest = unique_dir(sd, n[:-4])
+            with zipfile.ZipFile(p) as z:
+                for m in z.infolist():
+                    rel = os.path.normpath(m.filename)
+                    if rel.startswith(('..', os.sep)) or os.path.isabs(rel): continue   # nothing outside the folder
+                    z.extract(m, dest)
+            os.remove(p)
+            print('存檔資料夾：%s 解開成 %s' % (n, os.path.basename(dest)))
+        elif os.path.isfile(p):
+            loose.append(p)
+    if loose:
+        dest = unique_dir(sd, '匯入 ' + stamp)
+        os.makedirs(dest)
+        for p in loose: shutil.move(p, dest)
+        print('存檔資料夾：%d 個散的檔案收進 %s' % (len(loose), os.path.basename(dest)))
+    for n in os.listdir(sd):
+        p = os.path.join(sd, n)
+        if n.startswith('.') or not os.path.isdir(p): continue
+        # a single folder holding the save (a zip of the save folder itself) or Ryujinx's 0/ (kept) and 1/ (scratch)
+        for _ in range(4):
+            subs = [x for x in os.listdir(p) if not x.startswith('.') and x.lower() not in JUNK]
+            if set(subs) <= {'0', '1', 'ExtraData0', 'ExtraData1', '.lock'} and '0' in subs and os.path.isdir(os.path.join(p, '0')):
+                inner = os.path.join(p, '0')
+            elif len(subs) == 1 and os.path.isdir(os.path.join(p, subs[0])) and re.fullmatch(r'(0x)?[0-9A-Fa-f]{16}.*', subs[0]):
+                inner = os.path.join(p, subs[0])
+            else: break
+            tmp = p + '.tidy'
+            shutil.move(inner, tmp); shutil.rmtree(p); shutil.move(tmp, p)
+
+
+async def pull_slot(afc, dev, dest):
+    shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest)
+    if await afc.exists(dev): await pull_tree(afc, dev, dest)
+
+
+async def push_slot(afc, src, dev):
+    for leftover in (dev, dev + '.work', dev + '.new'):
+        if await afc.exists(leftover): await afc.rm(leftover, force=True)
+    files = clean_files(src)
+    await afc.makedirs(dev)
+    for rel in files:
+        d = dev + '/' + rel
+        await afc.makedirs(d.rsplit('/', 1)[0])
+        with open(os.path.join(src, *rel.split('/')), 'rb') as f: await afc.set_file_contents(d, f.read())
+    await check_sizes(afc, src, dev, files)
+    return len(files)
+
+
+async def sync_game(afc, base, dest, gdir, root, scratch, now, backed):
+    """Two-way sync of one game's slots with <gdir>/存檔/. backed() backs the app up once, before the first change on the iPad."""
+    sd = os.path.join(gdir, SYNC_DIR)
+    os.makedirs(sd, exist_ok=True)
+    tidy_pc(sd, now)
+    stf = os.path.join(sd, SYNC_STATE)
+    state = {}
+    with contextlib.suppress(OSError, ValueError):
+        with open(stf, encoding='utf-8') as fh: state = json.load(fh).get('slots', {})
+    slots_dev = base + '/' + dest + SLOTS
+    data = await read_slots(afc, slots_dev)
+    active = int(data.get('active', 1) or 1)
+    def dev_path(i): return base + '/' + dest if i == active else '%s/%d/save' % (slots_dev, i)
+    # every slot on the iPad, pulled to scratch to compare
+    dev = {}
+    for x in data['slots']:
+        i = int(x['id']); tmp = os.path.join(scratch, str(i))
+        await pull_slot(afc, dev_path(i), tmp)
+        dev[i] = {'name': str(x.get('name') or i), 'dir': tmp, 'digest': tree_digest(tmp)}
+    pc = {n: tree_digest(os.path.join(sd, n)) for n in os.listdir(sd) if not n.startswith('.') and os.path.isdir(os.path.join(sd, n))}
+    mapped = {v['folder'] for v in state.values() if v.get('folder') in pc}
+    new_state, changed_json, n_up, n_down, busy = {}, False, 0, 0, 0
+    stamp = now.strftime('%m/%d %H:%M')
+
+    def to_pc(i, folder):
+        nonlocal n_down
+        p = os.path.join(sd, folder)
+        shutil.rmtree(p, ignore_errors=True); shutil.copytree(dev[i]['dir'], p)
+        pc[folder] = dev[i]['digest']; n_down += 1
+
+    for i, d in sorted(dev.items()):
+        st = state.get(str(i))
+        folder = st.get('folder') if st else None
+        if st and folder not in pc:
+            # renamed by hand: an unmapped folder with the files it had at the last sync
+            twin = next((n for n, g in pc.items() if n not in mapped and g == st.get('digest')), None)
+            if twin:
+                folder = twin; mapped.add(twin)
+                if d['name'] == st.get('name'): d['name'] = twin; changed_json = True
+        if not st or folder not in pc:   # new on the iPad, or its PC folder deleted: copy it down
+            folder = os.path.basename(unique_dir(sd, d['name'])); to_pc(i, folder); mapped.add(folder)
+            print('%s：iPad 的「%s」存到電腦' % (dest, d['name']))
+        else:
+            if st.get('name') and d['name'] != st['name'] and folder == safe_name(st['name']) and not os.path.exists(os.path.join(sd, safe_name(d['name']))):
+                os.rename(os.path.join(sd, folder), os.path.join(sd, safe_name(d['name'])))   # renamed on the iPad
+                pc[safe_name(d['name'])] = pc.pop(folder); mapped.add(safe_name(d['name'])); folder = safe_name(d['name'])
+            was, gp, gd = st.get('digest'), pc[folder], d['digest']
+            if gp == gd: pass
+            elif gp == was:   # only the iPad changed
+                to_pc(i, folder); print('%s：「%s」iPad 上比較新，更新電腦這份' % (dest, d['name']))
+            elif gd == was:   # only the PC changed
+                live = dev_path(i)
+                if i == active and (await afc.exists(live + '.work') or await afc.exists(live + '.new')):
+                    # the game is open (or was killed mid-save): its .work / .new is this session's save, which the copy would
+                    # replace and no backup holds. Leave the slot as it is, remembered as last synced, so the next sync tries again
+                    print('%s：「%s」電腦上比較新，但遊戲在 iPad 上還開著，這次先不換；把遊戲關掉再同步一次' % (dest, d['name']))
+                    new_state[str(i)] = dict(st, folder=folder); busy += 1
+                    continue
+                await backed(); await push_slot(afc, os.path.join(sd, folder), live); n_up += 1
+                print('%s：「%s」電腦上比較新，更新 iPad 那份' % (dest, d['name']))
+            else:             # both changed: keep both, the PC's as a new slot
+                other = os.path.basename(unique_dir(sd, folder + '（電腦版）'))
+                os.rename(os.path.join(sd, folder), os.path.join(sd, other)); pc[other] = pc.pop(folder); mapped.discard(folder)
+                to_pc(i, folder); mapped.add(folder)
+                print('%s：「%s」兩邊都改過，兩份都留著（電腦的叫「%s」）' % (dest, d['name'], other))
+        new_state[str(i)] = {'folder': folder, 'name': d['name'], 'digest': pc[folder]}
+    # slots gone from the iPad
+    for k, st in state.items():
+        if k in new_state or int(k) in dev: continue
+        f = st.get('folder')
+        if f in pc and f not in {v['folder'] for v in new_state.values()} and pc[f] == st.get('digest'):
+            gone = os.path.join(root, '已刪除', now.strftime('%Y%m%d-%H%M%S'))
+            os.makedirs(gone, exist_ok=True); shutil.move(os.path.join(sd, f), unique_dir(gone, f)); pc.pop(f)
+            print('%s：「%s」在 iPad 上刪掉了，電腦這份移到 %s' % (dest, f, gone))
+    # PC folders no slot has: new slots on the iPad
+    used = {v['folder'] for v in new_state.values()}
+    for f in sorted(pc):
+        if f in used: continue
+        if not clean_files(os.path.join(sd, f)): continue
+        await backed()
+        names = [n for n in await afc.listdir(slots_dev) if n not in ('.', '..', '')] if await afc.exists(slots_dev) else []
+        k = next_slot(data, names)
+        await push_slot(afc, os.path.join(sd, f), '%s/%d/save' % (slots_dev, k))
+        data['slots'].append({'id': k, 'name': f}); changed_json = True; n_up += 1
+        new_state[str(k)] = {'folder': f, 'name': f, 'digest': pc[f]}
+        print('%s：電腦的「%s」放進 iPad，成為新的一份存檔' % (dest, f))
+    for x in data['slots']:   # names changed above (a folder renamed by hand)
+        st = new_state.get(str(x['id']))
+        if st and x.get('name') != st['name']: x['name'] = st['name']; changed_json = True
+    if changed_json:
+        await backed()
+        await afc.makedirs(slots_dev)
+        await afc.set_file_contents(slots_dev + '/' + SLOTS_JSON, json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
+    with open(stf, 'w', encoding='utf-8') as fh: json.dump({'slots': new_state}, fh, ensure_ascii=False, indent=1)
+    return n_up, n_down, busy
+
+
+async def sync(afc, ipa, games, root, now=None):
+    now = now or datetime.datetime.now()
+    base = await docs_base(afc)
+    done = []
+    async def backed():
+        if not done: await backup(afc, root, keep=0, tag='before-sync', now=now); done.append(1)
+    if save_dest(ipa, '') == 'save':   # a one-game app: games is its own folder
+        pairs = [('save', games)]
+    else:
+        tids = library_tids(ipa)
+        pairs = []
+        for n in sorted(os.listdir(games)):
+            g = os.path.join(games, n)
+            if not os.path.isdir(g): continue
+            t = game_tid(g, tids)
+            if t: pairs.append((save_dest(ipa, t), g))
+    import tempfile
+    up = down = 0
+    failed = []
+    for dest, g in pairs:
+        with tempfile.TemporaryDirectory() as scratch:
+            try: a, b, busy = await sync_game(afc, base, dest, g, root, scratch, now, backed)
+            except (OSError, ValueError) as e: print('%s 同步失敗：%s' % (os.path.basename(g), e)); failed.append(os.path.basename(g)); continue
+            up += a; down += b
+            if busy: failed.append(os.path.basename(g))
+    print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
+    if failed:   # the rest are done; a nonzero exit makes Switch Pad say so (nxn.ps1)
+        print('沒同步完的：%s' % '、'.join(failed))
+        return SYNC_PARTIAL
+    return 0
 
 
 SINGLE = re.compile(r'org\.nxnative\.([0-9a-fA-F]{16})(?:\.|$)')
@@ -581,8 +831,8 @@ async def on_device(a, work):
             print('iPad 上沒有這個 App（%s），沒有存檔可以備份' % orig)
             return NOT_INSTALLED
         async with await HouseArrestService.create(lockdown=ld, bundle_id=ids[0], documents_only=True) as afc:
-            await work(afc)
-    return 0
+            r = await work(afc)
+    return r if r == SYNC_PARTIAL else 0   # only sync's partial result is an exit code; the others return what they made
 
 
 def main():
@@ -595,6 +845,7 @@ def main():
     p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
     p.add_argument('--report', default=''); p.add_argument('--zip', default=''); p.add_argument('--extra', default='')
     p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root')
+    p = sub.add_parser('sync'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('root')
     p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default=''); p.add_argument('--slot', default='')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
@@ -612,6 +863,7 @@ def main():
                     os.rmdir(d); print('%s：不用在 iPad 上記著色器了，拿掉空的記錄資料夾' % n)
         if not games: return 0
         work = lambda afc: gl_sync(afc, games, a.root)
+    elif a.cmd == 'sync': work = lambda afc: sync(afc, a.ipa, a.games, a.root)
     elif a.cmd == 'logs':
         if a.report:
             async def work(afc):

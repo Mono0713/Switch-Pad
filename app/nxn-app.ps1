@@ -864,6 +864,7 @@ function Fill-CardMenu($cm, $g) {
     $ms = Get-MultiShell
     Menu-Item $cm '📂  遊戲資料夾' $g.Dir 'folder'
     Menu-Item $cm '📄  最近的記錄' $g.Dir 'log' $hasLog
+    Menu-Item $cm '💾  存檔資料夾（和 iPad 雙向同步）' $g.Dir 'savesync'
     Menu-Item $cm '📦  匯出問題回報（閃退、打不開時）' $g.Dir 'report' ([bool]$g.Tid -and (Test-Path -LiteralPath (Library-Ipa)) -and -not $state.Running)
     if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) { Menu-Item $cm '↩  取消待傳的存檔' $g.Dir 'unsave' }
     Menu-Item $cm '🔁  下次更新時重新打包' $g.Dir 'repack' ($ms -and (Test-Path -LiteralPath (Part-For $g (Multi-Id $ms)).Path) -and -not $state.Running)
@@ -960,6 +961,7 @@ function Card-Action($action, $dir) {
     switch ($action) {
         'folder' { Open-Folder $g.Dir }
         'save'   { Open-Folder (Join-Path $g.Dir '存檔備份') }
+        'savesync' { Open-Folder (Join-Path $g.Dir '存檔') }
         'unsave' {
             $ok = [Windows.MessageBox]::Show($win, "不把拖進來的存檔放進 iPad 了？`n`n那份存檔會移到資源回收筒，iPad 上的存檔不會動。", '取消待傳的存檔', 'YesNo', 'Question')
             if ($ok -ne 'Yes') { return }
@@ -1572,29 +1574,23 @@ function Import-Save($g, $paths) {
         $kb = [math]::Ceiling((($files | Measure-Object Length -Sum).Sum) / 1KB)
         $top = @($all | Select-Object -First 8 | ForEach-Object { if ($_.PSIsContainer) { "$($_.Name)\" } else { $_.Name } })
         $more = if ($all.Count -gt 8) { '、…' } else { '' }
-        $pend = Join-Path $g.Dir '存檔待傳'
         $notes = @()
         if ($script:saveFrom) { $notes += "（看起來是 $($script:saveFrom) 的存檔，用 0\ 那份）" }
         if ($script:saveNewest) { $notes += "（裡面有好幾份，用最新的：$(Split-Path $src -Leaf)）" }
-        if (Test-Path -LiteralPath $pend) { $notes += '（這款已經有一份待傳的存檔，會換成這份）' }
+        # 放進這款的「存檔」資料夾（和 iPad 雙向同步，saves_data.py sync）：下次「裝到 iPad」時變成 iPad 上新的一份存檔，什麼都不蓋掉
+        $syncDir = Join-Path $g.Dir '存檔'
+        $label = '匯入' + $(if ($script:saveFrom) { " $($script:saveFrom)" } else { '' }) + ' ' + (Get-Date).ToString('MMdd-HHmm')
+        $dest = Join-Path $syncDir $label; $k = 1
+        while (Test-Path -LiteralPath $dest) { $k++; $dest = Join-Path $syncDir "$label ($k)" }
         $msg = "把這份存檔放進「$($g.Name)」？`n`n$($files.Count) 個檔案，共 $kb KB`n最上層：$($top -join '、')$more`n" + $(if ($notes.Count) { ($notes -join "`n") + "`n" } else { '' }) + "`n" +
-               "下次「裝到 iPad」時放進 iPad：`n`n" +
-               "按「是」：另存成一份新的存檔，iPad 上現在的存檔不動。開遊戲前的設定畫面「存檔」裡可以切換。`n" +
-               "按「否」：取代 iPad 上這款現在使用中的存檔。`n`n" +
-               "不管選哪個，iPad 上原本的存檔都會先備份到電腦，在「還原存檔…」裡找得到（名稱有 before-import）。"
-        $ans = [Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'YesNoCancel', 'Question')
-        if ($ans -eq 'Cancel') { return }
-        # 另存成新的一份（殼的 SaveSlots.swift，saves_data.py put --slot）：名稱用來源和時間，iPad 上可以改名
-        $slot = if ($ans -eq 'Yes') { '匯入' + $(if ($script:saveFrom) { " $($script:saveFrom)" } else { '' }) + ' ' + (Get-Date).ToString('MM/dd HH:mm') } else { '' }
-        # 先整份複製到暫存，再換掉舊的待傳（拖進來的可能就是待傳資料夾裡的東西）
+               "會放進這款的「存檔」資料夾，叫「$(Split-Path $dest -Leaf)」。下次「裝到 iPad」時，它會變成 iPad 上新的一份存檔（開遊戲前的「存檔」裡切換），iPad 上原本的存檔不會被蓋掉。"
+        if ([Windows.MessageBox]::Show($win, $msg, '匯入存檔', 'OKCancel', 'Question') -ne 'OK') { return }
+        # 先整份複製到暫存，再搬進去（拖進來的可能就是存檔資料夾裡的東西）
         $stage = Join-Path $tmp 'stage'
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
         foreach ($c in $all) { Copy-Item -LiteralPath $c.FullName -Destination $stage -Recurse -Force }
-        if (Test-Path -LiteralPath $pend) { Remove-Item -LiteralPath $pend -Recurse -Force }
-        Move-Item -LiteralPath $stage -Destination $pend
-        # 第一行 title ID；第二行 slot=<名稱> 表示另存成新的一份存檔，沒有就是取代使用中的
-        $lines = @($tid) + $(if ($slot) { @("slot=$slot") } else { @() })
-        Set-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -Value $lines -Encoding UTF8
+        New-Item -ItemType Directory -Force -Path $syncDir | Out-Null
+        Move-Item -LiteralPath $stage -Destination $dest
         Build-Library
     } catch {
         [void][Windows.MessageBox]::Show($win, "匯入存檔失敗：$($_.Exception.Message)", '匯入存檔')

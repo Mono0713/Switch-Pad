@@ -457,6 +457,8 @@ try {
     # 遊戲的備份在 <遊戲資料夾>\存檔備份\，合包的在 合包\存檔備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
     $saveTool = Join-Path $here 'saves_data.py'
     $ipaDir = Split-Path $Ipa -Parent
+    # 雙向同步的存檔資料夾（saves_data.py sync）：每款遊戲資料夾裡的 存檔\，合包和遊戲庫是 遊戲\ 底下每一款，單款 App 是它自己的資料夾
+    $syncGames = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $base '遊戲' } else { $ipaDir }
     $saveRoot = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $ipaDir ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($Ipa)) } else { Join-Path $ipaDir '存檔備份' }
     if ($saveMode) {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
@@ -474,7 +476,7 @@ try {
             if ($ReportTid) { $la += @('--report', $ReportTid, '--zip', $ReportZip); if ($ReportExtra) { $la += @('--extra', $ReportExtra) } }
             $c = RunExe $tpy $la
             if ($c -eq 3) { throw 'iPad 上還沒有裝這個 App。' }
-            if ($c -eq 6) { throw 'iPad 上還沒有這款的記錄：先在 iPad 上打開它一次（打不開或閃退也算），再匯出一次。' }
+            if ($c -eq 7) { throw 'iPad 上還沒有這款的記錄：先在 iPad 上打開它一次（打不開或閃退也算），再匯出一次。' }
             if ($c) { throw "讀記錄失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
             if ($ReportTid -and (Test-Path -LiteralPath $ReportZip)) {
                 # 打開資料夾並選好那個檔，直接拖進訊息或 GitHub issue 就好
@@ -496,6 +498,11 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'restore', $Ipa, $SaveRestore, $saveRoot, '--udid', $dev.Serial)
         } else {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
+            if (-not $c) {
+                Step '和電腦的存檔資料夾雙向同步'
+                $sc = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+                if ($sc) { Warn "存檔同步沒做完（結束碼 $sc），備份是好的" }
+            }
         }
         if ($c -eq 3) { throw 'iPad 上還沒有裝這個 App。' }
         if ($c) { throw "存檔$(if ($SaveRestore) { '還原' } else { '備份' })失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
@@ -608,6 +615,17 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
             Move-Item -LiteralPath (Join-Path $gd '存檔待傳') -Destination $done
             Remove-Item -LiteralPath $tidFile -ErrorAction SilentlyContinue
             Ok "存檔放好了（電腦上的這份移到 $done）"
+        }
+    }
+
+    # 存檔雙向同步：各遊戲資料夾的 存檔\<名稱>\ 和 iPad 上那款的每一份存檔（殼的「存檔」切換）。只把改過的那一邊複製過去，
+    # 兩邊都改過就兩份都留，不會蓋掉任何一邊；改 iPad 前先備份（before-sync）。同步失敗不算安裝失敗
+    if (Test-Path $saveTool) {
+        $tpy = Transfer-Python
+        if ($tpy) {
+            Step '和電腦的存檔資料夾雙向同步'
+            $c = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+            if ($c) { Warn "存檔同步沒做完（結束碼 $c），下次裝到 iPad 會再同步"; $saveNote = '存檔同步沒做完，看上面的記錄' }
         }
     }
 
