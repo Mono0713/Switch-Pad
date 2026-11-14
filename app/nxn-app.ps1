@@ -151,7 +151,7 @@ $cfg = @{ Shell = ''; Udid = ''; Overwrite = $false; Mode = 'both'; Library = $t
 try { (Get-Content $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
 function Save-Settings { try { [pscustomobject]$cfg | ConvertTo-Json | Set-Content $settingsFile -Encoding UTF8 } catch { } }
 
-# ---------------------------------------------------------------- 樣式：Apple 簡約風（深色、膠囊按鈕、沒有外框的遊戲格子、小色點狀態）
+# ---------------------------------------------------------------- 樣式：Apple 簡約風（深色、圓角方形按鈕、沒有外框的遊戲格子、小色點狀態、左上角小標籤）
 $styles = @'
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
@@ -170,7 +170,7 @@ $styles = @'
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="Button">
-          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="999" Padding="{TemplateBinding Padding}">
+          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}">
             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <ControlTemplate.Triggers>
@@ -189,10 +189,10 @@ $styles = @'
     <Setter Property="FontSize" Value="15"/>
     <Setter Property="Padding" Value="26,10"/>
   </Style>
-  <!-- 遊戲格子上的小按鈕：像 App Store 的「取得」，灰底膠囊 -->
+  <!-- 遊戲格子上的小按鈕：像 App Store 的「取得」，灰底圓角 -->
   <Style x:Key="Pill" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
     <Setter Property="FontSize" Value="12.5"/>
-    <Setter Property="Padding" Value="18,5"/>
+    <Setter Property="Padding" Value="20,5"/>
     <Setter Property="Foreground" Value="#EBEBF5"/>
   </Style>
   <Style x:Key="Get" TargetType="Button" BasedOn="{StaticResource Pill}">
@@ -319,7 +319,7 @@ $xamlText = @'
     <!-- 標題列 -->
     <DockPanel Grid.Row="0" Margin="0,0,0,14">
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-        <Border Background="#232326" CornerRadius="999" Padding="14,7" Margin="0,0,8,0" VerticalAlignment="Center">
+        <Border Background="#232326" CornerRadius="9" Padding="14,7" Margin="0,0,8,0" VerticalAlignment="Center">
           <StackPanel Orientation="Horizontal">
             <Ellipse x:Name="AcctDot" Width="7" Height="7" Fill="#8E8E93" Margin="0,0,8,0" VerticalAlignment="Center"/>
             <TextBlock x:Name="Account" Text="…" Foreground="#C7C7CC" FontSize="13" VerticalAlignment="Center"/>
@@ -790,8 +790,7 @@ $cardXaml = @'
         AllowDrop="True">
   <Grid>
     <DockPanel Margin="10,14,10,16">
-      <Button x:Name="Act" DockPanel.Dock="Bottom" HorizontalAlignment="Center" Margin="0,10,0,0" FontSize="12.5" Padding="18,5"/>
-      <StackPanel>
+      <StackPanel VerticalAlignment="Top">
         <Border Width="116" Height="116" HorizontalAlignment="Center">
           <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
           <Border x:Name="Icon" CornerRadius="26" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
@@ -799,12 +798,15 @@ $cardXaml = @'
           </Border>
         </Border>
         <TextBlock x:Name="Title" Margin="0,12,0,0" FontSize="14" FontWeight="SemiBold" Foreground="#F5F5F7" TextWrapping="Wrap"
-                   TextAlignment="Center" MaxHeight="38" TextTrimming="CharacterEllipsis" Height="38"/>
-        <TextBlock x:Name="Detail" Margin="0,0,0,0" FontSize="12" MinHeight="16" Foreground="#8E8E93" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                   TextAlignment="Center" MaxHeight="38" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="Detail" Margin="0,2,0,0" FontSize="12" Foreground="#8E8E93" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="State" Margin="0,5,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
-        <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="Support" Margin="0,4,0,0" FontSize="12" TextAlignment="Center" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+        <Button x:Name="Act" HorizontalAlignment="Center" Margin="0,10,0,0" FontSize="12.5" Padding="20,5"/>
       </StackPanel>
     </DockPanel>
+    <!-- 左上角的小標籤：未驗證、要注意、存檔待傳…（滑鼠移上去看說明） -->
+    <WrapPanel x:Name="Badges" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" MaxWidth="120"/>
     <Border x:Name="Pending" CornerRadius="9" Padding="10,3" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,10,0,0" Visibility="Collapsed">
       <TextBlock x:Name="PendingText" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
     </Border>
@@ -840,6 +842,16 @@ function Dot-State($st) {
     $d = New-Object Windows.Documents.Run '●  '; $d.Foreground = $c; $d.FontSize = 9; $d.BaselineAlignment = 'Center'
     $r = New-Object Windows.Documents.Run $t.Substring(2); $r.Foreground = Brush '#AEAEB2'
     $st.Inlines.Add($d); $st.Inlines.Add($r)
+}
+# 遊戲格子左上角的小標籤（圓角小框，淡色底配同色字）
+function Add-Badge($card, $text, $bg, $fg, $tip) {
+    $b = New-Object Windows.Controls.Border
+    $b.CornerRadius = '5'; $b.Padding = '7,2'; $b.Margin = '0,0,4,4'; $b.Background = Brush $bg
+    $t = New-Object Windows.Controls.TextBlock
+    $t.Text = $text; $t.FontSize = 11; $t.FontWeight = 'SemiBold'; $t.Foreground = Brush $fg
+    $b.Child = $t
+    if ($tip) { $b.ToolTip = $tip }
+    [void]$card.FindName('Badges').Children.Add($b)
 }
 # 標題：名字白色粗體，數量灰色
 function Head-Count($tb, $name, $n) {
@@ -1112,23 +1124,20 @@ function Build-Library {
         elseif ($g.Ready) { $st.Text = '● 轉換過了，加入就能裝'; $st.Foreground = $gray; $g.Order = 2 }
         else { $st.Text = '' }
         if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) {
-            $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '💾 存檔待傳'
-            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「裝到 iPad」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })) -join "`n"
+            Add-Badge $card '存檔待傳' '#330A84FF' '#64D2FF' $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「裝到 iPad」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「裝到 iPad」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })
         }
-        if ($g.Stray) { $st.Text += $(if ($st.Text) { ' · ' } else { '' }) + '⚠'; $st.ToolTip = "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
-        if ($preWarn.Count -and -not $why) {
-            if ($st.Text -and $st.Text -notlike '*⚠') { $st.Text += ' · ⚠' } elseif (-not $st.Text) { $st.Text = '⚠ 要注意'; $st.Foreground = $orange }
-            $st.ToolTip = (@($(if ($st.ToolTip) { "$($st.ToolTip)" })) + @($preWarn | ForEach-Object { "⚠ $_" })) -join "`n"
-        }
+        $warn = @()
+        if ($g.Stray) { $warn += "子資料夾裡有 $($g.Stray) 個檔案不會用到（打包器只讀第一層），要用的話把檔案移到外面" }
+        if ($preWarn.Count -and -not $why) { $warn += $preWarn }
+        if ($warn.Count) { Add-Badge $card '要注意' '#33FF9F0A' '#FF9F0A' (($warn | ForEach-Object { "⚠ $_" }) -join "`n") }
         Dot-State $st
-        # 支援程度只在「還沒加入」顯示，幫你挑；已經在遊戲庫的看上面那行就好
-        $sb = $card.FindName('Support')
+        # 支援程度只在「還沒加入」顯示，幫你挑：左上角的小標籤；已經在遊戲庫的看狀態那行就好
         if (-not $g.InLib) {
             $sup = Support-Of $g
-            if ($sup.Text -eq '● 已驗證') { $sb.Text = '✓ 已驗證'; $sb.Foreground = $green }
-            elseif ($sup.Text) { $sb.Text = '未驗證，可能打不開'; $sb.Foreground = $gray }
-            if ($sup.Tip) { $sb.ToolTip = $sup.Tip }
-        } else { $sb.Visibility = 'Collapsed' }
+            if ($sup.Text -eq '● 已驗證') { Add-Badge $card '已驗證' '#2630D158' '#30D158' $sup.Tip }
+            elseif ($sup.Text) { Add-Badge $card '未驗證' '#33FFD60A' '#FFD60A' $(if ($sup.Tip) { $sup.Tip } else { '還沒有人確認這款能玩，可能打不開' }) }
+        }
+        foreach ($n in 'Detail', 'State') { $t = $card.FindName($n); if (-not "$($t.Text)") { $t.Visibility = 'Collapsed' } }   # 空的那行不佔位置
         Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $g (Cover-For $g)
 
         $card.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#1F1F22' })

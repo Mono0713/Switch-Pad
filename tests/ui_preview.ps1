@@ -8,7 +8,7 @@ function Here($name) { if ($src -match "(?s)\`$$name = @'\r?\n(.*?)\r?\n'@") { r
 $styles = Here 'styles'; $xamlText = Here 'xamlText'; $cardXaml = Here 'cardXaml'
 function Brush($c) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($c)) }
 # 介面用到的小函式直接從 nxn-app.ps1 拿，畫出來的和程式一樣
-foreach ($f in 'Dot-State', 'Head-Count') {
+foreach ($f in 'Dot-State', 'Head-Count', 'Add-Badge') {
     if ($src -match "(?s)(function $f\(.*?\r?\n\})") { . ([scriptblock]::Create($Matches[1])) } else { throw "找不到 $f" }
 }
 $win = [Windows.Markup.XamlReader]::Parse($xamlText.Replace('__RES__', $styles))
@@ -28,6 +28,9 @@ foreach ($f in $fake) {
     $act = $c.FindName('Act')
     if ($f[4]) { $act.Content = '移除'; $act.Style = $win.FindResource('Pill') } else { $act.Content = '加入'; $act.Style = $win.FindResource('Get') }
     if ($i -eq 2) { $c.Background = Brush '#1F1F22' }
+    if ($i -eq 4 -or $i -eq 7) { Add-Badge $c '要注意' '#33FF9F0A' '#FF9F0A' 'x' }
+    if (-not $f[4]) { Add-Badge $c '未驗證' '#33FFD60A' '#FFD60A' 'x' }
+    foreach ($n in 'Detail', 'State') { $t = $c.FindName($n); if (-not "$($t.Text)") { $t.Visibility = 'Collapsed' } }
     [void]$(if ($f[4]) { $win.FindName('Library') } else { $win.FindName('Others') }).Children.Add($c)
     $i++
 }
