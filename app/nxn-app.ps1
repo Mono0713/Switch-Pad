@@ -426,7 +426,16 @@ $xamlText = @'
 </Window>
 '@
 # 樣式要在載入前就放進 Window.Resources，StaticResource 才找得到
-function Load-Window([string]$text) { [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)) }
+# Windows 的標題列也用深色（Windows 10 1809 以後；舊版不支援就照舊）
+try { Add-Type -Namespace SwitchPad -Name Dwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);' } catch { }
+function Dark-TitleBar($w) {
+    $w.Add_SourceInitialized({ param($s, $e)
+        try {
+            $h = (New-Object Windows.Interop.WindowInteropHelper $s).Handle; $on = 1
+            if ([SwitchPad.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$on, 4) -ne 0) { [void][SwitchPad.Dwm]::DwmSetWindowAttribute($h, 19, [ref]$on, 4) }
+        } catch { } })
+}
+function Load-Window([string]$text) { $w = [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)); if ($w -is [Windows.Window]) { Dark-TitleBar $w }; $w }
 # 自己的工作列身分，工作列才會用 Switch Pad 的圖示，不是 PowerShell 的
 try {
     Add-Type -Namespace SwitchPad -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);'
