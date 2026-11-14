@@ -2271,6 +2271,9 @@ $failHints = @(
     @{ Re = 'cannot dispatch the .* gate|older than this packer|built before the shell route|ignores dm/env\.txt|this is not a shell'; Msg = '殼太舊，跟打包器不合：到設定按「改用最新殼」再轉一次' }
     @{ Re = 'run-time shader capture boots the game in the Mac host|cannot pack .* on Windows|captures them by booting the game on a Mac'; Msg = '這款的著色器是遊戲執行時才產生的（Vulkan / OpenGL），要先在 iPad 上錄：換支援錄著色器的殼再轉' }
     @{ Re = 'no shader libraries were produced|none of the \d+ shaders .* translates|no shader translator'; Msg = '著色器轉成 iPad 格式那一步失敗。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'does not belong to this base dump';            Msg = '更新檔壞了，或跟遊戲本體不是同一套（本體自己檢查沒問題）：重新下載更新檔，最好本體和更新從同一個來源拿，再轉一次' }
+    @{ Re = "base NSP's own RomFS fails too";               Msg = '遊戲本體的 NSP 壞了（下載不完整或檔案損毀）：重新下載本體再轉一次' }
+    @{ Re = 'the NSP is damaged';                           Msg = '遊戲檔沒通過雜湊檢查（下載不完整或檔案損毀）：重新下載本體和更新檔再轉一次' }
     @{ Re = 'extracting .* failed \(exit|nx_extract did not appear'; Msg = '解包失敗：遊戲檔可能不完整，或 prod.keys 太舊。重新下載遊戲檔，或到設定的「金鑰」換新的 prod.keys' }
     @{ Re = 'rewriting \S+ failed \(exit';                Msg = '改寫遊戲程式那一步失敗。請把「最近的記錄」給 Claude 看' }
     @{ Re = 'no game profile for title ID|做不出暫定設定檔'; Msg = '這款沒有設定檔，自動推導也失敗了。請把「最近的記錄」給 Claude 看' }
