@@ -791,9 +791,9 @@ $cardXaml = @'
   <Grid>
     <DockPanel Margin="10,14,10,16">
       <StackPanel VerticalAlignment="Top">
-        <!-- 圖示置中；左邊那欄是小框框（狀態、版本、DLC、要注意…），自己一欄，不會疊到圖示 -->
-        <Grid>
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <!-- 圖示和左邊固定寬的一欄一起置中；那一欄是小框框（狀態、版本、DLC、要注意…），不會疊到圖示 -->
+        <Grid HorizontalAlignment="Center">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <StackPanel x:Name="Badges" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
           <Border Grid.Column="1" Width="116" Height="116">
             <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="5" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
@@ -863,7 +863,7 @@ function Add-Badge($card, $text, $bg, $fg, $tip, $dot = $null, $at = -1) {
 function State-Badges($card, $parts) {
     $st = $card.FindName('State'); $t = "$($st.Text)"
     $at = 0
-    if ($t) {
+    if ($t -and $t -ne '● 在 iPad 上') {   # 在 iPad 上是正常狀態，不用標
         $red = "$($st.Foreground)" -eq '#FFFF453A'
         $txt = if ($t.StartsWith('● ')) { $t.Substring(2) } else { $t }
         Add-Badge $card $txt $(if ($red) { '#33FF453A' } else { '#232326' }) $(if ($red) { '#FF6961' } else { '#D1D1D6' }) $st.ToolTip $(if ($red) { $null } else { $st.Foreground }) $at
@@ -2741,7 +2741,7 @@ $win.Add_Closing({ param($s, $e)
 
 # 卡片排滿整個寬度：依視窗寬度決定一排幾張，每張一樣寬
 $ui.LibraryView.Add_SizeChanged({ param($s, $e)
-    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 330))   # 夠寬才放得下圖示左邊那欄小框框
+    $cols = [math]::Max(1, [math]::Floor(($e.NewSize.Width - 12) / 290))   # 圖示加左邊那欄小框框，兩邊留一點空
     if ($ui.Library.Columns -ne $cols) { $ui.Library.Columns = $cols; $ui.Others.Columns = $cols; $ui.Packs.Columns = $cols } })
 
 Update-ShellLabel
