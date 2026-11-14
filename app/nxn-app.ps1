@@ -102,10 +102,12 @@ try {
     Move-ToAppDir
     $appDir = Join-Path $base $appDirName
     $exe = Join-Path $base 'Switch Pad.exe'
-    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path -LiteralPath $exe)) {
-        $ico = Join-Path $appDir '工具\SwitchPad.ico'
-        if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
-        Build-Launcher $exe $ico
+    $ico = Join-Path $appDir '工具\SwitchPad.ico'
+    if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
+    # 換了圖示（SwitchPad.ico 比 Switch Pad.exe 新）也要重做，不然桌面上一直是舊圖示
+    $stale = (Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $ico) -and (Get-Item -LiteralPath $ico).LastWriteTime -gt (Get-Item -LiteralPath $exe).LastWriteTime
+    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and (-not (Test-Path -LiteralPath $exe) -or $stale)) {
+        try { Build-Launcher $exe $ico } catch { if (-not $stale) { throw } }
     }
     # 這次是從最上層開的，搬好了就從 程式\ 重開
     if ($here -eq $base -and (Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path (Join-Path $base 'nxn-app.ps1'))) {
