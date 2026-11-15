@@ -996,7 +996,9 @@ function Fill-CardMenu($cm, $g) {
     Menu-Item $cm '💾  存檔資料夾（和 iPad 雙向同步）' $g.Dir 'savesync'
     Menu-Item $cm '📦  匯出問題回報（閃退、打不開時）' $g.Dir 'report' ([bool]$g.Tid -and (Test-Path -LiteralPath (Library-Ipa)) -and -not $state.Running)
     if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) { Menu-Item $cm '↩  取消待傳的存檔' $g.Dir 'unsave' }
-    Menu-Item $cm '🔁  下次更新時重新打包' $g.Dir 'repack' ($ms -and (Test-Path -LiteralPath (Part-For $g (Multi-Id $ms)).Path) -and -not $state.Running)
+    $part = if ($ms) { (Part-For $g (Multi-Id $ms)).Path }
+    if ($part -and (Test-Path -LiteralPath "$part.repack")) { Menu-Item $cm '↩  取消重新打包' $g.Dir 'unrepack' (-not $state.Running) }
+    else { Menu-Item $cm '🔁  下次更新時重新打包' $g.Dir 'repack' ($part -and (Test-Path -LiteralPath $part) -and -not $state.Running) }
     [void]$cm.Items.Add((New-Sep))
     Menu-Item $cm '🖼  換圖示…' $g.Dir 'cover'
     Menu-Item $cm '🔄  用遊戲原本的圖示' $g.Dir 'uncover' ([bool](Get-ChildItem -LiteralPath $g.Dir -Filter 'cover.*' -File -ErrorAction SilentlyContinue))
@@ -1101,7 +1103,17 @@ function Card-Action($action, $dir) {
         'log'    { $l = Latest-Log $g; if ($l) { Start-Process notepad.exe "`"$($l.FullName)`"" } }
         'report' { Start-Report $g }
         # 遊戲包是快取：刪掉，下次按「放進遊戲庫」就從遊戲檔重新轉換這款
-        'repack' { $ms = Get-MultiShell; if ($ms) { Remove-Item -LiteralPath (Part-For $g (Multi-Id $ms)).Path -ErrorAction SilentlyContinue }; Build-Library }
+        # 不直接刪：先改名成 .repack，按錯了還能「取消重新打包」換回來；重新打包好之後 Part-For 會把它清掉
+        'repack' { $ms = Get-MultiShell; if ($ms) { $p = (Part-For $g (Multi-Id $ms)).Path; Move-Item -LiteralPath $p -Destination "$p.repack" -Force -ErrorAction SilentlyContinue }; Build-Library }
+        'unrepack' {
+            $ms = Get-MultiShell
+            if ($ms) {
+                $p = (Part-For $g (Multi-Id $ms)).Path
+                if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath "$p.repack" -ErrorAction SilentlyContinue }
+                else { Move-Item -LiteralPath "$p.repack" -Destination $p -ErrorAction SilentlyContinue }
+            }
+            Build-Library
+        }
         'cover'  {
             $dlg = New-Object Microsoft.Win32.OpenFileDialog
             $dlg.Title = "選 $($g.Name) 的圖示"
@@ -2297,6 +2309,7 @@ function Multi-Id($ms) {
 function Part-For($g, $id) {
     $o = Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")
     $f = Get-Item -LiteralPath $o -ErrorAction SilentlyContinue
+    if ($f -and (Test-Path -LiteralPath "$o.repack")) { Remove-Item -LiteralPath "$o.repack" -ErrorAction SilentlyContinue }   # 已經重新打包好了，舊的那份不用留
     $newest = Get-ChildItem -LiteralPath $g.Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci', '.nsz', '.xcz' } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     [pscustomobject]@{ Path = $o; Fresh = [bool]($f -and (-not $newest -or $f.LastWriteTime -ge $newest.LastWriteTime)) }
