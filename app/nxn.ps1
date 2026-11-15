@@ -36,7 +36,18 @@ $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
 $saveMode = $SaveBackup -or $SaveRestore -or $SaveMigrate -or $PullLogs -or $GlSync
 
-function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+# 每一步花了多久寫進記錄（「（上一步花了 1:23）」），慢在哪一步看記錄就知道
+$script:stepAt = $null
+function Step-Took {
+    if ($script:stepAt) { $t = New-TimeSpan $script:stepAt (Get-Date); if ($t.TotalSeconds -ge 1) { Write-Host ("（上一步花了 {0:m\:ss}）" -f $t) -ForegroundColor DarkGray } }
+    $script:stepAt = Get-Date
+}
+# 一步裡面的小段落（存檔備份、做小 App、簽章安裝）也記時間，不另起一步
+function Lap($what) {
+    if ($script:stepAt) { $t = New-TimeSpan $script:stepAt (Get-Date); Write-Host ("（{0}花了 {1:m\:ss}）" -f $what, $t) -ForegroundColor DarkGray }
+    $script:stepAt = Get-Date
+}
+function Step($msg) { Step-Took; Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
 function Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
 
@@ -102,6 +113,7 @@ if (-not $Python) {
 $plume = Join-Path $here '工具\plumesign.exe'
 
 function Finish($msg, $color) {
+    Step-Took
     Write-Host ''
     Write-Host $msg -ForegroundColor $color
     Write-Host ("總共花了 {0:mm\:ss}" -f (New-TimeSpan $started (Get-Date)))
@@ -461,8 +473,20 @@ try {
     $py = (Quiet $Python @('-c', 'import sys; print(sys.executable)')).Out
     # 傳檔工具 pymobiledevice3 的相依套件在 Python 3.14 還沒有現成的 Windows 版（要裝 C++ 編譯器），
     # 所以找一個裝得起來的 Python（先找已經裝好的，再試 3.13 → 3.10），記在 work\python-transfer.txt
+    # 同一次安裝會問好幾次（備份、傳資料、存檔、著色器），找到一次就記著：每問一次要開好幾個 Python、載入 pymobiledevice3，要好幾秒
+    $script:tpyFound = $null
     function Transfer-Python {
+        if ($null -ne $script:tpyFound) { return $script:tpyFound }
+        $script:tpyFound = Find-TransferPython
+        return $script:tpyFound
+    }
+    function Find-TransferPython {
         $saved = Join-Path $root 'python-transfer.txt'
+        # 記下的那個還能用就直接用，不用每次都先問 py 啟動器有哪些版本
+        if (Test-Path $saved) {
+            $c = (Get-Content $saved -Raw).Trim()
+            if ($c -and (Test-Path -LiteralPath $c) -and -not (Quiet $c @('-c', 'import pymobiledevice3')).Code) { return $c }
+        }
         $cands = @()
         if (Test-Path $saved) { $cands += (Get-Content $saved -Raw).Trim() }
         $cands += $py
@@ -483,6 +507,8 @@ try {
     # 遊戲的備份在 <遊戲資料夾>\存檔備份\，合包的在 合包\存檔備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
     $saveTool = Join-Path $here 'saves_data.py'
     $ipaDir = Split-Path $Ipa -Parent
+    # 雙向同步的存檔資料夾（saves_data.py sync）：每款遊戲資料夾裡的 存檔\，合包和遊戲庫是 遊戲\ 底下每一款，單款 App 是它自己的資料夾
+    $syncGames = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $base '遊戲' } else { $ipaDir }
     $saveRoot = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $ipaDir ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($Ipa)) } else { Join-Path $ipaDir '存檔備份' }
     if ($saveMode) {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
@@ -513,6 +539,11 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'restore', $Ipa, $SaveRestore, $saveRoot, '--udid', $dev.Serial)
         } else {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
+            if (-not $c) {
+                Step '和電腦的存檔資料夾雙向同步'
+                $sc = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+                if ($sc) { Warn "存檔同步沒做完（結束碼 $sc），備份是好的" }
+            }
         }
         if ($c -eq 3) { throw 'iPad 上還沒有裝這個 App。' }
         if ($c) { throw "存檔$(if ($SaveRestore) { '還原' } else { '備份' })失敗（結束碼 $c）。iPad 保持接著、解鎖再試一次。" }
@@ -526,18 +557,30 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
             if ($c -and $c -ne 3) { Warn "存檔備份沒做成（結束碼 $c），照樣安裝" }
         } else { Warn '傳檔工具裝不起來，這次沒有備份存檔' }
+        Lap '存檔備份'
     }
 
     $signIpa = $Ipa; $split = $null
-    if (-not $Full -and (Test-Path $dataTool) -and $py) {
+    if ((Test-Path $dataTool) -and $py) {
         $r = Quiet $py @('-I', $dataTool, 'info', $Ipa)
         if (-not $r.Code) { try { $split = $r.Out | ConvertFrom-Json } catch { $split = $null } }
         if ($split -and -not $split.lite) { $split = $null }
-        if ($split) {
+        # 連結式的遊戲庫（nxn_merge.py --link）：包裡本來就沒有遊戲資料，資料從各遊戲包直接傳，不能整包裝、也不用另外做小 App
+        if ($split -and $split.linked) {
+            if ($Full) { Warn '遊戲庫的遊戲資料不在包裡（直接從各遊戲包傳），照樣分開傳' }
+            $tpy = Transfer-Python
+            if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，遊戲庫的遊戲資料傳不過去。' }
+            $py = $tpy
+            Write-Host "App 本身 $([int]((Get-Item -LiteralPath $Ipa).Length / 1MB)) MB，遊戲資料 $([int]($split.bytes / 1MB)) MB 從各遊戲包直接傳（已經在 iPad 上的不會再傳）"
+            # 以前做的小 App（遊戲庫的有好幾 GB）用不到了
+            $stem = [IO.Path]::GetFileNameWithoutExtension($Ipa) -replace '[^\w.-]', '_'
+            Get-ChildItem -LiteralPath (Join-Path $root 'lite') -Filter "$stem-*.ipa" -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+        } elseif ($Full) { $split = $null }
+        if ($split -and -not $split.linked) {
             $tpy = Transfer-Python
             if ($tpy) { $py = $tpy } else { Warn '傳檔工具裝不起來，這次整包裝'; $split = $null }
         }
-        if ($split) {
+        if ($split -and -not $split.linked) {
             $liteDir = Join-Path $root 'lite'
             New-Item -ItemType Directory -Force -Path $liteDir | Out-Null
             $stem = [IO.Path]::GetFileNameWithoutExtension($Ipa) -replace '[^\w.-]', '_'
@@ -552,6 +595,7 @@ try {
                 else { Move-Item -LiteralPath "$lite.part" -Destination $lite -Force }
             }
             if ($split) { $signIpa = $lite; Write-Host "小 App：$([int]((Get-Item -LiteralPath $lite).Length / 1MB)) MB" }
+            Lap '做小 App'
         }
     }
     $signArgs = @('sign', '--package', $signIpa, '--apple-id', '--register-and-install')
@@ -562,6 +606,7 @@ try {
         Warn "裝置編號變了，改用 $($dev.Id) 再試一次"
         $code = Run-Sign ($signArgs + @('--udid', $dev.Id))
     }
+    Lap '簽章並上傳安裝'
     if ($code -and $script:signOut -match '(?i)no account selected|please login|unauthori[sz]ed|re-?authenticat') {
         throw "Apple ID 要重新登入：按右上角的「登入 Apple ID」，登入後再按一次安裝。IPA 本身是好的：$Ipa"
     }
@@ -625,6 +670,17 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
             Move-Item -LiteralPath (Join-Path $gd '存檔待傳') -Destination $done
             Remove-Item -LiteralPath $tidFile -ErrorAction SilentlyContinue
             Ok "存檔放好了（電腦上的這份移到 $done）"
+        }
+    }
+
+    # 存檔雙向同步：各遊戲資料夾的 存檔\<名稱>\ 和 iPad 上那款的每一份存檔（殼的「存檔」切換）。只把改過的那一邊複製過去，
+    # 兩邊都改過就兩份都留，不會蓋掉任何一邊；改 iPad 前先備份（before-sync）。同步失敗不算安裝失敗
+    if (Test-Path $saveTool) {
+        $tpy = Transfer-Python
+        if ($tpy) {
+            Step '和電腦的存檔資料夾雙向同步'
+            $c = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+            if ($c) { Warn "存檔同步沒做完（結束碼 $c），下次裝到 iPad 會再同步"; $saveNote = '存檔同步沒做完，看上面的記錄' }
         }
     }
 

@@ -16,6 +16,13 @@ launcher's Change game closes the app. Entries are copied as they are compressed
 deflating again), so merging costs about the time it takes to copy the files. The bundle ID is kept from the first merged
 IPA given (org.nxnative.games for a first merge, or --bundle-id), so a merge with one more game, or a new --name, installs
 over the last one and keeps the saves, which are Documents/save/<title ID>. Give each separate package its own --bundle-id.
+
+--link leaves the games' data (games/<tid>/romfs and msl, most of the size: 45 of 48 GB for a library of 26 games) out of
+the merged IPA and records where it is instead: the source IPA of each game, its entries' prefix there and the folder's id
+(romfs_data.py's data_id, so the iPad's Documents/.romfs-id still matches). romfs_data.py push copies a folder straight
+from that source when the iPad does not have it. The merged IPA is then only the app that gets signed, so a merge writes
+~3 GB instead of rewriting every game's data, and installing needs no separate copy without the data. The record is the
+zip comment (LINK_MAGIC + JSON); a merge that takes a linked IPA as input links too, carrying its records over.
 """
 import argparse, io, json, os, plistlib, re, struct, sys, time, zipfile, zlib
 
@@ -23,6 +30,37 @@ L32, L16 = 0xFFFFFFFF, 0xFFFF
 CHUNK = 16 << 20
 SHELL_DM = ('font/', 'shell_info.txt', 'placeholder.tsv')   # the shell's own files under dm/; everything else there is the game's
 GAME_DIRS = ('romfs/', 'msl/', 'aoc/', 'pso/')
+DATA_DIRS = ('romfs', 'msl')     # the folders romfs_data.py moves to Documents/games/<tid>/ (the shell reads them there first)
+LINK_MAGIC, LINK_MAGIC_Z = b'NXNLINK1', b'NXNLINKZ'
+
+
+def read_link(z):
+    """the data record of a merged IPA made with --link: {'parts': {'games/<tid>/romfs': {...}, ...}}, or None"""
+    c = z.comment or b''
+    try:
+        if c.startswith(LINK_MAGIC): return json.loads(c[len(LINK_MAGIC):].decode('utf-8'))
+        if c.startswith(LINK_MAGIC_Z):
+            import base64
+            return json.loads(zlib.decompress(base64.b64decode(c[len(LINK_MAGIC_Z):])).decode('utf-8'))
+    except Exception as e: die('%s: its data record cannot be read (%s)' % (z.filename, e))
+    return None
+
+
+def link_comment(rec):
+    raw = json.dumps(rec, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if len(LINK_MAGIC) + len(raw) <= 0xFFFF: return LINK_MAGIC + raw
+    import base64
+    zc = LINK_MAGIC_Z + base64.b64encode(zlib.compress(raw, 9))
+    if len(zc) > 0xFFFF: die('the data record of %d folders does not fit in a zip comment' % len(rec.get('parts', {})))
+    return zc
+
+
+def part_id(rows):
+    """romfs_data.py's data_id over (merged entry name, size, CRC) rows: the same folder gives the same id both ways"""
+    import hashlib
+    h = hashlib.sha1()
+    for n, size, crc in sorted(rows): h.update(('%s\0%d\0%08x\n' % (n, size, crc)).encode())
+    return h.hexdigest()[:16]
 
 
 def die(msg): sys.exit('[RED] nxn_merge: ' + msg)
@@ -47,6 +85,7 @@ class Game:
         self.z, self.A, self.tid, self.name, self.version, self.language, self.icon = z, A, tid, name, version, language, icon
         self.prefix = prefix      # an IPA this script made: the game's folder games/<tid>/ in it
         self.guest = guest        # the folder of its Guest framework in that IPA
+        self.link = {}            # a linked merged IPA: its records of this game's data folders ('games/<tid>/romfs' ...)
 
     def entries(self, out_A):
         """(source ZipInfo, archive name in the merged IPA) for each entry of this game"""
@@ -72,6 +111,7 @@ def games_in(z):
     pl = plistlib.loads(z.read(A + 'Info.plist'))
     if any(n.startswith(A + 'games/') for n in names):   # a merged IPA
         out = []
+        rec = (read_link(z) or {}).get('parts', {})
         for n in sorted(names):
             m = re.fullmatch(re.escape(A) + r'games/([0-9A-Fa-f]{16})/game\.json', n)
             if not m: continue
@@ -79,6 +119,9 @@ def games_in(z):
             icon = z.read(A + 'games/%s/icon.png' % m.group(1)) if A + 'games/%s/icon.png' % m.group(1) in names else None
             out.append(Game(z, A, tid, j.get('name', tid), j.get('version', ''), j.get('language', 'en-US'), icon,
                             prefix='games/%s/' % m.group(1), guest='Frameworks/Guest_%s.framework/' % m.group(1)))
+            for d in DATA_DIRS:
+                r = rec.get('games/%s/%s' % (m.group(1), d))
+                if r: out[-1].link['games/%s/%s' % (tid, d)] = r
         return out
     if A + 'Frameworks/Guest.framework/Guest' not in names: die('%s has no game in it (no Frameworks/Guest.framework): pack the game with nxn_pack.py first' % z.filename)
     m = re.fullmatch(r'org\.nxnative\.([0-9a-f]{16})', pl.get('CFBundleIdentifier', ''))
@@ -136,13 +179,13 @@ class Out:
         method, body = (8, zd) if data and len(zd) < len(data) else (0, data)
         self._entry(name, method, zlib.crc32(data), len(body), len(data), time.localtime()[:6], attr, data=body)
 
-    def close(self):
+    def close(self, comment=b''):
         cd_off, n = self.pos, len(self.cd); blob = b''.join(self.cd); self.w(blob)
         if n >= L16 or cd_off >= L32 or len(blob) >= L32:
             z = self.pos
             self.w(struct.pack('<IQHHIIQQQQ', 0x06064B50, 44, 0x031E, 45, 0, 0, n, n, len(blob), cd_off))
             self.w(struct.pack('<IIQI', 0x07064B50, 0, z, 1))
-        self.w(struct.pack('<IHHHHIIH', 0x06054B50, 0, 0, min(n, L16), min(n, L16), min(len(blob), L32), min(cd_off, L32), 0))
+        self.w(struct.pack('<IHHHHIIH', 0x06054B50, 0, 0, min(n, L16), min(n, L16), min(len(blob), L32), min(cd_off, L32), len(comment)) + comment)
         self.f.close()
 
 
@@ -246,6 +289,7 @@ def main():
                     'default: that of the first merged IPA given, else org.nxnative.games')
     ap.add_argument('--shell', help='a shell zip (or IPA) whose app to use instead of the first IPA\'s')
     ap.add_argument('--icon', help='a PNG for the app icon (8-bit RGB or RGBA, square) instead of the grid of the games\' icons')
+    ap.add_argument('--link', action='store_true', help='leave the games\' romfs/msl out and record where they are (romfs_data.py push reads them from there)')
     a = ap.parse_args()
     for f in (sys.stdout, sys.stderr):   # a game name a Windows console's code page cannot show must not stop the merge
         try: f.reconfigure(errors='replace')
@@ -273,6 +317,13 @@ def main():
         o = shell_info(z, app_dir(z)).get('SOURCE_SHA')
         if o and o != info.get('SOURCE_SHA'):
             say('note: %s was packed with shell %s, the merged IPA uses %s; repack it if it does not start' % (os.path.basename(z.filename), o[:7], info.get('SOURCE_SHA', '?')[:7]))
+
+    linked_in = [z.filename for z in zs if read_link(z)]
+    if linked_in and not a.link: say('note: %s holds no game data of its own, so this merge links too' % os.path.basename(linked_in[0])); a.link = True
+    if a.link and not plistlib.loads(sz.read(SA + 'Info.plist')).get('DMDataInDocuments'):
+        if linked_in: die('the shell in %s does not read game data from Documents, which a linked IPA needs' % sz.filename)
+        say('note: this shell reads game data only from inside the app, so the data stays in the merged IPA'); a.link = False
+    links = {}   # 'games/<tid>/romfs' -> record
 
     out_A = 'Payload/DmIOS.app/'
     part = a.out + '.partial'
@@ -318,9 +369,27 @@ def main():
             o.add(out_A + 'games/%s/' % g.tid, b'')
             o.add(out_A + 'Frameworks/Guest_%s.framework/' % g.tid, b'')
             n_guest = 0
+            rows = {d: [] for d in DATA_DIRS}; src_pre = {}
             for i, name in g.entries(out_A):
+                rel = name[len(out_A + 'games/%s/' % g.tid):] if name.startswith(out_A + 'games/%s/' % g.tid) else ''
+                d = rel.split('/', 1)[0] if '/' in rel else ''
+                if a.link and d in DATA_DIRS:
+                    if not i.is_dir():
+                        rows[d].append((name, i.file_size, i.CRC))
+                        src_pre.setdefault(d, i.filename[:len(i.filename) - len(rel) + len(d) + 1])
+                    continue
                 o.copy(g.z, i, name); n_guest += name.endswith('/Guest')
             if n_guest != 1: die('%s: its Guest library is missing' % g.name)
+            if a.link:
+                st = os.stat(g.z.filename)
+                for d in DATA_DIRS:
+                    key = 'games/%s/%s' % (g.tid, d)
+                    if rows[d] or key not in g.link:   # the data is in this source (or the game has none of it)
+                        links[key] = {'ipa': os.path.abspath(g.z.filename), 'size': st.st_size, 'mtime': st.st_mtime_ns,
+                                      'prefix': src_pre.get(d, ''), 'id': part_id(rows[d]),
+                                      'bytes': sum(r[1] for r in rows[d]), 'files': len(rows[d])}
+                    else: links[key] = g.link[key]     # a linked source: where it found the data
+
             fw = '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -338,11 +407,12 @@ def main():
             o.add(out_A + 'Frameworks/Guest_%s.framework/Info.plist' % g.tid, fw.encode('utf-8'))
             o.add(out_A + 'games/%s/game.json' % g.tid, json.dumps({'id': g.tid, 'name': g.name, 'version': g.version, 'language': g.language}, ensure_ascii=False, indent=1).encode('utf-8'))
             if g.icon: o.add(out_A + 'games/%s/icon.png' % g.tid, g.icon)
-        o.close()
+        o.close(link_comment({'v': 1, 'parts': links}) if a.link else b'')
     except BaseException:
         o.f.close(); os.unlink(part); raise
     os.replace(part, a.out)
-    say('%d games -> %s (%.2f GB) in %.0f s' % (len(games), a.out, os.path.getsize(a.out) / 2**30, time.time() - t0))
+    say('%d games -> %s (%.2f GB%s) in %.0f s' % (len(games), a.out, os.path.getsize(a.out) / 2**30,
+        ', game data linked: %.2f GB in the games\' own packages' % (sum(r['bytes'] for r in links.values()) / 2**30) if a.link else '', time.time() - t0))
 
 
 if __name__ == '__main__': main()
