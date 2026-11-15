@@ -13,7 +13,7 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py migrate <library ipa> <backups folder> [--udid UDID] [--overwrite]
   saves_data.py put     <ipa> <save folder> <backups folder> [--tid TITLEID] [--slot NAME] [--udid UDID]
   saves_data.py sync    <ipa> <games folder> <backups folder> [--udid UDID]
-  saves_data.py logs    <ipa> <logs folder> [--udid UDID]
+  saves_data.py logs    <ipa> <logs folder> [--udid UDID] [--report TITLEID --zip FILE [--extra DIR]]
   saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
 
 put places one game's save from the PC (what Switch Pad takes when a save is dropped on a game card: an emulator's, JKSV's or
@@ -44,6 +44,10 @@ which the next pack of that game takes with --gl-capture (or --glslc-capture).
 logs copies the app's own logs (Documents/log.txt, log.prev.txt, the other top-level .txt / .log files and each game's own
 last two runs in Documents/logs/) to <logs folder>/<time>/ and prints what the host reported red, grouped: the system functions, services and NVN calls the shell
 does not have yet are what a game stops on, and this is the list to implement next (Ryujinx's HLE, MIT, is the reference).
+With --report it then packs one game's problem report into --zip: that game's logs from this pull (its last two runs, its last two
+crashes kept apart by the shell as logs/<title ID>.crash*.txt, and log.txt / log.prev.txt when that game ran last), a summary of
+their red lines and crash lines, and the files in --extra (Switch Pad's diagnostics, the packing log, the game profile). E-mail
+addresses are masked in every text file. Nothing else from the iPad, no save, key or game file, goes into it.
 
 migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
 packages, org.nxnative.games[.p<hash>]) into the library app, in two halves so the old apps can be deleted before the library
@@ -73,6 +77,7 @@ FOLDERS = ('save', 'save_device', 'save.slots')
 DIGEST = '.digest'
 NOT_INSTALLED = 3
 NOT_IN_APP = 5
+NO_REPORT = 7   # logs --report: nothing of that game on the iPad
 
 
 def skipped(name):
@@ -762,6 +767,54 @@ async def pull_logs(afc, root, now=None):
     return dest
 
 
+EMAIL = re.compile(r'[\w.+-]+@[\w-]+(\.[\w-]+)+')
+
+
+def last_game(text):
+    """The title ID of the game a log ran last (the shell's "boot: game <id> (...)" line), upper case; '' for none."""
+    m = re.findall(r'^boot: game ([0-9A-Fa-f]{16}) ', text, re.M)
+    return m[-1].upper() if m else ''
+
+
+def make_report(dest, tid, zip_path, extra=None):
+    """One game's problem report from a pulled log folder (pull_logs's dest): a zip of that game's logs, a summary and the extra
+    files. Returns the names put in, or None when nothing of that game was pulled."""
+    import zipfile
+    tid = tid.upper()
+    picks = []
+    for name in ('%s.txt', '%s.prev.txt', '%s.crash.txt', '%s.crash.prev.txt'):
+        f = os.path.join(dest, 'logs', name % tid)
+        if os.path.isfile(f): picks.append(('iPad/logs/' + name % tid, f))
+    for name in ('log.txt', 'log.prev.txt'):
+        f = os.path.join(dest, name)
+        if os.path.isfile(f):
+            with open(f, encoding='utf-8', errors='replace') as fh:
+                if last_game(fh.read()) == tid: picks.append(('iPad/' + name, f))
+    if not picks: return None
+    summary = ['Switch Pad 問題回報：%s（%s）' % (tid, datetime.datetime.now().strftime('%Y-%m-%d %H:%M')), '']
+    os.makedirs(os.path.dirname(os.path.abspath(zip_path)), exist_ok=True)
+    put = []
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+        for arc, f in picks:
+            with open(f, encoding='utf-8', errors='replace') as fh: text = fh.read()
+            text = EMAIL.sub('<email>', text)
+            z.writestr(arc, text); put.append(arc)
+            groups, total = red_summary(text, top=15)
+            crash = [l.strip() for l in text.splitlines() if '[dm] CRASH' in l or '[dm] FATAL' in l or 'watchdog: no progress' in l or re.search(r'Break#\d+ reason=', l)]
+            summary.append('== %s：%d 種紅字%s' % (arc, total, '，閃退：' + crash[0][:200] if crash else ''))
+            summary += ['%5d  %s' % (n, msg[:200]) for n, msg in groups]
+            summary.append('')
+        for root, _, files in os.walk(extra or ''):
+            for n in sorted(files):
+                f = os.path.join(root, n); arc = 'PC/' + os.path.relpath(f, extra).replace(os.sep, '/')
+                if n.lower().endswith(('.txt', '.log', '.tsv', '.json', '.md', '.py')):
+                    with open(f, encoding='utf-8', errors='replace') as fh: z.writestr(arc, EMAIL.sub('<email>', fh.read()))
+                else: z.write(f, arc)
+                put.append(arc)
+        z.writestr('摘要.txt', '\r\n'.join(summary)); put.insert(0, '摘要.txt')
+    return put
+
+
 async def on_device(a, work):
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
@@ -790,6 +843,7 @@ def main():
     p = sub.add_parser('restore'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root')
     p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
     p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
+    p.add_argument('--report', default=''); p.add_argument('--zip', default=''); p.add_argument('--extra', default='')
     p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root')
     p = sub.add_parser('sync'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('root')
     p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default=''); p.add_argument('--slot', default='')
@@ -809,8 +863,19 @@ def main():
                     os.rmdir(d); print('%s：不用在 iPad 上記著色器了，拿掉空的記錄資料夾' % n)
         if not games: return 0
         work = lambda afc: gl_sync(afc, games, a.root)
-    elif a.cmd == 'logs': work = lambda afc: pull_logs(afc, a.root)
     elif a.cmd == 'sync': work = lambda afc: sync(afc, a.ipa, a.games, a.root)
+    elif a.cmd == 'logs':
+        if a.report:
+            async def work(afc):
+                dest = await pull_logs(afc, a.root)
+                if not dest: return
+                put = make_report(dest, a.report, a.zip, a.extra)
+                if put: print('\n問題回報存到 %s：%s' % (a.zip, '、'.join(put)))
+                else: print('\niPad 上沒有 %s 這款的記錄：先在 iPad 上打開它一次（打不開也算），再按一次' % a.report.upper()); a.no_report = True
+            a.no_report = False
+            r = asyncio.run(on_device(a, work))
+            return r or (NO_REPORT if a.no_report else 0)
+        work = lambda afc: pull_logs(afc, a.root)
     elif a.cmd == 'put':
         dest = save_dest(a.ipa, a.tid)
         if not dest:
