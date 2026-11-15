@@ -194,50 +194,110 @@ async def push(a):
             for d in todo:
                 if await afc.exists(base + '/' + d): await afc.rm(base + '/' + d, force=True)
 
-            # extra connections to the app's Documents: AFC answers one request at a time per connection
-            want_conn = max(1, min(16, int(os.environ.get('NXN_PUSH_CONN', '4') or 4)))
-            conns = [afc]
-            for _ in range(want_conn - 1):
-                try: conns.append(await (await HouseArrestService.create(lockdown=ld, bundle_id=bid, documents_only=True)).__aenter__())
-                except Exception as e:
-                    print('note: only %d connection(s) to the iPad (%s)' % (len(conns), e)); break
-            t0 = time.time()
+            # The copy survives a dropped connection (2026-11-15: Smash's 18 GB stopped at 14% with WinError 64 and the game
+            # then crashed reading past the end of a half-written data.arc): reconnect and carry on, skipping the files that
+            # were already written whole. A file cut short is written again from its start.
+            done = set()
             state = {'sent': 0, 'shown': -1}
-            try:
-                for d in todo:
-                    js = send[d]
-                    for dd in sorted({(base + '/' + dst).rsplit('/', 1)[0] for _, _, dst in js}):
-                        await afc.makedirs(dd)
-                    queue = asyncio.Queue()
-                    for job in sorted(js, key=lambda j: -j[1].file_size): queue.put_nowait(job)   # big files first, so none is left alone at the end
-
-                    async def worker(c):
-                        while True:
-                            try: zz, i, dst = queue.get_nowait()
-                            except asyncio.QueueEmpty: return
-                            h = await c.fopen(base + '/' + dst, 'w')
-                            try:
-                                with zz.open(i) as src:
-                                    while True:
-                                        b = src.read(4 << 20) if i.file_size < (8 << 20) else await asyncio.to_thread(src.read, 4 << 20)
-                                        if not b: break
-                                        await c.fwrite(h, b)
-                                        state['sent'] += len(b)
-                                        pct = state['sent'] * 100 // max(total, 1)
-                                        if pct != state['shown'] and (pct % 2 == 0 or pct == 100):
-                                            state['shown'] = pct
-                                            print('傳送遊戲資料 %d%%（%d / %d MB）' % (pct, state['sent'] >> 20, total >> 20), flush=True)
-                            finally:
-                                await c.fclose(h)
-                    await asyncio.gather(*(worker(c) for c in conns))
-                    keep[d] = want[d]
-                    await afc.set_file_contents(mark, json.dumps(keep).encode())
-            finally:
-                for c in conns[1:]:
-                    try: await c.__aexit__(None, None, None)
-                    except Exception: pass
+            t0 = time.time()
+            tries = max(1, int(os.environ.get('NXN_PUSH_TRIES', '6') or 6))
+            nconn = 1
+            for attempt in range(1, tries + 1):
+                try:
+                    nconn = await send_round(ld if attempt == 1 else None, a, bid, base, mark, todo, send, keep, want, done, state, total)
+                    break
+                except Exception as e:
+                    if attempt == tries or not is_disconnect(e): raise
+                    left = sum(1 for js in send.values() for j in js if j[2] not in done)
+                    print('連線中斷（%s），%d 秒後重新連線再傳，已完成的檔案不重傳（第 %d / %d 次重試，還剩 %d 個檔）'
+                          % (type(e).__name__, 5 * attempt, attempt, tries - 1, left), flush=True)
+                    state['sent'] = sum(j[1].file_size for js in send.values() for j in js if j[2] in done)
+                    await asyncio.sleep(5 * attempt)
             el = max(time.time() - t0, 0.001)
-            print('game files in place (%d files, %d MB in %.0f s over %d connections, %.1f MB/s)' % (nfiles, total >> 20, el, len(conns), total / el / 2**20))
+            print('game files in place (%d files, %d MB in %.0f s over %d connections, %.1f MB/s)' % (nfiles, total >> 20, el, nconn, total / el / 2**20))
+
+
+def is_disconnect(e):
+    """A dropped link to the iPad (USB unplugged for a moment, the iPad locked, usbmuxd restarted), worth reconnecting for."""
+    names = {type(x).__name__ for x in (e, e.__cause__, e.__context__) if x is not None}
+    return bool(names & {'ConnectionTerminatedError', 'ConnectionResetError', 'ConnectionAbortedError', 'BrokenPipeError',
+                         'ConnectionFailedError', 'ConnectionFailedToUsbmuxdError', 'NoDeviceConnectedError',
+                         'DeviceNotFoundError', 'IncompleteReadError', 'TimeoutError', 'OSError'})
+
+
+async def send_round(ld, a, bid, base, mark, todo, send, keep, want, done, state, total):
+    """One pass over the files not yet in `done`, over fresh connections when `ld` is None (after a drop). Returns the number
+    of connections used."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.house_arrest import HouseArrestService
+    own = ld is None
+    if own:
+        for _ in range(12):   # the iPad may take a while to come back (re-plugged, unlocked)
+            try: ld = await create_using_usbmux(serial=a.udid or None); break
+            except Exception as e:
+                if not is_disconnect(e): raise
+                await asyncio.sleep(5)
+        else:
+            ld = await create_using_usbmux(serial=a.udid or None)
+    try:
+        # extra connections to the app's Documents: AFC answers one request at a time per connection
+        want_conn = max(1, min(16, int(os.environ.get('NXN_PUSH_CONN', '4') or 4)))
+        conns = []
+        for _ in range(want_conn):
+            try: conns.append(await (await HouseArrestService.create(lockdown=ld, bundle_id=bid, documents_only=True)).__aenter__())
+            except Exception as e:
+                if not conns: raise
+                print('note: only %d connection(s) to the iPad (%s)' % (len(conns), e)); break
+        afc = conns[0]
+        try:
+            for d in todo:
+                if keep.get(d) == want[d]: continue
+                js = [j for j in send[d] if j[2] not in done]
+                for dd in sorted({(base + '/' + dst).rsplit('/', 1)[0] for _, _, dst in js}):
+                    await afc.makedirs(dd)
+                queue = asyncio.Queue()
+                for job in sorted(js, key=lambda j: -j[1].file_size): queue.put_nowait(job)   # big files first, so none is left alone at the end
+
+                async def worker(c):
+                    while True:
+                        try: zz, i, dst = queue.get_nowait()
+                        except asyncio.QueueEmpty: return
+                        h = await c.fopen(base + '/' + dst, 'w')
+                        got = 0
+                        try:
+                            with zz.open(i) as src:
+                                while True:
+                                    b = src.read(4 << 20) if i.file_size < (8 << 20) else await asyncio.to_thread(src.read, 4 << 20)
+                                    if not b: break
+                                    await c.fwrite(h, b)
+                                    got += len(b)
+                                    state['sent'] += len(b)
+                                    pct = state['sent'] * 100 // max(total, 1)
+                                    if pct != state['shown'] and (pct % 2 == 0 or pct == 100):
+                                        state['shown'] = pct
+                                        print('傳送遊戲資料 %d%%（%d / %d MB）' % (pct, state['sent'] >> 20, total >> 20), flush=True)
+                        except BaseException:
+                            state['sent'] -= got   # counted again when it is sent again
+                            raise
+                        await c.fclose(h)
+                        done.add(dst)
+                tasks = [asyncio.ensure_future(worker(c)) for c in conns]
+                try: await asyncio.gather(*tasks)
+                except BaseException:
+                    for t in tasks: t.cancel()   # one connection dropped: stop the others before reconnecting
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
+                keep[d] = want[d]
+                await afc.set_file_contents(mark, json.dumps(keep).encode())
+            return len(conns)
+        finally:
+            for c in conns:
+                try: await c.__aexit__(None, None, None)
+                except Exception: pass
+    finally:
+        if own:
+            try: await ld.close()
+            except Exception: pass
 
 
 def main():
