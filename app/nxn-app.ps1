@@ -102,10 +102,12 @@ try {
     Move-ToAppDir
     $appDir = Join-Path $base $appDirName
     $exe = Join-Path $base 'Switch Pad.exe'
-    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path -LiteralPath $exe)) {
-        $ico = Join-Path $appDir '工具\SwitchPad.ico'
-        if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
-        Build-Launcher $exe $ico
+    $ico = Join-Path $appDir '工具\SwitchPad.ico'
+    if (-not (Test-Path $ico)) { $ico = Join-Path $appDir 'SwitchPad.ico' }
+    # 換了圖示（SwitchPad.ico 比 Switch Pad.exe 新）也要重做，不然桌面上一直是舊圖示
+    $stale = (Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $ico) -and (Get-Item -LiteralPath $ico).LastWriteTime -gt (Get-Item -LiteralPath $exe).LastWriteTime
+    if ((Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and (-not (Test-Path -LiteralPath $exe) -or $stale)) {
+        try { Build-Launcher $exe $ico } catch { if (-not $stale) { throw } }
     }
     # 這次是從最上層開的，搬好了就從 程式\ 重開
     if ($here -eq $base -and (Test-Path (Join-Path $appDir 'nxn-app.ps1')) -and -not (Test-Path (Join-Path $base 'nxn-app.ps1'))) {
@@ -170,12 +172,24 @@ $styles = @'
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="Button">
-          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}">
+          <!-- 按下去會微縮、放開彈回（docs/DESIGN.zh-TW.md 的「按下」） -->
+          <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+            <Border.RenderTransform><ScaleTransform/></Border.RenderTransform>
             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <ControlTemplate.Triggers>
             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.82"/></Trigger>
-            <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="b" Property="Opacity" Value="0.7"/>
+              <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.95" Duration="0:0:0.08"/>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.95" Duration="0:0:0.08"/>
+              </Storyboard></BeginStoryboard></Trigger.EnterActions>
+              <Trigger.ExitActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.25"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.5"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="b" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.25"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.5"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+              </Storyboard></BeginStoryboard></Trigger.ExitActions>
+            </Trigger>
             <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
@@ -358,10 +372,10 @@ $xamlText = @'
     <ScrollViewer x:Name="LibraryView" Grid.Row="2" VerticalScrollBarVisibility="Auto">
       <StackPanel Margin="0,0,0,24">
         <TextBlock x:Name="GamesHead" Text="遊戲庫" FontSize="26" FontWeight="Bold" Margin="0,4,0,2"/>
-        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="iPad 上「SwitchPad」App 裡的遊戲。按「移除」拿掉。"/>
+        <TextBlock x:Name="InHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text=""/>
         <UniformGrid x:Name="Library" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
         <TextBlock x:Name="OutHead" Text="還沒加入" FontSize="26" FontWeight="Bold" Margin="0,18,0,2"/>
-        <TextBlock x:Name="OutHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="電腦上有、還不在遊戲庫的遊戲。按「＋ 加入」放進去；把 NSP / XCI / NSZ 拖進視窗可以新增遊戲。"/>
+        <TextBlock x:Name="OutHint" Foreground="#8E8E93" FontSize="13" Margin="0,0,0,10" TextWrapping="Wrap" Text="把 NSP / XCI / NSZ 拖進視窗就能新增遊戲"/>
         <UniformGrid x:Name="Others" Columns="5" VerticalAlignment="Top" Margin="-6,0,8,16"/>
         <TextBlock x:Name="PacksHead" Text="合包" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4" Visibility="Collapsed"
                    ToolTip="好幾款遊戲合成的一個 App。點一下看裡面有哪些遊戲"/>
@@ -434,6 +448,17 @@ function Dark-TitleBar($w) {
             $h = (New-Object Windows.Interop.WindowInteropHelper $s).Handle; $on = 1
             if ([SwitchPad.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$on, 4) -ne 0) { [void][SwitchPad.Dwm]::DwmSetWindowAttribute($h, 19, [ref]$on, 4) }
         } catch { } })
+}
+# 換畫面（遊戲庫 ↔ 進度）時淡入、從下面滑上來一點（docs/DESIGN.zh-TW.md 的動畫）
+function Fade-In($el) {
+    try {
+        $ease = New-Object Windows.Media.Animation.QuadraticEase; $ease.EasingMode = 'EaseOut'
+        $t = New-Object Windows.Media.TranslateTransform 0, 14; $el.RenderTransform = $t
+        $a = New-Object Windows.Media.Animation.DoubleAnimation 0, 1, ([Windows.Duration][TimeSpan]::FromMilliseconds(220)); $a.EasingFunction = $ease
+        $m = New-Object Windows.Media.Animation.DoubleAnimation 14, 0, ([Windows.Duration][TimeSpan]::FromMilliseconds(280)); $m.EasingFunction = $ease
+        $el.BeginAnimation([Windows.UIElement]::OpacityProperty, $a)
+        $t.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $m)
+    } catch { $el.BeginAnimation([Windows.UIElement]::OpacityProperty, $null); $el.Opacity = 1 }
 }
 function Load-Window([string]$text) { $w = [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)); if ($w -is [Windows.Window]) { Dark-TitleBar $w }; $w }
 # 自己的工作列身分，工作列才會用 Switch Pad 的圖示，不是 PowerShell 的
@@ -788,13 +813,25 @@ $cardXaml = @'
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Margin="4" CornerRadius="16" Background="Transparent" BorderThickness="0" BorderBrush="Transparent"
         AllowDrop="True">
+  <!-- 滑鼠移上去，圖示輕輕浮起來 -->
+  <Border.Triggers>
+    <EventTrigger RoutedEvent="MouseEnter"><BeginStoryboard><Storyboard>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.05" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.4"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.05" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.4"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+    </Storyboard></BeginStoryboard></EventTrigger>
+    <EventTrigger RoutedEvent="MouseLeave"><BeginStoryboard><Storyboard>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.18"><DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+          <DoubleAnimation Storyboard.TargetName="IconBox" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.18"><DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+    </Storyboard></BeginStoryboard></EventTrigger>
+  </Border.Triggers>
   <Grid>
     <!-- 左邊窄窄一欄小框框（狀態、版本、DLC、要注意…），右邊是圖示，名字和按鈕對齊圖示；整組置中，格子不用很寬 -->
     <Grid Margin="6,12,6,14" HorizontalAlignment="Center" VerticalAlignment="Top">
       <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="8"/><ColumnDefinition Width="140"/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <StackPanel x:Name="Badges" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-      <Border Grid.Row="0" Grid.Column="2" Width="108" Height="108" HorizontalAlignment="Center">
+      <Border x:Name="IconBox" Grid.Row="0" Grid.Column="2" Width="108" Height="108" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+        <Border.RenderTransform><ScaleTransform/></Border.RenderTransform>
         <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="4" Direction="270" Opacity="0.45" Color="Black"/></Border.Effect>
         <Border x:Name="Icon" CornerRadius="24" Background="#2C2C2E" BorderBrush="#14FFFFFF" BorderThickness="1">
           <TextBlock x:Name="Letter" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="46" FontWeight="SemiBold" Foreground="#F5F5F7"/>
@@ -1193,8 +1230,8 @@ function Build-Library {
     $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
     $onPad = @($ui.Library.Children | Where-Object { $_.Tag.OnPad }).Count
     Head-Count $ui.GamesHead '遊戲庫' $nIn; Head-Count $ui.OutHead '還沒加入' $nOut
-    if (-not $nIn) { $ui.InHint.Text = '遊戲庫還是空的：在下面的遊戲按「＋ 加入」，再按右下角「放進遊戲庫」。' }
-    else { $ui.InHint.Text = "iPad 上 $onPad 款" + $(if ($nIn - $onPad) { "，還有 $($nIn - $onPad) 款沒裝上去" } else { '' }) + '。滑鼠移到卡片的狀態上可以看說明。' }
+    if (-not $nIn) { $ui.InHint.Text = '在下面的遊戲按「加入」，再按「放進遊戲庫」' }
+    else { $ui.InHint.Text = "iPad 上 $onPad 款" + $(if ($nIn - $onPad) { " · $($nIn - $onPad) 款等裝到 iPad" } else { '' }) }
     if (-not $nOut) {
         $t = New-Object Windows.Controls.TextBlock
         $t.Text = if ($cards.Count) { '電腦上的遊戲都在遊戲庫裡了。把 NSP / XCI / NSZ 拖進視窗新增遊戲。' } else { '把 NSP / XCI / NSZ 拖進來新增遊戲' }
@@ -1213,27 +1250,54 @@ function Build-Library {
 # 合包裡每款在 Payload/<App>.app/games/<title ID>/：game.json（id、name、version…）和 icon.png
 $packCache = @{}      # IPA 路徑|修改時間 → 讀到的遊戲清單（讀 zip 目錄要一點時間，不要每次重畫都讀）
 function Read-Pack($ipa) {
-    $key = "$($ipa.FullName)|$($ipa.LastWriteTimeUtc.Ticks)"
+    $key = "$($ipa.FullName)|$($ipa.LastWriteTimeUtc.Ticks)|$($ipa.Length)"
     if ($packCache.ContainsKey($key)) { return $packCache[$key] }
+    # 讀過的遊戲庫清單存在 work\covers\packindex-<雜湊>.json：遊戲庫幾萬個檔，每次開 Switch Pad 都整個掃一遍要好幾秒，畫面會卡住「沒有回應」
+    $md5 = [Security.Cryptography.MD5]::Create()
+    $h = -join ($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))[0..7] | ForEach-Object { $_.ToString('x2') })
+    $idx = Join-Path $coverDir "packindex-$h.json"
+    if (Test-Path -LiteralPath $idx) {
+        try {
+            $arr = ConvertFrom-Json (Get-Content -LiteralPath $idx -Raw -Encoding UTF8)   # PowerShell 5.1 用管線接會把整個陣列當成一筆
+            $games = @(foreach ($x in @($arr)) {
+                $icon = Join-Path $coverDir "pack-$($x.Tid).png"
+                [pscustomobject]@{ Tid = [string]$x.Tid; Name = [string]$x.Name; Version = [string]$x.Version; Icon = $(if (Test-Path -LiteralPath $icon) { $icon } else { '' }) } })
+            $packCache[$key] = $games
+            return $games
+        } catch { }
+    }
     $games = @()
+    $ok = $false
     try {
         $z = [IO.Compression.ZipFile]::OpenRead($ipa.FullName)
         try {
-            foreach ($e in $z.Entries) {
-                if ($e.FullName -notmatch '^Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/game\.json$') { continue }
-                $tid = $Matches[1].ToUpper()
+            # 先一次拿出全部檔名再用 -match 篩（在 .NET 裡跑），不要在 PowerShell 裡一個一個看
+            $names = @([string[]]@($z.Entries.FullName) -match '^Payload/[^/]+\.app/games/[0-9A-Fa-f]{16}/game\.json$')
+            foreach ($n in $names) {
+                $e = $z.GetEntry($n); if (-not $e) { continue }
+                $tid = ($n -split '/')[3].ToUpper()
                 $sr = New-Object IO.StreamReader($e.Open(), [Text.Encoding]::UTF8)
                 try { $j = $sr.ReadToEnd() | ConvertFrom-Json } finally { $sr.Dispose() }
                 $icon = Join-Path $coverDir "pack-$tid.png"
-                $ie = $z.GetEntry(($e.FullName -replace 'game\.json$', 'icon.png'))
+                $ie = $z.GetEntry(($n -replace 'game\.json$', 'icon.png'))
                 if ($ie -and -not (Test-Path -LiteralPath $icon)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($ie, $icon, $true) }
                 $games += [pscustomobject]@{ Tid = $tid; Name = $(if ($j.name) { $j.name } else { $tid }); Version = [string]$j.version
                                             Icon = $(if (Test-Path -LiteralPath $icon) { $icon } else { '' }) }
             }
+            $ok = $true
         } finally { $z.Dispose() }
     } catch { }
     $games = @($games | Sort-Object Name)
     $packCache[$key] = $games
+    if ($ok) {
+        try {
+            # 合成新的遊戲庫後舊清單就用不到，放超過 30 天的清掉
+            Get-ChildItem -LiteralPath $coverDir -Filter 'packindex-*.json' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } | Remove-Item -ErrorAction SilentlyContinue
+            ConvertTo-Json -InputObject @($games | ForEach-Object { [pscustomobject]@{ Tid = $_.Tid; Name = $_.Name; Version = $_.Version } }) -Depth 3 |
+                Set-Content -LiteralPath $idx -Encoding UTF8
+        } catch { }
+    }
     return $games
 }
 # 合包在 iPad 上的圖示（nxn_merge.py 把幾款的圖示拼成一張），跟著檔案的修改時間快取
@@ -1955,6 +2019,7 @@ function Add-Jobs($jobs) {
     }
 }
 function Show-Progress {
+    if ($ui.ProgressView.Visibility -ne 'Visible') { Fade-In $ui.ProgressView }
     $ui.LibraryView.Visibility = 'Collapsed'; $ui.ProgressView.Visibility = 'Visible'; $ui.RenewBtn.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Collapsed'
     $ui.Options.Visibility = 'Hidden'; $ui.Start.Visibility = 'Collapsed'; $ui.Sync.Visibility = 'Collapsed'
     $ui.Stop.Visibility = 'Visible'; $ui.Back.Content = '回遊戲庫'; $ui.Back.Visibility = 'Visible'
@@ -2454,7 +2519,7 @@ $backTimer.Add_Tick({
 })
 $ui.Back.Add_Click({
     $backTimer.Stop()
-    $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'
+    $ui.ProgressView.Visibility = 'Collapsed'; $ui.LibraryView.Visibility = 'Visible'; Fade-In $ui.LibraryView
     $ui.Back.Visibility = 'Collapsed'; $ui.Start.Visibility = 'Visible'; $ui.Sync.Visibility = 'Visible'; $ui.Options.Visibility = 'Visible'
     # 還在跑：回遊戲庫看、加遊戲排隊，「查看進度」回來
     if ($state.Running) { $ui.Stop.Visibility = 'Collapsed'; $ui.ShowProg.Visibility = 'Visible' }
