@@ -246,6 +246,8 @@ def main():
                     'default: that of the first merged IPA given, else org.nxnative.games')
     ap.add_argument('--shell', help='a shell zip (or IPA) whose app to use instead of the first IPA\'s')
     ap.add_argument('--icon', help='a PNG for the app icon (8-bit RGB or RGBA, square) instead of the grid of the games\' icons')
+    ap.add_argument('--hd-icons', metavar='DIR', help='a cache of large eShop icons (icon_hd.py): fetch the missing ones and put each '
+                    'game\'s in as its dm/icon.jpg, which the picker shows; a game with none keeps its own 256-pixel icon')
     a = ap.parse_args()
     for f in (sys.stdout, sys.stderr):   # a game name a Windows console's code page cannot show must not stop the merge
         try: f.reconfigure(errors='replace')
@@ -273,6 +275,19 @@ def main():
         o = shell_info(z, app_dir(z)).get('SOURCE_SHA')
         if o and o != info.get('SOURCE_SHA'):
             say('note: %s was packed with shell %s, the merged IPA uses %s; repack it if it does not start' % (os.path.basename(z.filename), o[:7], info.get('SOURCE_SHA', '?')[:7]))
+
+    hd = {}
+    if a.hd_icons:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import icon_hd
+            res = icon_hd.fetch(a.hd_icons, [(g.tid, g.name) for g in games])
+            for g in games:
+                b = icon_hd.cached(a.hd_icons, g.tid)
+                if b: hd[g.tid] = b
+                else: say('%s keeps its own icon: %s' % (g.name, res.get(g.tid, '?')))
+            say('large icons: %d of %d games' % (len(hd), len(games)))
+        except Exception as e: say('note: no large icons this time (%s)' % e)   # never stops the merge
 
     out_A = 'Payload/DmIOS.app/'
     part = a.out + '.partial'
@@ -318,8 +333,11 @@ def main():
             o.add(out_A + 'games/%s/' % g.tid, b'')
             o.add(out_A + 'Frameworks/Guest_%s.framework/' % g.tid, b'')
             n_guest = 0
+            big = out_A + 'games/%s/dm/icon.jpg' % g.tid
             for i, name in g.entries(out_A):
+                if name == big and g.tid in hd: continue
                 o.copy(g.z, i, name); n_guest += name.endswith('/Guest')
+            if g.tid in hd: o.add(big, hd[g.tid])
             if n_guest != 1: die('%s: its Guest library is missing' % g.name)
             fw = '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
