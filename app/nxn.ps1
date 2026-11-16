@@ -201,7 +201,10 @@ try {
             $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
             # 執行時才用 GLSLC 編譯著色器的 NVN 遊戲（Unrailed 2）記下的是 <hash>.glslc，放在同一個資料夾
             $glslcN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.glslc$' }).Count
-            if ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
+            # 執行時才產生 SPIR-V 的 Vulkan 遊戲（瑪利歐銀河 1、2）記下的是 <key>.spv：第一次打包沒有畫面，iPad 上開一次（約一分鐘）就記好
+            $spvN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.spv$' }).Count
+            if ($spvN) { $glArg = @('--vk-capture', $glDir); Write-Host "Vulkan 著色器：用 iPad 上記下的 $spvN 個" }
+            elseif ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
             elseif ($glslcN) { $glArg = @('--glslc-capture', $glDir); Write-Host "執行時編譯的著色器：用 iPad 上記下的 $glslcN 個" }
             # 著色器太多、只放用到的那些的 Unity 遊戲（Overcooked、Pummel Party）：iPad 記下缺的著色器 <run>.keys，下次打包補翻這些
             $keysN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.keys$' }).Count

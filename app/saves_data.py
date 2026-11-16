@@ -26,8 +26,8 @@ Save slots: the shell keeps the save in use where it always was and every other 
 are inside save/, so backup and restore take them along with the rest; a one-game app's save.slots is one of FOLDERS for that.
 
 glsync is for games whose shaders exist only while they run: an OpenGL game (Roof Rage) records each GLSL shader it
-compiles to Documents/<DM_GL_CAPTURE>, an NVN game compiling GLSL with GLSLC (Unrailed 2) each output to <DM_GLSLC_CAPTURE> (gl_capture/<title ID>
-or glslc_capture/<title ID>, set in the game's dm/env.txt). It makes those folders on
+compiles to Documents/<DM_GL_CAPTURE>, an NVN game compiling GLSL with GLSLC (Unrailed 2) each output to <DM_GLSLC_CAPTURE>, a Vulkan game generating SPIR-V at run time
+(Super Mario Galaxy 1 and 2) each module to <DM_VK_CAPTURE> (gl_capture/<title ID>, glslc_capture/<title ID> or vk_capture/<title ID>, set in the game's dm/env.txt). It makes those folders on
 the iPad (the host only writes files into one that exists) and copies what was recorded to <shaders folder>/<title ID>/,
 which the next pack of that game takes with --gl-capture (or --glslc-capture).
 
@@ -413,7 +413,8 @@ def gl_games(ipa):
     """{title ID: Documents-relative folder} of the games in a package that record their shaders on the iPad: the GLSL an OpenGL
     game compiles (DM_GL_CAPTURE in dm/env.txt, Roof Rage) or the GLSLC outputs an NVN game compiles at run time
     (DM_GLSLC_CAPTURE, Unrailed 2), or the keys of the shaders a Unity game packed with only the ones it uses lacks (DM_SHADER_RECORD, Overcooked! All You Can Eat,
-    Pummel Party). A game has one of them, so all go to the same <shaders folder>/<title ID>."""
+    Pummel Party), or the SPIR-V a Vulkan game generates at run time (DM_VK_CAPTURE, Super Mario Galaxy 1 and 2). A game has one of them, so all go to the
+    same <shaders folder>/<title ID>."""
     out = {}
     with zipfile.ZipFile(ipa) as z:
         for n in z.namelist():
@@ -421,11 +422,11 @@ def gl_games(ipa):
             if not m: continue
             for line in z.read(n).decode('utf-8', 'replace').splitlines():
                 k, _, v = line.partition('=')
-                if k.strip() in ('DM_GL_CAPTURE', 'DM_GLSLC_CAPTURE', 'DM_SHADER_RECORD') and v.strip() and not v.strip().startswith('/'): out[m.group(1).upper()] = v.strip()
+                if k.strip() in ('DM_GL_CAPTURE', 'DM_GLSLC_CAPTURE', 'DM_SHADER_RECORD', 'DM_VK_CAPTURE') and v.strip() and not v.strip().startswith('/'): out[m.group(1).upper()] = v.strip()
     return out
 
 
-SHADER_FILE = re.compile(r'[0-9a-f]{16}\.(vert|frag|glslc|keys)')   # what the host writes: <key>.vert / .frag (hle_gl.m), <hash>.glslc (hle_glslc.c), <run>.keys (nvn_mtl.m shader_record_miss)
+SHADER_FILE = re.compile(r'[0-9a-f]{16}\.(vert|frag|glslc|keys|spv)')   # what the host writes: <key>.vert / .frag (hle_gl.m), <hash>.glslc (hle_glslc.c), <run>.keys (nvn_mtl.m shader_record_miss), <key>.spv (hle_vk.m)
 
 
 async def gl_sync(afc, games, root):
