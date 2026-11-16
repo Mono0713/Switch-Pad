@@ -252,6 +252,29 @@ class GlSync(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_recorded_shader_keys_grow_and_are_taken_again(self):
+        import zipfile
+        tmp = tempfile.mkdtemp()
+        try:
+            ipa = os.path.join(tmp, 'lib.ipa')
+            tid = '0100F8F0000A2000'
+            with zipfile.ZipFile(ipa, 'w') as z:
+                z.writestr('Payload/DmIOS.app/games/%s/dm/env.txt' % tid, 'DM_SHADER_RECORD=shader_used/%s\n' % tid)
+            games = sd.gl_games(ipa)
+            self.assertEqual(games, {tid: 'shader_used/' + tid})
+            dev = os.path.join(tmp, 'dev'); os.makedirs(os.path.join(dev, 'Documents'))
+            out = os.path.join(tmp, 'out')
+            rec = os.path.join(dev, 'Documents', 'shader_used', tid)
+            write(os.path.join(rec, '6560000100000abc.keys'), b'00000000000000aa\n00000000000000bb\n')
+            self.assertEqual(asyncio.run(sd.gl_sync(FakeAfc(dev), games, out)), {tid: 2})
+            # the same run kept playing: its file grew, and is taken again
+            write(os.path.join(rec, '6560000100000abc.keys'), b'00000000000000aa\n00000000000000bb\n00000000000000cc\n')
+            write(os.path.join(rec, '6560000200000abd.keys'), b'00000000000000aa\n00000000000000dd\n')
+            self.assertEqual(asyncio.run(sd.gl_sync(FakeAfc(dev), games, out)), {tid: 4})
+            self.assertEqual(sorted(os.listdir(os.path.join(out, tid))), ['6560000100000abc.keys', '6560000200000abd.keys'])
+        finally:
+            shutil.rmtree(tmp)
+
 
 if __name__ == '__main__':
     unittest.main()
