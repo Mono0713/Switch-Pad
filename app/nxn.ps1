@@ -203,6 +203,9 @@ try {
             $glslcN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.glslc$' }).Count
             if ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
             elseif ($glslcN) { $glArg = @('--glslc-capture', $glDir); Write-Host "執行時編譯的著色器：用 iPad 上記下的 $glslcN 個" }
+            # 著色器太多、只放用到的那些的 Unity 遊戲（Overcooked、Pummel Party）：iPad 記下缺的著色器 <run>.keys，下次打包補翻這些
+            $keysN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.keys$' }).Count
+            if ($keysN) { $glArg += @('--used-shaders', $glDir); Write-Host "只放用到的著色器：加上 iPad 這 $keysN 次遊玩記下缺的著色器" }
         }
         if ($ReuseIfFresh -and $Out -and (Test-Path -LiteralPath $Out)) {
             $part = Get-Item -LiteralPath $Out
