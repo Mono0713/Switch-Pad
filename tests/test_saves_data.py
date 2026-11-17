@@ -322,6 +322,33 @@ class Logs(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_report(self):
+        import zipfile
+        tmp = tempfile.mkdtemp()
+        try:
+            docs = os.path.join(tmp, 'dev', 'Documents')
+            tid = '0100B87017D94000'
+            write(os.path.join(docs, 'log.txt'), ('boot: game %s (Bomberman) of the games in this package\n'
+                  '[RED] sf: the game opens service friend:u, which the host does not implement\n'
+                  'Break#1 reason=0 Result=0xe15 svc at sdk+0x1234 a@b.com\n' % tid).encode())
+            write(os.path.join(docs, 'log.prev.txt'), b'boot: game 0100FFFF00000000 (Other) of the games in this package\n')
+            write(os.path.join(docs, 'logs', tid + '.crash.txt'), b'[dm] CRASH sig=11\n')
+            write(os.path.join(docs, 'logs', '0100FFFF00000000.txt'), b'other game\n')
+            extra = os.path.join(tmp, 'extra'); write(os.path.join(extra, 'diagnostics.txt'), b'mail me@example.org')
+            dest = asyncio.run(sd.pull_logs(FakeAfc(os.path.join(tmp, 'dev')), os.path.join(tmp, 'out'), now=at(0)))
+            z = os.path.join(tmp, 'r', 'report.zip')
+            put = sd.make_report(dest, tid.lower(), z, extra)
+            self.assertEqual(put, ['摘要.txt', 'iPad/logs/%s.crash.txt' % tid, 'iPad/log.txt', 'PC/diagnostics.txt'])
+            with zipfile.ZipFile(z) as zf:
+                self.assertNotIn('a@b.com', zf.read('iPad/log.txt').decode())
+                self.assertNotIn('me@example.org', zf.read('PC/diagnostics.txt').decode())
+                summary = zf.read('摘要.txt').decode()
+            self.assertIn('閃退：[dm] CRASH sig=11', summary)
+            self.assertIn('friend:u', summary)
+            self.assertIsNone(sd.make_report(dest, '0100AAAA00000000', os.path.join(tmp, 'none.zip')))
+        finally:
+            shutil.rmtree(tmp)
+
 
 class GlSync(unittest.TestCase):
     def test_games_and_sync(self):
