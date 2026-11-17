@@ -60,7 +60,7 @@ function Move-ToAppDir {
     $appDir = Join-Path $base $appDirName
     $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'nxn[\w-]*\.ps1' })
-    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
+    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'icon_hd.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
         ForEach-Object { Get-ChildItem -LiteralPath $base -File -Filter $_ -ErrorAction SilentlyContinue }
     $dirs = @('work', '工具') | ForEach-Object { Join-Path $base $_ } | Where-Object { Test-Path -LiteralPath $_ }
     if (-not ($plain.Count + @($dirs).Count)) { return }
@@ -366,6 +366,33 @@ $xamlText = @'
           <TextBlock x:Name="NoticeText" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
         </DockPanel>
       </Border>
+      <!-- 背景工作：打包、背景佇列、傳到 iPad 的進度（讀 work\status\*.json，有在做或 6 小時內做過才出現） -->
+      <Border x:Name="Bg" Background="#1C1C1E" CornerRadius="14" Padding="16,12" Margin="0,0,0,14" Visibility="Collapsed"
+              BorderBrush="#14FFFFFF" BorderThickness="1">
+        <StackPanel>
+          <DockPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Border Background="#2C2C2E" CornerRadius="7" Padding="9,3"><TextBlock x:Name="BgDisk" FontSize="12" Foreground="#C7C7CC"/></Border>
+              <Button x:Name="BgMore" Content="清單" FontSize="12" Padding="11,3" Margin="8,0,0,0" Visibility="Collapsed"/>
+            </StackPanel>
+            <Ellipse x:Name="BgDot" Width="8" Height="8" Fill="#0A84FF" Margin="0,0,10,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="BgTitle" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          </DockPanel>
+          <TextBlock x:Name="BgSub" FontSize="12" Foreground="#8E8E93" Margin="18,3,0,0" TextTrimming="CharacterEllipsis"/>
+          <WrapPanel x:Name="BgTags" Margin="18,8,0,0"/>
+          <StackPanel x:Name="BgPush" Margin="18,10,0,0" Visibility="Collapsed">
+            <DockPanel>
+              <TextBlock x:Name="BgPushR" DockPanel.Dock="Right" FontSize="12" Foreground="#8E8E93"/>
+              <TextBlock x:Name="BgPushL" FontSize="12" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+            <Border x:Name="BgTrack" Height="4" CornerRadius="2" Background="#2C2C2E" Margin="0,6,0,0">
+              <Border x:Name="BgFill" HorizontalAlignment="Left" Width="0" CornerRadius="2" Background="#0A84FF"/>
+            </Border>
+          </StackPanel>
+          <TextBlock x:Name="BgNote" FontSize="12" Foreground="#C7C7CC" Margin="18,8,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+          <StackPanel x:Name="BgList" Margin="18,10,0,0" Visibility="Collapsed"/>
+        </StackPanel>
+      </Border>
     </StackPanel>
 
     <!-- 遊戲庫 -->
@@ -500,7 +527,8 @@ if (Test-Path $appIcon) {
 $ui = @{}
 foreach ($n in 'AppLogo','AcctDot','Account','Login','Refresh','Settings','Subtitle','RenewBtn','LibraryView','Library','Notice','NoticeText','NoticeBtn','GamesHead','PacksHead','Packs','TabGames','TabPacks','InHint','OutHead','OutHint','Others',
                'ProgressView','ProgTitle','ProgTotal','Busy','Jobs','Stop','Back','Start','Sync','Options','SelCount',
-               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg','DoneBox','DoneJobs') { $ui[$n] = $win.FindName($n) }
+               'ModeBoth','ModePack','ModeInstall','Separate','Merge','ShellLabel','SelSub','ShowProg','DoneBox','DoneJobs',
+               'Bg','BgDisk','BgMore','BgDot','BgTitle','BgSub','BgTags','BgPush','BgPushL','BgPushR','BgTrack','BgFill','BgNote','BgList') { $ui[$n] = $win.FindName($n) }
 
 function Brush($hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
 function Esc($s) { [Security.SecurityElement]::Escape([string]$s) }
@@ -1184,7 +1212,7 @@ function Build-Library {
         if ($state.Job -and $state.Job.Game.Dir -eq $g.Dir) { $st.Text = '● 轉換中'; $st.Foreground = $blue; $g.Order = 0 }
         elseif ($state.Running -and @(Busy-Dirs) -contains $g.Dir) { $st.Text = '● 排隊中'; $st.Foreground = $gray; $g.Order = 0 }
         elseif ($g.InLib -and -not $g.Ready -and $why) { $st.Text = '● 轉換失敗'; $st.Foreground = $red; $st.ToolTip = "$why。右上角選單「最近的記錄」看完整記錄；其他遊戲不受影響"; $g.Order = 0 }
-        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = '著色器要在 iPad 上記下來的遊戲（OpenGL 或執行時才編譯著色器）：第一次沒有畫面，玩一下讓 iPad 記下它用的著色器，再接著電腦按「裝到 iPad」，就會有畫面'; $g.Order = 1 }
+        elseif ($g.InLib -and $g.OnPad -and $glN -eq 0) { $st.Text = '● 到 iPad 上玩一下'; $st.Foreground = $orange; $st.ToolTip = '著色器要在 iPad 上記下來的遊戲（OpenGL、執行時才編譯著色器，或著色器太多只放用到的那些）：玩一下讓 iPad 記下它用的著色器（第一次可能沒有畫面或少了一些東西），再接著電腦按「放進遊戲庫」或「裝到 iPad」補上'; $g.Order = 1 }
         elseif ($g.InLib -and $g.OnPad -and -not $g.Ready) { $st.Text = '● 要重新轉換'; $st.Foreground = $orange; $st.ToolTip = '換了新的殼或遊戲檔有更新：按「放進遊戲庫」重新轉換，iPad 上的這款先照舊能玩'; $g.Order = 1 }
         elseif ($g.InLib -and $g.Newer) { $st.Text = '● 等更新到 iPad'; $st.Foreground = $blue; $st.ToolTip = 'iPad 上的是舊的版本（換了殼或重新轉換過），按「裝到 iPad」換成新的，存檔都留著'; $g.Order = 2 }
         elseif ($g.InLib -and $g.OnPad) { $st.Text = '● 在 iPad 上'; $st.Foreground = $green; if ($glN -gt 0) { $st.ToolTip = "iPad 記下的著色器 $glN 個" }; $g.Order = 4 }
@@ -2268,7 +2296,8 @@ function Shell-Changed($shell) {
 function Library-Look {
     $icon = Join-Path $here 'LibraryIcon.png'
     $h = if (Test-Path -LiteralPath $icon) { (Get-FileHash -LiteralPath $icon -Algorithm SHA256).Hash.Substring(0, 16) } else { '' }
-    "$libAppName|$h"
+    # |hd：合成時放進高清遊戲圖示（icon_hd.py）之後的第一次要重新合成一次，舊的遊戲庫才會換上
+    "$libAppName|$h|hd"
 }
 function Look-Changed {
     $lib = Library-Ipa
@@ -2379,6 +2408,22 @@ function Run-Convert($dirs) {
     Start-Run $jobs
 }
 
+# 遊戲庫只放 App 本身（--link）：遊戲資料（romfs、著色器，幾十 GB）留在各遊戲包裡，裝到 iPad 時 romfs_data.py 從那裡直接傳。
+# 合成不用再把全部遊戲資料重寫一份（26 款要寫 45 GB、5 分鐘），也不用另外做小 App。打包器帶的舊版 nxn_merge.py 沒有這個選項就照舊
+function Merge-CanLink($mg) {
+    try { return [bool](Select-String -LiteralPath $mg -Pattern "add_argument\('--link'" -Quiet) } catch { return $false }
+}
+# 遊戲庫是不是已經是連結式的：zip 的註解（檔案最後面）有 nxn_merge.py 的 NXNLINK 記錄
+function Lib-IsLinked($ipa) {
+    try {
+        $fs = [IO.File]::OpenRead($ipa)
+        try {
+            $n = [int][Math]::Min($fs.Length, 70000); [void]$fs.Seek(-$n, 'End')
+            $b = New-Object byte[] $n; $o = 0; while ($o -lt $n) { $r = $fs.Read($b, $o, $n - $o); if ($r -le 0) { break }; $o += $r }
+            return [Text.Encoding]::ASCII.GetString($b).Contains('NXNLINK')
+        } finally { $fs.Dispose() }
+    } catch { return $false }
+}
 # 遊戲庫合成的指令：用打包成功的遊戲包，加上本來就在遊戲庫、這次沒重包成功但舊的遊戲包還在的
 function Library-Call($lib, $fail) {
     $libIpa = Library-Ipa
@@ -2393,15 +2438,18 @@ function Library-Call($lib, $fail) {
     $newer = @($use | Where-Object { $_.WasIn -and (-not $libT -or (Get-Item -LiteralPath $_.Path).LastWriteTime -gt $libT) })
     $newShell = Shell-Changed $lib.Shell
     $newLook = Look-Changed
-    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $newLook)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    # 還是舊式（遊戲資料整份在包裡）的遊戲庫：重新合成一次換成連結式，電腦上少 40 幾 GB，iPad 上的資料對得上不會重傳
+    $relink = (Test-Path -LiteralPath $libIpa) -and (Merge-CanLink $lib.Merge) -and -not (Lib-IsLinked $libIpa)
+    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $newLook -and -not $relink)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
     $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
             $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' }) +
-            $(if ($newShell) { '，換新殼' } elseif ($newLook) { "，App 改名 $libAppName、換圖示" } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } else { '' })
+            $(if ($newShell) { '，換新殼' } elseif ($newLook) { "，App 改名 $libAppName、換圖示" } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } elseif ($relink) { '，改成遊戲資料不重複存一份' } else { '' })
     $tmp = "$libIpa.new"
     $icon = Join-Path $here 'LibraryIcon.png'
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
             "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libAppName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
-            $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
+            $(if (Merge-CanLink $lib.Merge) { ' --link' } else { '' }) +
+            $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + $(if (Select-String -LiteralPath $lib.Merge -Pattern 'hd-icons' -SimpleMatch -Quiet) { " --hd-icons $(Quote (Join-Path $coverDir 'hd'))" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
             "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +
             "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; " +
@@ -2425,6 +2473,9 @@ $failHints = @(
     @{ Re = 'cannot dispatch the .* gate|older than this packer|built before the shell route|ignores dm/env\.txt|this is not a shell'; Msg = '殼太舊，跟打包器不合：到設定按「改用最新殼」再轉一次' }
     @{ Re = 'run-time shader capture boots the game in the Mac host|cannot pack .* on Windows|captures them by booting the game on a Mac'; Msg = '這款的著色器是遊戲執行時才產生的（Vulkan / OpenGL），要先在 iPad 上錄：換支援錄著色器的殼再轉' }
     @{ Re = 'no shader libraries were produced|none of the \d+ shaders .* translates|no shader translator'; Msg = '著色器轉成 iPad 格式那一步失敗。請把「最近的記錄」給 Claude 看' }
+    @{ Re = 'does not belong to this base dump';            Msg = '更新檔壞了，或跟遊戲本體不是同一套（本體自己檢查沒問題）：重新下載更新檔，最好本體和更新從同一個來源拿，再轉一次' }
+    @{ Re = "base NSP's own RomFS fails too";               Msg = '遊戲本體的 NSP 壞了（下載不完整或檔案損毀）：重新下載本體再轉一次' }
+    @{ Re = 'the NSP is damaged';                           Msg = '遊戲檔沒通過雜湊檢查（下載不完整或檔案損毀）：重新下載本體和更新檔再轉一次' }
     @{ Re = 'extracting .* failed \(exit|nx_extract did not appear'; Msg = '解包失敗：遊戲檔可能不完整，或 prod.keys 太舊。重新下載遊戲檔，或到設定的「金鑰」換新的 prod.keys' }
     @{ Re = 'rewriting \S+ failed \(exit';                Msg = '改寫遊戲程式那一步失敗。請把「最近的記錄」給 Claude 看' }
     @{ Re = 'no game profile for title ID|做不出暫定設定檔'; Msg = '這款沒有設定檔，自動推導也失敗了。請把「最近的記錄」給 Claude 看' }
@@ -2433,6 +2484,9 @@ $failHints = @(
 )
 function Fail-Reason($log) {
     $lines = @(Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue)
+    # 打包器自己已經用中文說明的失敗（解包：金鑰太舊、哪個檔案損毀），原樣顯示
+    $l = @($lines | Where-Object { $_ -match '\[x\] .*[\u4e00-\u9fff]{2}' }) | Select-Object -Last 1
+    if ($l) { return ($l -replace '^.*?\[x\]\s*', '').Trim() }
     foreach ($h in $failHints) { if ($lines -match $h.Re) { return $h.Msg } }
     $l = @($lines | Where-Object { $_ -match '\[x\] precheck: ' }) | Select-Object -Last 1
     if ($l) { return ($l -replace '^.*precheck:\s*', '').Trim() }
@@ -2443,6 +2497,227 @@ function Fail-Reason($log) {
     if ($l) { return '沒見過的錯誤：' + ($l -replace '^\[[\d:]+\]\s*', '').Trim() }
     return '打包失敗'
 }
+
+# ---------------------------------------------------------------- 背景工作卡片：讀 work\status\*.json（每 3 秒）
+# run-<PID>.json：nxn.ps1 每一款（Switch Pad 自己開的、nxn-queue.ps1 開的、命令列直接跑的都有）
+# push-<PID>.json：romfs_data.py 傳遊戲資料到 iPad；queue-<名稱>.json：背景佇列（nxn-queue.ps1 或照同樣格式寫的程式）
+$statusDir = Join-Path $work 'status'
+$bg = @{ Open = $false; Cleaned = [datetime]::MinValue; Frac = 0.0 }
+function To-Date($v) { if ($v -is [datetime]) { return $v }; if (-not $v) { return $null }; try { return [datetime]::Parse([string]$v) } catch { return $null } }
+function Fmt-Dur($sec) {
+    $sec = [math]::Max(0, [double]$sec)
+    if ($sec -lt 60) { return '不到 1 分' }
+    $m = [math]::Round($sec / 60)
+    if ($m -lt 60) { return "$m 分" }
+    $h = [math]::Floor($m / 60); $m = $m % 60
+    if ($m) { "$h 小時 $m 分" } else { "$h 小時" }
+}
+function Fmt-GB($b) { '{0:N1} GB' -f ([double]$b / 1GB) }
+function Pid-Alive($id) { if (-not $id) { return $false }; [bool](Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue) }
+function Read-Status {
+    $all = @()
+    if (-not (Test-Path -LiteralPath $statusDir)) { return $all }
+    $now = Get-Date
+    foreach ($f in Get-ChildItem -LiteralPath $statusDir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
+        if ($f.Name -eq 'pack-times.json') { continue }
+        $j = $null
+        try { $j = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }   # 剛好在寫：下次再讀
+        if (-not $j -or -not $j.kind) { continue }
+        $alive = Pid-Alive $j.pid
+        # 跑到一半程式沒了（被停止、關機）：當成中斷
+        if ($j.state -eq 'running' -and -not $alive) {
+            $j.state = 'failed'
+            if (-not $j.message) { $j | Add-Member -NotePropertyName message -NotePropertyValue '中斷了（程式被停止）' -Force }
+            if (-not $j.ended) { $j | Add-Member -NotePropertyName ended -NotePropertyValue $f.LastWriteTime.ToString('o') -Force }
+            if ($j.kind -eq 'queue') {
+                $j.state = 'stopped'
+                foreach ($it in @($j.items)) { if ($it.state -in 'running', 'queued') { $it.state = 'skipped'; $it | Add-Member -NotePropertyName message -NotePropertyValue '佇列停了' -Force } }
+            }
+        }
+        $end = To-Date $j.ended; if (-not $end) { $end = $f.LastWriteTime }
+        # 一天前結束的拿掉（一小時清一次）；6 小時內結束的還顯示在卡片上
+        if ($j.state -ne 'running' -and ($now - $end).TotalHours -gt 24) {
+            if (($now - $bg.Cleaned).TotalMinutes -gt 60) { Remove-Item -LiteralPath $f.FullName -ErrorAction SilentlyContinue }
+            continue
+        }
+        if ($j.state -ne 'running' -and ($now - $end).TotalHours -gt 6) { continue }
+        $j | Add-Member -NotePropertyName _end -NotePropertyValue $end -Force
+        $j | Add-Member -NotePropertyName _start -NotePropertyValue (To-Date $j.started) -Force
+        $all += $j
+    }
+    if (($now - $bg.Cleaned).TotalMinutes -gt 60) { $bg.Cleaned = $now }
+    return $all
+}
+function Pack-Times {
+    $t = @{}
+    try { ([IO.File]::ReadAllText((Join-Path $statusDir 'pack-times.json')) | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $t[$_.Name] = [double]$_.Value } } catch { }
+    $t
+}
+function Bg-Tag($text, $fg, $bgc = '#2C2C2E') {
+    $b = New-Object Windows.Controls.Border; $b.CornerRadius = '7'; $b.Padding = '9,3'; $b.Margin = '0,0,6,4'; $b.Background = Brush $bgc
+    $t = New-Object Windows.Controls.TextBlock; $t.Text = $text; $t.FontSize = 12; $t.Foreground = Brush $fg
+    $b.Child = $t; [void]$ui.BgTags.Children.Add($b)
+}
+function Bg-Row($glyph, $color, $name, $right, $msg) {
+    $sp = New-Object Windows.Controls.StackPanel; $sp.Margin = '0,0,0,6'
+    $d = New-Object Windows.Controls.DockPanel
+    $r = New-Object Windows.Controls.TextBlock; $r.Text = $right; $r.FontSize = 12; $r.Foreground = Brush '#8E8E93'
+    [Windows.Controls.DockPanel]::SetDock($r, 'Right'); [void]$d.Children.Add($r)
+    $g = New-Object Windows.Controls.TextBlock; $g.Text = $glyph; $g.Width = 18; $g.FontSize = 12; $g.Foreground = Brush $color
+    [Windows.Controls.DockPanel]::SetDock($g, 'Left'); [void]$d.Children.Add($g)
+    $n = New-Object Windows.Controls.TextBlock; $n.Text = $name; $n.FontSize = 13; $n.TextTrimming = 'CharacterEllipsis'; [void]$d.Children.Add($n)
+    [void]$sp.Children.Add($d)
+    if ($msg) {
+        $m = New-Object Windows.Controls.TextBlock; $m.Text = $msg; $m.FontSize = 12; $m.Margin = '18,1,0,0'; $m.TextWrapping = 'Wrap'
+        $m.Foreground = Brush $(if ($glyph -eq '✕') { '#FF453A' } else { '#8E8E93' })
+        [void]$sp.Children.Add($m)
+    }
+    [void]$ui.BgList.Children.Add($sp)
+}
+$whatName = @{ pack = '打包'; both = '打包並安裝'; install = '裝到 iPad'; glsync = '同步著色器'; logs = '讀 iPad 記錄'; saves = '存檔'; login = '登入' }
+function Update-Bg {
+    # Switch Pad 自己的進度頁開著時那頁就有細節，不重複
+    if ($ui.ProgressView.Visibility -eq 'Visible') { $ui.Bg.Visibility = 'Collapsed'; return }
+    $all = @(Read-Status)
+    $runs = @($all | Where-Object { $_.kind -eq 'run' })
+    $pushes = @($all | Where-Object { $_.kind -eq 'push' })
+    $queues = @($all | Where-Object { $_.kind -eq 'queue' -and $_.items })
+    if (-not $all.Count) { $ui.Bg.Visibility = 'Collapsed'; return }
+    $now = Get-Date
+    try {
+        $drv = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($base))
+        $ui.BgDisk.Text = "$($drv.Name.TrimEnd('\')) 剩 $(Fmt-GB $drv.AvailableFreeSpace)"
+        $ui.BgDisk.Foreground = Brush $(if ($drv.AvailableFreeSpace -lt 30GB) { '#FF453A' } else { '#C7C7CC' })
+    } catch { $ui.BgDisk.Text = '' }
+    $ui.BgTags.Children.Clear(); $ui.BgList.Children.Clear()
+
+    # 佇列：在跑的優先，再來是最近結束的
+    $q = @($queues | Sort-Object @{ e = { $_.state -eq 'running' } ; Descending = $true }, @{ e = { $_._start } ; Descending = $true }) | Select-Object -First 1
+    $live = @($runs | Where-Object { $_.state -eq 'running' } | Sort-Object _start -Descending)
+    $run = $live | Select-Object -First 1
+    $pushNow = @($pushes | Where-Object { $_.state -eq 'running' } | Sort-Object _start -Descending) | Select-Object -First 1
+    $pushLast = if ($pushNow) { $pushNow } else { @($pushes | Sort-Object _end -Descending) | Select-Object -First 1 }
+    $busy = [bool]($run -or $pushNow -or ($q -and $q.state -eq 'running'))
+    $ui.BgDot.Fill = Brush $(if ($busy) { '#0A84FF' } else { '#30D158' })
+
+    # 標題：正在做的那一款和那一步
+    $title = ''; $sub = ''
+    if ($q) {
+        $items = @($q.items)
+        $nDone = @($items | Where-Object { $_.state -eq 'done' }).Count
+        $nFail = @($items | Where-Object { $_.state -in 'failed', 'skipped' }).Count
+        $nWait = @($items | Where-Object { $_.state -eq 'queued' }).Count
+        $cur = @($items | Where-Object { $_.state -eq 'running' }) | Select-Object -First 1
+        if ($cur) {
+            $idx = [array]::IndexOf($items, $cur) + 1
+            $r = @($runs | Where-Object { $_.pid -and $cur.pid -and [int]$_.pid -eq [int]$cur.pid }) | Select-Object -First 1
+            if (-not $r) { $r = $run }
+            $step = if ($r -and $r.phase) { "$($r.step) · $($r.phase)" } elseif ($r -and $r.step) { $r.step } else { '準備中' }
+            $title = "第 $idx / $($items.Count) 款：$($cur.name) · $step"
+            $cs = To-Date $cur.started
+            if ($cs) { $title += "（$(Fmt-Dur ($now - $cs).TotalSeconds)）" }
+        } elseif ($q.state -eq 'running') {
+            $title = "佇列 $($q.name)：$nDone / $($items.Count) 款"
+        } else {
+            $title = if ($q.state -eq 'stopped') { "佇列 $($q.name) 停了：完成 $nDone 款、沒做完 $nFail 款" } elseif ($nFail) { "佇列 $($q.name) 跑完了：成功 $nDone 款、失敗 $nFail 款" } else { "佇列 $($q.name) 全部完成（$nDone 款）" }
+        }
+        $qs = $q._start
+        if ($qs) { $sub = "佇列 $($q.name) · $($qs.ToString('HH:mm')) 開始" + $(if ($q.state -eq 'running') { "，已經 $(Fmt-Dur ($now - $qs).TotalSeconds)" } elseif ($q._end) { "，$($q._end.ToString('HH:mm')) 結束" }) }
+        if ($nDone) { Bg-Tag "✓ 完成 $nDone" '#30D158' '#1E3A26' }
+        if ($nFail) { Bg-Tag "✕ 失敗 $nFail" '#FF453A' '#3A1E1E' }
+        if ($nWait) { Bg-Tag "排隊 $nWait" '#C7C7CC' }
+        # 預估：這款上次打包花的時間，沒有就用這個佇列已完成的平均
+        if ($q.state -eq 'running' -and ($nWait -or $cur)) {
+            $times = Pack-Times
+            $durs = @($items | Where-Object { $_.state -eq 'done' -and $_.started -and $_.ended } | ForEach-Object { ((To-Date $_.ended) - (To-Date $_.started)).TotalSeconds } | Where-Object { $_ -gt 60 })
+            $avg = if ($durs.Count) { ($durs | Measure-Object -Average).Average } else { $null }
+            $left = 0; $known = $true
+            foreach ($it in @($items | Where-Object { $_.state -in 'queued', 'running' })) {
+                $est = if ($times.ContainsKey($it.name)) { $times[$it.name] } elseif ($avg) { $avg } else { $null }
+                if ($null -eq $est) { $known = $false; break }
+                if ($it.state -eq 'running') { $s0 = To-Date $it.started; $left += [math]::Max(60, $est - $(if ($s0) { ($now - $s0).TotalSeconds } else { 0 })) }
+                else { $left += $est }
+            }
+            if ($known) { Bg-Tag "預估還要 $(Fmt-Dur $left)（約 $($now.AddSeconds($left).ToString('HH:mm')) 完成）" '#C7C7CC' }
+        }
+        foreach ($it in $items) {
+            $s0 = To-Date $it.started; $e0 = To-Date $it.ended
+            switch ($it.state) {
+                'done'    { Bg-Row '✓' '#30D158' $it.name $(if ($s0 -and $e0) { Fmt-Dur ($e0 - $s0).TotalSeconds }) $it.message }
+                'failed'  { Bg-Row '✕' '#FF453A' $it.name $(if ($s0 -and $e0) { Fmt-Dur ($e0 - $s0).TotalSeconds }) $(if ($it.message) { $it.message } else { '失敗了，看記錄' }) }
+                'skipped' { Bg-Row '–' '#8E8E93' $it.name '跳過' $it.message }
+                'running' { Bg-Row '●' '#0A84FF' $it.name $(if ($s0) { "$($s0.ToString('HH:mm')) 開始" }) '' }
+                default   { Bg-Row '○' '#8E8E93' $it.name '排隊' '' }
+            }
+        }
+    }
+    # 不在佇列裡的單款（Switch Pad 背景跑的、命令列跑的）
+    $qPids = @(if ($q) { @($q.items) | Where-Object { $_.pid } | ForEach-Object { [int]$_.pid } })
+    $solo = @($runs | Where-Object { $qPids -notcontains [int]$_.pid } | Sort-Object _start -Descending)
+    if (-not $title -and $solo.Count) {
+        $r = $solo[0]
+        $w = if ($whatName.ContainsKey([string]$r.what)) { $whatName[[string]$r.what] } else { '執行' }
+        if ($r.state -eq 'running') {
+            $step = if ($r.phase) { "$($r.step) · $($r.phase)" } elseif ($r.step) { $r.step } else { '準備中' }
+            $title = "$($r.game) · $step"
+            $st = To-Date $r.stepAt
+            if ($st) { $title += "（$(Fmt-Dur ($now - $st).TotalSeconds)）" }
+            if ($r._start) { $sub = "$w · $($r._start.ToString('HH:mm')) 開始" }
+        } else {
+            $title = if ($r.state -eq 'failed') { "$($r.game) $w 失敗" } else { "$($r.game) $w 完成" }
+            if ($r._end) { $sub = "$($r._end.ToString('HH:mm')) 結束" }
+        }
+    }
+    if ($solo.Count -gt 1 -or ($q -and $solo.Count)) {
+        foreach ($r in $solo) {
+            $w = if ($whatName.ContainsKey([string]$r.what)) { $whatName[[string]$r.what] } else { '執行' }
+            $dur = if ($r._start) { Fmt-Dur ((@($r._end, $now) | Where-Object { $_ } | Select-Object -First 1) - $r._start).TotalSeconds }
+            switch ($r.state) {
+                'running' { Bg-Row '●' '#0A84FF' "$($r.game) · $w" $dur $(if ($r.step) { $r.step }) }
+                'failed'  { Bg-Row '✕' '#FF453A' "$($r.game) · $w" $dur $r.message }
+                default   { Bg-Row '✓' '#30D158' "$($r.game) · $w" $dur '' }
+            }
+        }
+    } elseif ($solo.Count -eq 1 -and -not $q -and $solo[0].state -eq 'failed' -and $solo[0].message) { $sub = $solo[0].message }
+    if (-not $title -and $pushLast) { $title = if ($pushLast.state -eq 'running') { '傳遊戲資料到 iPad' } elseif ($pushLast.state -eq 'failed') { '傳到 iPad 沒完成' } else { '傳到 iPad 完成' } }
+    if (-not $title) { $ui.Bg.Visibility = 'Collapsed'; return }
+    $ui.BgTitle.Text = $title
+    $ui.BgSub.Text = $sub; $ui.BgSub.Visibility = if ($sub) { 'Visible' } else { 'Collapsed' }
+    $ui.BgSub.Foreground = Brush $(if ($sub -and -not $q -and $solo.Count -eq 1 -and $solo[0].state -eq 'failed') { '#FF453A' } else { '#8E8E93' })
+    $ui.BgTags.Visibility = if ($ui.BgTags.Children.Count) { 'Visible' } else { 'Collapsed' }
+
+    # 傳到 iPad：百分比、GB、剩多久（結束 30 分鐘內還顯示結果）
+    if ($pushLast -and ($pushLast.state -eq 'running' -or ($now - $pushLast._end).TotalMinutes -lt 30)) {
+        $tot = [double]$pushLast.total; $sent = [double]$pushLast.sent
+        $frac = if ($tot -gt 0) { [math]::Min(1, $sent / $tot) } elseif ($pushLast.state -eq 'done') { 1 } else { 0 }
+        $ui.BgPush.Visibility = 'Visible'
+        $ui.BgFill.Background = Brush $(if ($pushLast.state -eq 'failed') { '#FF453A' } elseif ($pushLast.state -eq 'done') { '#30D158' } else { '#0A84FF' })
+        $bg.Frac = $frac; $ui.BgFill.Width = [math]::Max(0, $ui.BgTrack.ActualWidth * $frac)
+        switch ($pushLast.state) {
+            'running' {
+                $ui.BgPushL.Text = if ($tot -gt 0) { "傳到 iPad $([math]::Floor($frac * 100))% · $(Fmt-GB $sent) / $(Fmt-GB $tot)" } else { "傳到 iPad · $($pushLast.phase)" }
+                if ($pushLast.phase -and $pushLast.phase -ne '傳送中' -and $tot -gt 0) { $ui.BgPushL.Text += " · $($pushLast.phase)" }
+                $ui.BgPushR.Text = if ($pushLast.eta) { "剩約 $(Fmt-Dur $pushLast.eta)" + $(if ($pushLast.rate) { ' · {0:N0} MB/s' -f ($pushLast.rate / 1MB) }) } else { '' }
+                $ui.BgPushL.Foreground = Brush '#F5F5F7'
+            }
+            'failed' { $ui.BgPushL.Text = "傳到 iPad 沒完成：$($pushLast.message)"; $ui.BgPushR.Text = $pushLast._end.ToString('HH:mm'); $ui.BgPushL.Foreground = Brush '#FF453A' }
+            default  { $ui.BgPushL.Text = if ($tot -gt 0) { "傳到 iPad 完成 · $(Fmt-GB $tot)" } else { '傳到 iPad 完成（遊戲資料本來就在 iPad 上）' }; $ui.BgPushR.Text = $pushLast._end.ToString('HH:mm'); $ui.BgPushL.Foreground = Brush '#30D158' }
+        }
+    } else { $ui.BgPush.Visibility = 'Collapsed' }
+
+    $note = if ($q) { [string]$q.note } else { '' }
+    $ui.BgNote.Text = $note; $ui.BgNote.Visibility = if ($note) { 'Visible' } else { 'Collapsed' }
+    $hasList = $ui.BgList.Children.Count -gt 0
+    $ui.BgMore.Visibility = if ($hasList) { 'Visible' } else { 'Collapsed' }
+    $ui.BgMore.Content = if ($bg.Open) { '收起' } else { '清單' }
+    $ui.BgList.Visibility = if ($hasList -and $bg.Open) { 'Visible' } else { 'Collapsed' }
+    $ui.Bg.Visibility = 'Visible'
+}
+$ui.BgMore.Add_Click({ $bg.Open = -not $bg.Open; Update-Bg })
+$ui.BgTrack.Add_SizeChanged({ param($s, $e) $ui.BgFill.Width = [math]::Max(0, $e.NewSize.Width * $bg.Frac) })
+$bgTimer = New-Object Windows.Threading.DispatcherTimer
+$bgTimer.Interval = [TimeSpan]::FromSeconds(3)
+$bgTimer.Add_Tick({ try { Update-Bg } catch { } })
 
 # 跑選的遊戲：mode = both / pack / install；merge = 合成一包
 function Run-Games($dirs, $mode, $merge) {
@@ -2845,4 +3120,5 @@ $ui.LibraryView.Add_SizeChanged({ param($s, $e)
 Update-ShellLabel
 # 視窗先出來再畫卡片（遊戲多時要幾秒），開啟時只畫一次
 $ui.GamesHead.Text = '載入遊戲中…'
+$win.Add_ContentRendered({ try { Update-Bg } catch { }; $bgTimer.Start() })
 [void]$win.ShowDialog()

@@ -39,7 +39,59 @@ $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
 $saveMode = $SaveBackup -or $SaveRestore -or $SaveMigrate -or $PullLogs -or $GlSync
 
-function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+# 每一步花了多久寫進記錄（「（上一步花了 1:23）」），慢在哪一步看記錄就知道
+$script:stepAt = $null
+function Step-Took {
+    if ($script:stepAt) { $t = New-TimeSpan $script:stepAt (Get-Date); if ($t.TotalSeconds -ge 1) { Write-Host ("（上一步花了 {0:m\:ss}）" -f $t) -ForegroundColor DarkGray } }
+    $script:stepAt = Get-Date
+}
+# 一步裡面的小段落（存檔備份、做小 App、簽章安裝）也記時間，不另起一步
+function Lap($what) {
+    if ($script:stepAt) { $t = New-TimeSpan $script:stepAt (Get-Date); Write-Host ("（{0}花了 {1:m\:ss}）" -f $what, $t) -ForegroundColor DarkGray }
+    $script:stepAt = Get-Date
+}
+# 進度狀態檔：work\status\run-<PID>.json，Switch Pad 主視窗的「背景工作」卡片每幾秒讀一次（不管是 Switch Pad 自己開的、
+# 背景佇列 nxn-queue.ps1 開的，還是直接在命令列跑的都看得到）。寫不進去就算了，不影響打包
+$script:stDir = Join-Path $PSScriptRoot 'work\status'
+$env:NXN_STATUS_DIR = $script:stDir   # romfs_data.py push 寫 push-<PID>.json 到同一個資料夾
+$script:st = [ordered]@{ kind = 'run'; pid = $PID; game = ''; dir = ''; what = ''; step = ''; phase = ''; state = 'running'
+                         started = (Get-Date).ToString('o'); stepAt = (Get-Date).ToString('o'); updated = ''; ended = ''; message = '' }
+$script:stWrote = [datetime]::MinValue
+$script:lastErr = ''
+function Write-Status([switch]$Now) {
+    if (-not $Now -and ((Get-Date) - $script:stWrote).TotalSeconds -lt 2) { return }
+    # Switch Pad 剛好在讀時換不掉檔案：重要的（-Now，換步驟、結束）多試幾次
+    for ($i = 0; $i -lt $(if ($Now) { 5 } else { 1 }); $i++) {
+        try {
+            if (-not (Test-Path -LiteralPath $script:stDir)) { New-Item -ItemType Directory -Force -Path $script:stDir | Out-Null }
+            $script:st.updated = (Get-Date).ToString('o')
+            $f = Join-Path $script:stDir "run-$PID.json"
+            [IO.File]::WriteAllText("$f.tmp", ($script:st | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+            if (Test-Path -LiteralPath $f) { [IO.File]::Replace("$f.tmp", $f, [NullString]::Value) } else { [IO.File]::Move("$f.tmp", $f) }
+            $script:stWrote = Get-Date
+            return
+        } catch { Start-Sleep -Milliseconds 200 }
+    }
+}
+# 打包器（nxn_pack.py）印的英文記錄 → 卡片上的小階段
+$script:phaseDefs = @(
+    @{ Name = '解開遊戲檔'; Re = 'extracting v|reusing the extracted|^\[[\d:]+\] files: base' },
+    @{ Name = '改寫程式';   Re = 'rewriting main|rewritten modules already' },
+    @{ Name = '拆著色器';   Re = 'shader split|taking the shader code archives|split.*shaders' },
+    @{ Name = '翻譯著色器'; Re = 'translating shaders|shader jobs at once' },
+    @{ Name = '組成 App';   Re = 'shell unpacked|packing the IPA' },
+    @{ Name = '寫出 IPA';   Re = '^\[[\d:]+\] done: ' }
+)
+function Status-Line($line) {
+    foreach ($d in $script:phaseDefs) {
+        if ($line -match $d.Re -and $script:st.phase -ne $d.Name) { $script:st.phase = $d.Name; Write-Status -Now; break }
+    }
+    if ($line -match '\[x\]|\[RED\]|Error|Traceback|出錯') { $script:lastErr = ($line -replace '^\[[\d:]+\]\s*', '').Trim() }
+}
+function Step($msg) {
+    Step-Took; Write-Host "`n==> $msg" -ForegroundColor Cyan
+    $script:st.step = ($msg -replace '（.*$', '').Trim(); $script:st.phase = ''; $script:st.stepAt = (Get-Date).ToString('o'); Write-Status -Now
+}
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
 function Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
 
@@ -52,6 +104,7 @@ function RunExe($exe, $arglist) {
         if ($line -eq 'System.Management.Automation.RemoteException') { $line = '' }
         # 打包器找不到設定檔時說的 title ID（檔名裡不一定有）
         if ($line -match 'no game profile for title ID (0[0-9A-Fa-f]{15})') { $script:noProfile = $Matches[1].ToUpper() }
+        Status-Line $line
         Write-Host $line
     }
     $code = $LASTEXITCODE
@@ -105,11 +158,36 @@ if (-not $Python) {
 $plume = Join-Path $here '工具\plumesign.exe'
 
 function Finish($msg, $color) {
+    Step-Took
+    $script:st.state = if ($color -eq 'Red') { 'failed' } else { 'done' }
+    $script:st.ended = (Get-Date).ToString('o')
+    $m = ($msg -replace '^出錯了：', '').Trim()
+    # 打包器失敗時 nxn.ps1 只知道「打包失敗」：補上記錄裡最後一行錯誤，卡片上才看得出原因
+    if ($color -eq 'Red' -and $script:lastErr -and $m -match '^打包失敗|結束碼') { $m = "$m：$($script:lastErr)" }
+    $script:st.message = ($m -split "`r?`n")[0]
+    Write-Status -Now
+    if ($color -ne 'Red' -and $GameDir -and $script:st.what -eq 'pack' -and $m -notmatch '^沿用') { Save-PackTime }
     Write-Host ''
     Write-Host $msg -ForegroundColor $color
     Write-Host ("總共花了 {0:mm\:ss}" -f (New-TimeSpan $started (Get-Date)))
     if (-not $NoPause -and $Host.Name -eq 'ConsoleHost') { Write-Host ''; Read-Host '按 Enter 關閉' | Out-Null }
 }
+
+# 每款上次打包花多久（秒），卡片用來估排隊的還要多久：work\status\pack-times.json
+function Save-PackTime {
+    try {
+        $f = Join-Path $script:stDir 'pack-times.json'
+        $t = @{}
+        if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $t[$_.Name] = $_.Value } }
+        $t[(Split-Path $GameDir -Leaf)] = [int](New-TimeSpan $started (Get-Date)).TotalSeconds
+        [IO.File]::WriteAllText($f, ($t | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+    } catch { }
+}
+$script:st.game = if ($GameDir) { Split-Path $GameDir -Leaf } elseif ($Ipa) { [IO.Path]::GetFileNameWithoutExtension($Ipa) } else { '' }
+$script:st.dir = $GameDir
+$script:st.what = if ($Login) { 'login' } elseif ($GlSync) { 'glsync' } elseif ($PullLogs) { 'logs' } elseif ($SaveBackup -or $SaveRestore -or $SaveMigrate) { 'saves' } `
+                  elseif ($GameDir -and $PackOnly) { 'pack' } elseif ($GameDir) { 'both' } else { 'install' }
+Write-Status -Now
 
 try {
     if (-not (Test-Path $plume)) { throw "找不到 $plume（Impactor 的命令列版，從 Impactor 的 release 下載 plumesign-windows-x86_64.exe 改名成 plumesign.exe）。" }
@@ -204,14 +282,35 @@ try {
             $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
             # 執行時才用 GLSLC 編譯著色器的 NVN 遊戲（Unrailed 2）記下的是 <hash>.glslc，放在同一個資料夾
             $glslcN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.glslc$' }).Count
-            if ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
+            # 執行時才產生 SPIR-V 的 Vulkan 遊戲（瑪利歐銀河 1、2）記下的是 <key>.spv：第一次打包沒有畫面，iPad 上開一次（約一分鐘）就記好
+            $spvN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.spv$' }).Count
+            if ($spvN) { $glArg = @('--vk-capture', $glDir); Write-Host "Vulkan 著色器：用 iPad 上記下的 $spvN 個" }
+            elseif ($glN) { $glArg = @('--gl-capture', $glDir); Write-Host "OpenGL 著色器：用 iPad 上記下的 $glN 個" }
             elseif ($glslcN) { $glArg = @('--glslc-capture', $glDir); Write-Host "執行時編譯的著色器：用 iPad 上記下的 $glslcN 個" }
+            # 著色器太多、只放用到的那些的 Unity 遊戲（Overcooked、Pummel Party）：iPad 記下缺的著色器 <run>.keys，下次打包補翻這些
+            $keysN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.keys$' }).Count
+            if ($keysN) { $glArg += @('--used-shaders', $glDir); Write-Host "只放用到的著色器：加上 iPad 這 $keysN 次遊玩記下缺的著色器" }
         }
+        # 遊戲庫用的遊戲包（<名稱>-multi-<格式>.ipa）不放 RomFS：RomFS 留在 NSP 裡，傳到 iPad 時才從 NSP 解出來（電腦上每款遊戲只佔一份空間）。
+        # 打包器太舊、不認得 --romfs-source 的話照舊放進去
+        $romfsArg = @()
+        $romfsOk = $PackOnly -and $Out -and ((Split-Path $Out -Leaf) -like '*-multi-*') -and (Select-String -LiteralPath $packer -SimpleMatch -Quiet -Pattern "'--romfs-source'")
+        if ($romfsOk) { $romfsArg = @('--romfs-source') }
         if ($ReuseIfFresh -and $Out -and (Test-Path -LiteralPath $Out)) {
             $part = Get-Item -LiteralPath $Out
             $newest = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci|nsz|xcz)$' }) +
                       @(if ($glDir) { Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue }) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if (-not $newest -or $part.LastWriteTime -ge $newest.LastWriteTime) { Finish "沿用打包好的 $($part.Name)（沒有新的遊戲檔或著色器）" Green; return }
+            if (-not $newest -or $part.LastWriteTime -ge $newest.LastWriteTime) {
+                # 以前打包、裡面還有一份 RomFS 的遊戲包：拿掉那份（只改寫遊戲包，不重新打包；已經拿掉的一秒內就略過）
+                if ($romfsOk) {
+                    $before = $part.Length
+                    $env:PYTHONUTF8 = '1'
+                    $c = RunExe $Python @($packer, '--strip-romfs', $part.FullName, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName)
+                    if ($c) { Warn "遊戲包裡的 RomFS 沒拿掉（結束碼 $c），照舊用" }
+                    else { $after = (Get-Item -LiteralPath $Out).Length; if ($after -lt $before) { Write-Host ("遊戲包裡重複的 RomFS 拿掉了，省下 {0:N1} GB" -f (($before - $after) / 1GB)) } }
+                }
+                Finish "沿用打包好的 $($part.Name)（沒有新的遊戲檔或著色器）" Green; return
+            }
             Write-Host '有新的遊戲檔或 iPad 上新記下的著色器，重新打包'
         }
 
@@ -303,7 +402,7 @@ try {
         Push-Location $srcDir
         try {
             $env:PYTHONUTF8 = '1'
-            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
+            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg + $romfsArg)
             # 上游沒有這款的設定檔（迴旋鏢當初也是）：用 make_provisional.py 從遊戲檔猜一份暫定的，再打包一次
             if ($code) {
                 $nsps = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci)$' })
@@ -324,7 +423,7 @@ try {
                     $code = RunExe $pyExe @($prov, $srcDir, $nx.DirectoryName, $Keys, $baseFile.FullName, $(if ($upd) { $upd.FullName } else { '-' }), $ver, $tid)
                     if ($code) { throw "做不出暫定設定檔（結束碼 $code）" }
                     Step "用暫定設定檔重新打包 $(Split-Path $GameDir -Leaf)"
-                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
+                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg + $romfsArg)
                 }
             }
         } finally { Pop-Location }
@@ -464,8 +563,20 @@ try {
     $py = (Quiet $Python @('-c', 'import sys; print(sys.executable)')).Out
     # 傳檔工具 pymobiledevice3 的相依套件在 Python 3.14 還沒有現成的 Windows 版（要裝 C++ 編譯器），
     # 所以找一個裝得起來的 Python（先找已經裝好的，再試 3.13 → 3.10），記在 work\python-transfer.txt
+    # 同一次安裝會問好幾次（備份、傳資料、存檔、著色器），找到一次就記著：每問一次要開好幾個 Python、載入 pymobiledevice3，要好幾秒
+    $script:tpyFound = $null
     function Transfer-Python {
+        if ($null -ne $script:tpyFound) { return $script:tpyFound }
+        $script:tpyFound = Find-TransferPython
+        return $script:tpyFound
+    }
+    function Find-TransferPython {
         $saved = Join-Path $root 'python-transfer.txt'
+        # 記下的那個還能用就直接用，不用每次都先問 py 啟動器有哪些版本
+        if (Test-Path $saved) {
+            $c = (Get-Content $saved -Raw).Trim()
+            if ($c -and (Test-Path -LiteralPath $c) -and -not (Quiet $c @('-c', 'import pymobiledevice3')).Code) { return $c }
+        }
         $cands = @()
         if (Test-Path $saved) { $cands += (Get-Content $saved -Raw).Trim() }
         $cands += $py
@@ -545,18 +656,30 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
             if ($c -and $c -ne 3) { Warn "存檔備份沒做成（結束碼 $c），照樣安裝" }
         } else { Warn '傳檔工具裝不起來，這次沒有備份存檔' }
+        Lap '存檔備份'
     }
 
     $signIpa = $Ipa; $split = $null
-    if (-not $Full -and (Test-Path $dataTool) -and $py) {
+    if ((Test-Path $dataTool) -and $py) {
         $r = Quiet $py @('-I', $dataTool, 'info', $Ipa)
         if (-not $r.Code) { try { $split = $r.Out | ConvertFrom-Json } catch { $split = $null } }
         if ($split -and -not $split.lite) { $split = $null }
-        if ($split) {
+        # 連結式的遊戲庫（nxn_merge.py --link）：包裡本來就沒有遊戲資料，資料從各遊戲包直接傳，不能整包裝、也不用另外做小 App
+        if ($split -and $split.linked) {
+            if ($Full) { Warn '遊戲庫的遊戲資料不在包裡（直接從各遊戲包傳），照樣分開傳' }
+            $tpy = Transfer-Python
+            if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，遊戲庫的遊戲資料傳不過去。' }
+            $py = $tpy
+            Write-Host "App 本身 $([int]((Get-Item -LiteralPath $Ipa).Length / 1MB)) MB，遊戲資料 $([int]($split.bytes / 1MB)) MB 從各遊戲包直接傳（已經在 iPad 上的不會再傳）"
+            # 以前做的小 App（遊戲庫的有好幾 GB）用不到了
+            $stem = [IO.Path]::GetFileNameWithoutExtension($Ipa) -replace '[^\w.-]', '_'
+            Get-ChildItem -LiteralPath (Join-Path $root 'lite') -Filter "$stem-*.ipa" -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+        } elseif ($Full) { $split = $null }
+        if ($split -and -not $split.linked) {
             $tpy = Transfer-Python
             if ($tpy) { $py = $tpy } else { Warn '傳檔工具裝不起來，這次整包裝'; $split = $null }
         }
-        if ($split) {
+        if ($split -and -not $split.linked) {
             $liteDir = Join-Path $root 'lite'
             New-Item -ItemType Directory -Force -Path $liteDir | Out-Null
             $stem = [IO.Path]::GetFileNameWithoutExtension($Ipa) -replace '[^\w.-]', '_'
@@ -571,6 +694,7 @@ try {
                 else { Move-Item -LiteralPath "$lite.part" -Destination $lite -Force }
             }
             if ($split) { $signIpa = $lite; Write-Host "小 App：$([int]((Get-Item -LiteralPath $lite).Length / 1MB)) MB" }
+            Lap '做小 App'
         }
     }
     $signArgs = @('sign', '--package', $signIpa, '--apple-id', '--register-and-install')
@@ -581,6 +705,7 @@ try {
         Warn "裝置編號變了，改用 $($dev.Id) 再試一次"
         $code = Run-Sign ($signArgs + @('--udid', $dev.Id))
     }
+    Lap '簽章並上傳安裝'
     if ($code -and $script:signOut -match '(?i)no account selected|please login|unauthori[sz]ed|re-?authenticat') {
         throw "Apple ID 要重新登入：按右上角的「登入 Apple ID」，登入後再按一次安裝。IPA 本身是好的：$Ipa"
     }

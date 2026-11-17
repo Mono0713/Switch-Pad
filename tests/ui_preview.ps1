@@ -1,6 +1,6 @@
 ﻿# 載入 nxn-app.ps1 的 XAML（樣式、主視窗、遊戲格子），放幾格假遊戲，畫成 PNG：
 # 確認 XAML 在 WPF 讀得進去（StaticResource、樣式都找得到），也讓沒有 Windows 的人看得到介面長怎樣。
-param([string]$Out = 'ui-preview.png')
+param([string]$Out = 'ui-preview.png', [switch]$NoBg)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $src = Get-Content (Join-Path $PSScriptRoot '..\app\nxn-app.ps1') -Raw -Encoding UTF8
@@ -39,6 +39,23 @@ Head-Count $win.FindName('GamesHead') '遊戲庫' 6; Head-Count $win.FindName('O
 $win.FindName('Account').Text = 'someone@example.com'; $win.FindName('AcctDot').Fill = Brush '#30D158'; $win.FindName('Login').Content = '換帳號'
 $win.FindName('SelCount').Text = '遊戲庫 6 款'; $win.FindName('SelSub').Text = '裝到 iPad 時會拿回 iPad 記下的著色器'; $win.FindName('SelSub').Visibility = 'Visible'
 $r = $win.FindName('RenewBtn'); $r.Content = '重簽（剩 7 天）'; $r.Visibility = 'Visible'
+# 背景工作卡片：佇列跑到一半、正在傳到 iPad（-NoBg 不畫）
+if (-not $NoBg) {
+    $win.FindName('Bg').Visibility = 'Visible'
+    $win.FindName('BgTitle').Text = '第 3 / 9 款：Kirby Forgotten Land · 打包 · 翻譯著色器（12 分）'
+    $win.FindName('BgSub').Text = '佇列 art57 · 09:12 開始，已經 48 分'
+    $win.FindName('BgDisk').Text = 'C: 剩 214.3 GB'
+    $win.FindName('BgMore').Visibility = 'Visible'
+    $tags = $win.FindName('BgTags')
+    foreach ($t in @(@('✓ 完成 2', '#30D158', '#1E3A26'), @('✕ 失敗 1', '#FF453A', '#3A1E1E'), @('排隊 5', '#C7C7CC', '#2C2C2E'), @('預估還要 2 小時 10 分（約 12:10 完成）', '#C7C7CC', '#2C2C2E'))) {
+        $b = New-Object Windows.Controls.Border; $b.CornerRadius = '7'; $b.Padding = '9,3'; $b.Margin = '0,0,6,4'; $b.Background = Brush $t[2]
+        $tb = New-Object Windows.Controls.TextBlock; $tb.Text = $t[0]; $tb.FontSize = 12; $tb.Foreground = Brush $t[1]; $b.Child = $tb; [void]$tags.Children.Add($b)
+    }
+    $win.FindName('BgPush').Visibility = 'Visible'
+    $win.FindName('BgPushL').Text = '傳到 iPad 45% · 12.3 GB / 27.0 GB'; $win.FindName('BgPushR').Text = '剩約 8 分 · 31 MB/s'
+    $win.FindName('BgFill').Width = 520
+    $n = $win.FindName('BgNote'); $n.Text = '全部打包好會一次傳到 iPad'; $n.Visibility = 'Visible'
+}
 $ico = Join-Path $PSScriptRoot '..\app\SwitchPad.ico'
 $fs = [IO.File]::OpenRead($ico); try { $win.FindName('AppLogo').Source = [Windows.Media.Imaging.BitmapDecoder]::Create($fs, 'None', 'OnLoad').Frames | Sort-Object { $_.PixelWidth } -Descending | Select-Object -First 1 } finally { $fs.Dispose() }
 # 不顯示視窗，直接量版面畫出來
