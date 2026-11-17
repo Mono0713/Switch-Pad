@@ -47,7 +47,48 @@ function Lap($what) {
     if ($script:stepAt) { $t = New-TimeSpan $script:stepAt (Get-Date); Write-Host ("（{0}花了 {1:m\:ss}）" -f $what, $t) -ForegroundColor DarkGray }
     $script:stepAt = Get-Date
 }
-function Step($msg) { Step-Took; Write-Host "`n==> $msg" -ForegroundColor Cyan }
+# 進度狀態檔：work\status\run-<PID>.json，Switch Pad 主視窗的「背景工作」卡片每幾秒讀一次（不管是 Switch Pad 自己開的、
+# 背景佇列 nxn-queue.ps1 開的，還是直接在命令列跑的都看得到）。寫不進去就算了，不影響打包
+$script:stDir = Join-Path $PSScriptRoot 'work\status'
+$env:NXN_STATUS_DIR = $script:stDir   # romfs_data.py push 寫 push-<PID>.json 到同一個資料夾
+$script:st = [ordered]@{ kind = 'run'; pid = $PID; game = ''; dir = ''; what = ''; step = ''; phase = ''; state = 'running'
+                         started = (Get-Date).ToString('o'); stepAt = (Get-Date).ToString('o'); updated = ''; ended = ''; message = '' }
+$script:stWrote = [datetime]::MinValue
+$script:lastErr = ''
+function Write-Status([switch]$Now) {
+    if (-not $Now -and ((Get-Date) - $script:stWrote).TotalSeconds -lt 2) { return }
+    # Switch Pad 剛好在讀時換不掉檔案：重要的（-Now，換步驟、結束）多試幾次
+    for ($i = 0; $i -lt $(if ($Now) { 5 } else { 1 }); $i++) {
+        try {
+            if (-not (Test-Path -LiteralPath $script:stDir)) { New-Item -ItemType Directory -Force -Path $script:stDir | Out-Null }
+            $script:st.updated = (Get-Date).ToString('o')
+            $f = Join-Path $script:stDir "run-$PID.json"
+            [IO.File]::WriteAllText("$f.tmp", ($script:st | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+            if (Test-Path -LiteralPath $f) { [IO.File]::Replace("$f.tmp", $f, $null) } else { [IO.File]::Move("$f.tmp", $f) }
+            $script:stWrote = Get-Date
+            return
+        } catch { Start-Sleep -Milliseconds 200 }
+    }
+}
+# 打包器（nxn_pack.py）印的英文記錄 → 卡片上的小階段
+$script:phaseDefs = @(
+    @{ Name = '解開遊戲檔'; Re = 'extracting v|reusing the extracted|^\[[\d:]+\] files: base' },
+    @{ Name = '改寫程式';   Re = 'rewriting main|rewritten modules already' },
+    @{ Name = '拆著色器';   Re = 'shader split|taking the shader code archives|split.*shaders' },
+    @{ Name = '翻譯著色器'; Re = 'translating shaders|shader jobs at once' },
+    @{ Name = '組成 App';   Re = 'shell unpacked|packing the IPA' },
+    @{ Name = '寫出 IPA';   Re = '^\[[\d:]+\] done: ' }
+)
+function Status-Line($line) {
+    foreach ($d in $script:phaseDefs) {
+        if ($line -match $d.Re -and $script:st.phase -ne $d.Name) { $script:st.phase = $d.Name; Write-Status -Now; break }
+    }
+    if ($line -match '\[x\]|\[RED\]|Error|Traceback|出錯') { $script:lastErr = ($line -replace '^\[[\d:]+\]\s*', '').Trim() }
+}
+function Step($msg) {
+    Step-Took; Write-Host "`n==> $msg" -ForegroundColor Cyan
+    $script:st.step = ($msg -replace '（.*$', '').Trim(); $script:st.phase = ''; $script:st.stepAt = (Get-Date).ToString('o'); Write-Status -Now
+}
 function Ok($msg) { Write-Host $msg -ForegroundColor Green }
 function Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
 
@@ -60,6 +101,7 @@ function RunExe($exe, $arglist) {
         if ($line -eq 'System.Management.Automation.RemoteException') { $line = '' }
         # 打包器找不到設定檔時說的 title ID（檔名裡不一定有）
         if ($line -match 'no game profile for title ID (0[0-9A-Fa-f]{15})') { $script:noProfile = $Matches[1].ToUpper() }
+        Status-Line $line
         Write-Host $line
     }
     $code = $LASTEXITCODE
@@ -114,11 +156,35 @@ $plume = Join-Path $here '工具\plumesign.exe'
 
 function Finish($msg, $color) {
     Step-Took
+    $script:st.state = if ($color -eq 'Red') { 'failed' } else { 'done' }
+    $script:st.ended = (Get-Date).ToString('o')
+    $m = ($msg -replace '^出錯了：', '').Trim()
+    # 打包器失敗時 nxn.ps1 只知道「打包失敗」：補上記錄裡最後一行錯誤，卡片上才看得出原因
+    if ($color -eq 'Red' -and $script:lastErr -and $m -match '^打包失敗|結束碼') { $m = "$m：$($script:lastErr)" }
+    $script:st.message = ($m -split "`r?`n")[0]
+    Write-Status -Now
+    if ($color -ne 'Red' -and $GameDir -and $script:st.what -eq 'pack' -and $m -notmatch '^沿用') { Save-PackTime }
     Write-Host ''
     Write-Host $msg -ForegroundColor $color
     Write-Host ("總共花了 {0:mm\:ss}" -f (New-TimeSpan $started (Get-Date)))
     if (-not $NoPause -and $Host.Name -eq 'ConsoleHost') { Write-Host ''; Read-Host '按 Enter 關閉' | Out-Null }
 }
+
+# 每款上次打包花多久（秒），卡片用來估排隊的還要多久：work\status\pack-times.json
+function Save-PackTime {
+    try {
+        $f = Join-Path $script:stDir 'pack-times.json'
+        $t = @{}
+        if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $t[$_.Name] = $_.Value } }
+        $t[(Split-Path $GameDir -Leaf)] = [int](New-TimeSpan $started (Get-Date)).TotalSeconds
+        [IO.File]::WriteAllText($f, ($t | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+    } catch { }
+}
+$script:st.game = if ($GameDir) { Split-Path $GameDir -Leaf } elseif ($Ipa) { [IO.Path]::GetFileNameWithoutExtension($Ipa) } else { '' }
+$script:st.dir = $GameDir
+$script:st.what = if ($Login) { 'login' } elseif ($GlSync) { 'glsync' } elseif ($PullLogs) { 'logs' } elseif ($SaveBackup -or $SaveRestore -or $SaveMigrate) { 'saves' } `
+                  elseif ($GameDir -and $PackOnly) { 'pack' } elseif ($GameDir) { 'both' } else { 'install' }
+Write-Status -Now
 
 try {
     if (-not (Test-Path $plume)) { throw "找不到 $plume（Impactor 的命令列版，從 Impactor 的 release 下載 plumesign-windows-x86_64.exe 改名成 plumesign.exe）。" }

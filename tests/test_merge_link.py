@@ -227,6 +227,17 @@ class FileDiffTest(unittest.TestCase):
         # --force: everything again
         self.assertEqual(len(self.push(self.lib(v2, 'v3'), fs, force=True)), 4)
 
+    def test_status_file(self):
+        """push writes push-<pid>.json into NXN_STATUS_DIR for Switch Pad's 背景工作 card"""
+        st = os.path.join(self.d, 'status')
+        os.environ['NXN_STATUS_DIR'] = st
+        try: self.push(self.lib({'romfs/a.bin': b'a' * 1000, 'msl/b-1/x_b.metallib': b'x'}, 's1'), {})
+        finally: del os.environ['NXN_STATUS_DIR']
+        with open(os.path.join(st, 'push-%d.json' % os.getpid()), encoding='utf-8') as f: j = json.load(f)
+        self.assertEqual((j['kind'], j['state']), ('push', 'done'))
+        self.assertEqual(j['sent'], j['total']); self.assertGreater(j['total'], 1000)
+        self.assertEqual(os.listdir(st), ['push-%d.json' % os.getpid()])
+
     def test_cut_short_is_redone(self):
         v1 = {'romfs/a.bin': b'a', 'msl/b-1/x_b.metallib': b'x1', 'msl/b-1/y_b.metallib': b'y1'}
         fs = {}

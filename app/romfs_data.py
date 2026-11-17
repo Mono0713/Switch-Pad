@@ -284,9 +284,64 @@ def jobs_left(x, done):
     return len(js), sum(j[1].file_size for j in js)
 
 
+def now_iso():
+    import datetime
+    return datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+class Status:
+    """push-<pid>.json in NXN_STATUS_DIR (nxn.ps1 sets it to work/status): Switch Pad's 背景工作 card shows the transfer's
+    percentage, GB and time left from it. Written at most once a second; a failure to write is ignored."""
+    def __init__(self, ipa):
+        self.dir = os.environ.get('NXN_STATUS_DIR', '')
+        self.d = {'kind': 'push', 'pid': os.getpid(), 'ipa': os.path.basename(ipa), 'state': 'running', 'phase': '連接 iPad',
+                  'sent': 0, 'total': 0, 'files': 0, 'started': now_iso(), 'ended': '', 'message': ''}
+        self.t0, self.sent0, self.last = time.time(), 0, 0.0
+        self.write(True)
+
+    def begin(self, total, nfiles):
+        self.d.update(total=total, files=nfiles, sent=0, phase='傳送中')
+        self.t0, self.sent0 = time.time(), 0
+        self.write(True)
+
+    def progress(self, sent):
+        self.d['sent'] = sent
+        self.d['phase'] = '傳送中'
+        el = time.time() - self.t0
+        if el > 3 and sent > self.sent0:
+            rate = (sent - self.sent0) / el
+            self.d['rate'] = int(rate)
+            self.d['eta'] = int(max(self.d['total'] - sent, 0) / max(rate, 1))
+        self.write()
+
+    def end(self, ok, msg=''):
+        self.d.update(state='done' if ok else 'failed', ended=now_iso(), message=msg)
+        if ok: self.d['sent'] = self.d['total']
+        self.d.pop('eta', None)
+        self.write(True)
+
+    def write(self, now=False):
+        if not self.dir or (not now and time.time() - self.last < 1): return
+        self.last = time.time()
+        for _ in range(5 if now else 1):   # Switch Pad reading it at that moment keeps Windows from replacing it
+            try:
+                os.makedirs(self.dir, exist_ok=True)
+                f = os.path.join(self.dir, 'push-%d.json' % os.getpid())
+                with open(f + '.tmp', 'w', encoding='utf-8') as o: json.dump(self.d, o, ensure_ascii=False)
+                os.replace(f + '.tmp', f)
+                return
+            except OSError: time.sleep(0.2)
+
+
 async def push(a):
     opened = []
-    try: await _push(a, opened)
+    a.status = Status(a.ipa)
+    try:
+        await _push(a, opened)
+        a.status.end(True)
+    except BaseException as e:
+        a.status.end(False, str(e) or type(e).__name__)
+        raise
     finally:
         for x in opened: x.close()   # Windows keeps an open file from being replaced or removed
 
@@ -357,6 +412,7 @@ async def _push(a, opened):
                 else: send[d] = [j for j in send[d] if j[2] in changed]
             total = sum(jobs_left(x, ())[1] for x in send.values())
             nfiles = sum(jobs_left(x, ())[0] for x in send.values())
+            a.status.begin(total, nfiles)
             print('copying to the iPad: %s (%d files, %d MB%s)' % (', '.join(todo), nfiles, total >> 20,
                   '; %d files already there unchanged' % skipped if skipped else ''))
             # forget the parts about to be replaced first, so a copy cut short is redone next time
@@ -389,6 +445,7 @@ async def _push(a, opened):
                     except Exception as e:
                         if attempt == tries or not is_disconnect(e): raise
                         left = sum(jobs_left(x, done)[0] for x in send.values())
+                        a.status.d['phase'] = '連線中斷，重新連線中'; a.status.write(True)
                         print('連線中斷（%s），%d 秒後重新連線再傳，已完成的檔案不重傳（第 %d / %d 次重試，還剩 %d 個檔）'
                               % (type(e).__name__, 5 * attempt, attempt, tries - 1, left), flush=True)
                         state['sent'] = total - sum(jobs_left(x, done)[1] for x in send.values())
@@ -471,6 +528,7 @@ async def send_round(ld, a, bid, base, mark, todo, send, keep, want, done, state
                                     await c.fwrite(h, b)
                                     got += len(b)
                                     state['sent'] += len(b)
+                                    a.status.progress(state['sent'])
                                     pct = state['sent'] * 100 // max(total, 1)
                                     if pct != state['shown'] and (pct % 2 == 0 or pct == 100):
                                         state['shown'] = pct
