@@ -13,6 +13,8 @@ import tempfile
 import unittest
 import zipfile
 
+try: sys.stdout.reconfigure(encoding='utf-8'); sys.stderr.reconfigure(encoding='utf-8')   # push prints Chinese (romfs_data main does this too)
+except Exception: pass
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
 spec = importlib.util.spec_from_file_location('romfs_data', os.path.join(APP, 'romfs_data.py'))
 rd = importlib.util.module_from_spec(spec); spec.loader.exec_module(rd)
@@ -111,11 +113,10 @@ def fake_nx(d, romfs_files):
     for n, data in romfs_files.items():
         p = os.path.join(src, *n.split('/')); os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, 'wb') as f: f.write(data)
-    nx = os.path.join(d, 'nx_extract')
+    nx = os.path.join(d, 'nx_extract.py')   # romfs_data runs a .py with this Python (Windows has no #! line)
     with open(nx, 'w') as f:
-        f.write('#!%s\nimport sys, shutil, os\nk, b, u, o = sys.argv[1:5]\nassert os.path.isfile(b) and os.path.isfile(k)\n'
-                'shutil.copytree(%r, os.path.join(o, "RomFS"))\n' % (sys.executable, src))
-    os.chmod(nx, 0o755)
+        f.write('import sys, shutil, os\nk, b, u, o = sys.argv[1:5]\nassert os.path.isfile(b) and os.path.isfile(k)\n'
+                'shutil.copytree(%r, os.path.join(o, "RomFS"))\n' % src)
     return nx
 
 
@@ -317,7 +318,7 @@ class RomfsSourceTest(unittest.TestCase):
     def test_push_refuses_a_changed_extraction(self):
         lib, _ = self.lib(self.src, 'src.ipa')
         fake_nx(os.path.join(self.d, 'other'), {'data/a.bin': os.urandom(5000), 'b.txt': b'hellO'})   # same names and sizes, other bytes
-        os.replace(os.path.join(self.d, 'other', 'nx_extract'), self.nx)
+        os.replace(os.path.join(self.d, 'other', 'nx_extract.py'), self.nx)
         fs = {}
         with self.assertRaises(rd.Mismatch): self.push(lib, fs)
         self.assertNotIn('games/0100000000010000/romfs', json.loads(fs.get('/Documents/.romfs-id', b'{}')))

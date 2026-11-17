@@ -117,6 +117,9 @@ def cmd_lite(a):
 class Sources:
     """The zip files the data comes from, opened once each"""
     def __init__(self): self.open = {}
+    def close(self):
+        for z in self.open.values(): z.close()
+        self.open = {}
     def get(self, path):
         if path not in self.open: self.open[path] = zipfile.ZipFile(path)
         return self.open[path]
@@ -208,7 +211,7 @@ class FromNsp:
             raise SystemExit('電腦空間不夠從 NSP 解出 %s 的 RomFS：要 %.1f GB，%s 只剩 %.1f GB' % (self.d, rec['bytes'] / 2**30 + 1, where, free / 2**30))
         print('從 NSP 解出 %s 的 RomFS（%.1f GB，%d 個檔，約一兩分鐘）' % (self.d, rec['bytes'] / 2**30, rec['files']), flush=True)
         t0 = time.time()
-        cmd = [nx, keys, rec['base']['path'], rec['update']['path'] if rec.get('update') else '-', self.tmp] + (['--allow-damaged'] if rec.get('allow_damaged') else [])
+        cmd = ([sys.executable] if nx.endswith('.py') else []) + [nx, keys, rec['base']['path'], rec['update']['path'] if rec.get('update') else '-', self.tmp] + (['--allow-damaged'] if rec.get('allow_damaged') else [])
         import subprocess
         r = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
         rom = os.path.join(self.tmp, 'RomFS')
@@ -282,15 +285,24 @@ def jobs_left(x, done):
 
 
 async def push(a):
+    opened = []
+    try: await _push(a, opened)
+    finally:
+        for x in opened: x.close()   # Windows keeps an open file from being replaced or removed
+
+
+async def _push(a, opened):
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
     from pymobiledevice3.services.house_arrest import HouseArrestService
 
     z = zipfile.ZipFile(a.ipa)
+    opened.append(z)
     link = read_link(z)
     app, pl, parts, files, several = layout(z)
     orig = pl.get('CFBundleIdentifier', '')
     srcs = Sources()
+    opened.append(srcs)
     # each folder that moves (romfs, msl, or a game's in a package) has its own id, so a change sends only what changed:
     # a new shell's shaders without the game files, or a game added to a package without the games already there
     if link is not None:
@@ -384,6 +396,7 @@ async def push(a):
             finally:
                 for x in send.values():
                     if isinstance(x, FromNsp): x.cleanup()
+
             await list_missing(afc, base, want, jobs_of, skip=todo)
             el = max(time.time() - t0, 0.001)
             print('game files in place (%d files, %d MB in %.0f s over %d connections, %.1f MB/s)' % (nfiles, total >> 20, el, nconn, total / el / 2**20))
