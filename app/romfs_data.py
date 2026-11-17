@@ -429,6 +429,17 @@ async def _push(a, opened):
                     if await afc.exists(base + '/' + k): await afc.rm(base + '/' + k, force=True)
                 if removed: print('%s: removed %d files the new version no longer has' % (d, len(removed)))
 
+            # 先刪後傳：拿掉的遊戲和要整個換掉的資料夾上面已經刪了，這時 iPad 剩的空間不夠就先停，不要傳到一半才失敗
+            try: free = int((await afc.get_device_info()).get('FSFreeBytes', 0))
+            except Exception: free = 0   # 問不到就照常傳
+            # 只換部分檔的資料夾：被覆蓋的舊檔寫入時才放掉空間，所以先把它們算回去
+            reuse = sum((old.get(k) or (0,))[0] for d in todo if plan[d] for old, changed, _ in [plan[d]] for k in changed)
+            need = total - reuse
+            if free and need + (1 << 30) > free:
+                raise SystemExit('[x] iPad 空間不夠：這次要傳 %.1f GB 遊戲資料（%s），iPad 只剩 %.1f GB（已先刪掉移除的遊戲）。'
+                                 '請在 iPad 上刪掉用不到的 App 或照片，或在 Switch Pad 把暫時不玩的遊戲按「移除」，再按一次「裝到 iPad」。'
+                                 % ((need + (1 << 30)) / 2**30, ', '.join(todo), free / 2**30))
+
             # The copy survives a dropped connection (2026-11-15: Smash's 18 GB stopped at 14% with WinError 64 and the game
             # then crashed reading past the end of a half-written data.arc): reconnect and carry on, skipping the files that
             # were already written whole. A file cut short is written again from its start.
