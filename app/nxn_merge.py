@@ -300,6 +300,8 @@ def main():
     ap.add_argument('--shell', help='a shell zip (or IPA) whose app to use instead of the first IPA\'s')
     ap.add_argument('--icon', help='a PNG for the app icon (8-bit RGB or RGBA, square) instead of the grid of the games\' icons')
     ap.add_argument('--link', action='store_true', help='leave the games\' romfs/msl out and record where they are (romfs_data.py push reads them from there)')
+    ap.add_argument('--hd-icons', metavar='DIR', help='a cache of large eShop icons (icon_hd.py): fetch the missing ones and put each '
+                    'game\'s in as its dm/icon.jpg, which the picker shows; a game with none keeps its own 256-pixel icon')
     a = ap.parse_args()
     for f in (sys.stdout, sys.stderr):   # a game name a Windows console's code page cannot show must not stop the merge
         try: f.reconfigure(errors='replace')
@@ -334,6 +336,18 @@ def main():
         if linked_in: die('the shell in %s does not read game data from Documents, which a linked IPA needs' % sz.filename)
         say('note: this shell reads game data only from inside the app, so the data stays in the merged IPA'); a.link = False
     links = {}   # 'games/<tid>/romfs' -> record
+    hd = {}
+    if a.hd_icons:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import icon_hd
+            res = icon_hd.fetch(a.hd_icons, [(g.tid, g.name) for g in games])
+            for g in games:
+                b = icon_hd.cached(a.hd_icons, g.tid)
+                if b: hd[g.tid] = b
+                else: say('%s keeps its own icon: %s' % (g.name, res.get(g.tid, '?')))
+            say('large icons: %d of %d games' % (len(hd), len(games)))
+        except Exception as e: say('note: no large icons this time (%s)' % e)   # never stops the merge
 
     out_A = 'Payload/DmIOS.app/'
     part = a.out + '.partial'
@@ -380,7 +394,9 @@ def main():
             o.add(out_A + 'Frameworks/Guest_%s.framework/' % g.tid, b'')
             n_guest = 0
             rows = {d: [] for d in DATA_DIRS}; src_pre = {}
+            big = out_A + 'games/%s/dm/icon.jpg' % g.tid
             for i, name in g.entries(out_A):
+                if name == big and g.tid in hd: continue
                 rel = name[len(out_A + 'games/%s/' % g.tid):] if name.startswith(out_A + 'games/%s/' % g.tid) else ''
                 d = rel.split('/', 1)[0] if '/' in rel else ''
                 if a.link and d in DATA_DIRS:
@@ -389,6 +405,7 @@ def main():
                         src_pre.setdefault(d, i.filename[:len(i.filename) - len(rel) + len(d) + 1])
                     continue
                 o.copy(g.z, i, name); n_guest += name.endswith('/Guest')
+            if g.tid in hd: o.add(big, hd[g.tid])
             if n_guest != 1: die('%s: its Guest library is missing' % g.name)
             src_rec = g.romfs_source()
             if src_rec is not None and not a.link:

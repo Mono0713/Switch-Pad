@@ -60,7 +60,7 @@ function Move-ToAppDir {
     $appDir = Join-Path $base $appDirName
     $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'nxn[\w-]*\.ps1' })
-    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
+    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'icon_hd.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
         ForEach-Object { Get-ChildItem -LiteralPath $base -File -Filter $_ -ErrorAction SilentlyContinue }
     $dirs = @('work', '工具') | ForEach-Object { Join-Path $base $_ } | Where-Object { Test-Path -LiteralPath $_ }
     if (-not ($plain.Count + @($dirs).Count)) { return }
@@ -2296,7 +2296,8 @@ function Shell-Changed($shell) {
 function Library-Look {
     $icon = Join-Path $here 'LibraryIcon.png'
     $h = if (Test-Path -LiteralPath $icon) { (Get-FileHash -LiteralPath $icon -Algorithm SHA256).Hash.Substring(0, 16) } else { '' }
-    "$libAppName|$h"
+    # |hd：合成時放進高清遊戲圖示（icon_hd.py）之後的第一次要重新合成一次，舊的遊戲庫才會換上
+    "$libAppName|$h|hd"
 }
 function Look-Changed {
     $lib = Library-Ipa
@@ -2448,7 +2449,7 @@ function Library-Call($lib, $fail) {
     $call = "Write-Host '==> 合成一包：$libName（$($what -replace "'", "''")）'; " +
             "& $(Quote (Get-Python)) $(Quote $lib.Merge) -o $(Quote $tmp) --name $(Quote $libAppName) --bundle-id $libBid --shell $(Quote $lib.Shell)" +
             $(if (Merge-CanLink $lib.Merge) { ' --link' } else { '' }) +
-            $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
+            $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + $(if (Select-String -LiteralPath $lib.Merge -Pattern 'hd-icons' -SimpleMatch -Quiet) { " --hd-icons $(Quote (Join-Path $coverDir 'hd'))" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
             "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +
             "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; " +
