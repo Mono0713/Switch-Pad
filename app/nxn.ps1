@@ -67,7 +67,7 @@ function Write-Status([switch]$Now) {
             $script:st.updated = (Get-Date).ToString('o')
             $f = Join-Path $script:stDir "run-$PID.json"
             [IO.File]::WriteAllText("$f.tmp", ($script:st | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
-            if (Test-Path -LiteralPath $f) { [IO.File]::Replace("$f.tmp", $f, $null) } else { [IO.File]::Move("$f.tmp", $f) }
+            if (Test-Path -LiteralPath $f) { [IO.File]::Replace("$f.tmp", $f, [NullString]::Value) } else { [IO.File]::Move("$f.tmp", $f) }
             $script:stWrote = Get-Date
             return
         } catch { Start-Sleep -Milliseconds 200 }

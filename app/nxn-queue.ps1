@@ -33,7 +33,7 @@ function Save($q, [switch]$KeepNote) {
     for ($i = 0; $i -lt 5; $i++) {
         try {
             [IO.File]::WriteAllText("$file.tmp", ($q | ConvertTo-Json -Depth 5 -Compress), $utf8)
-            if (Test-Path -LiteralPath $file) { [IO.File]::Replace("$file.tmp", $file, $null) } else { [IO.File]::Move("$file.tmp", $file) }
+            if (Test-Path -LiteralPath $file) { [IO.File]::Replace("$file.tmp", $file, [NullString]::Value) } else { [IO.File]::Move("$file.tmp", $file) }
             return
         } catch { Start-Sleep -Milliseconds 300 }   # Switch Pad 剛好在讀
     }
