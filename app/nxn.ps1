@@ -222,11 +222,26 @@ try {
             $keysN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.keys$' }).Count
             if ($keysN) { $glArg += @('--used-shaders', $glDir); Write-Host "只放用到的著色器：加上 iPad 這 $keysN 次遊玩記下缺的著色器" }
         }
+        # 遊戲庫用的遊戲包（<名稱>-multi-<格式>.ipa）不放 RomFS：RomFS 留在 NSP 裡，傳到 iPad 時才從 NSP 解出來（電腦上每款遊戲只佔一份空間）。
+        # 打包器太舊、不認得 --romfs-source 的話照舊放進去
+        $romfsArg = @()
+        $romfsOk = $PackOnly -and $Out -and ((Split-Path $Out -Leaf) -like '*-multi-*') -and (Select-String -LiteralPath $packer -SimpleMatch -Quiet -Pattern "'--romfs-source'")
+        if ($romfsOk) { $romfsArg = @('--romfs-source') }
         if ($ReuseIfFresh -and $Out -and (Test-Path -LiteralPath $Out)) {
             $part = Get-Item -LiteralPath $Out
             $newest = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci|nsz|xcz)$' }) +
                       @(if ($glDir) { Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue }) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if (-not $newest -or $part.LastWriteTime -ge $newest.LastWriteTime) { Finish "沿用打包好的 $($part.Name)（沒有新的遊戲檔或著色器）" Green; return }
+            if (-not $newest -or $part.LastWriteTime -ge $newest.LastWriteTime) {
+                # 以前打包、裡面還有一份 RomFS 的遊戲包：拿掉那份（只改寫遊戲包，不重新打包；已經拿掉的一秒內就略過）
+                if ($romfsOk) {
+                    $before = $part.Length
+                    $env:PYTHONUTF8 = '1'
+                    $c = RunExe $Python @($packer, '--strip-romfs', $part.FullName, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName)
+                    if ($c) { Warn "遊戲包裡的 RomFS 沒拿掉（結束碼 $c），照舊用" }
+                    else { $after = (Get-Item -LiteralPath $Out).Length; if ($after -lt $before) { Write-Host ("遊戲包裡重複的 RomFS 拿掉了，省下 {0:N1} GB" -f (($before - $after) / 1GB)) } }
+                }
+                Finish "沿用打包好的 $($part.Name)（沒有新的遊戲檔或著色器）" Green; return
+            }
             Write-Host '有新的遊戲檔或 iPad 上新記下的著色器，重新打包'
         }
 
@@ -318,7 +333,7 @@ try {
         Push-Location $srcDir
         try {
             $env:PYTHONUTF8 = '1'
-            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
+            $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg + $romfsArg)
             # 上游沒有這款的設定檔（迴旋鏢當初也是）：用 make_provisional.py 從遊戲檔猜一份暫定的，再打包一次
             if ($code) {
                 $nsps = @(Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Extension -match '^\.(nsp|xci)$' })
@@ -339,7 +354,7 @@ try {
                     $code = RunExe $pyExe @($prov, $srcDir, $nx.DirectoryName, $Keys, $baseFile.FullName, $(if ($upd) { $upd.FullName } else { '-' }), $ver, $tid)
                     if ($code) { throw "做不出暫定設定檔（結束碼 $code）" }
                     Step "用暫定設定檔重新打包 $(Split-Path $GameDir -Leaf)"
-                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg)
+                    $code = RunExe $pyExe (@($packer, $shellZip, $GameDir, '-k', $Keys, '--tools', $nx.DirectoryName) + $outArg + $glArg + $romfsArg)
                 }
             }
         } finally { Pop-Location }

@@ -23,6 +23,8 @@ the merged IPA and records where it is instead: the source IPA of each game, its
 from that source when the iPad does not have it. The merged IPA is then only the app that gets signed, so a merge writes
 ~3 GB instead of rewriting every game's data, and installing needs no separate copy without the data. The record is the
 zip comment (LINK_MAGIC + JSON); a merge that takes a linked IPA as input links too, carrying its records over.
+A game package packed with nxn_pack.py --romfs-source has no romfs/ at all, only <App>/romfs.source.json: its RomFS
+record then says 'source' (that file's entry), and push extracts the RomFS from the NSP the file names.
 """
 import argparse, io, json, os, plistlib, re, struct, sys, time, zipfile, zlib
 
@@ -32,6 +34,7 @@ SHELL_DM = ('font/', 'shell_info.txt', 'placeholder.tsv')   # the shell's own fi
 GAME_DIRS = ('romfs/', 'msl/', 'aoc/', 'pso/')
 DATA_DIRS = ('romfs', 'msl')     # the folders romfs_data.py moves to Documents/games/<tid>/ (the shell reads them there first)
 LINK_MAGIC, LINK_MAGIC_Z = b'NXNLINK1', b'NXNLINKZ'
+ROMFS_RECORD = 'romfs.source.json'   # nxn_pack.py --romfs-source: <App>/romfs.source.json instead of romfs/ (where the RomFS comes from)
 
 
 def read_link(z):
@@ -86,6 +89,13 @@ class Game:
         self.prefix = prefix      # an IPA this script made: the game's folder games/<tid>/ in it
         self.guest = guest        # the folder of its Guest framework in that IPA
         self.link = {}            # a linked merged IPA: its records of this game's data folders ('games/<tid>/romfs' ...)
+
+    def romfs_source(self):
+        """a game package nxn_pack.py made with --romfs-source: its record of the RomFS it left in the NSP, or None"""
+        if self.prefix is not None: return None
+        try: return json.loads(self.z.read(self.A + ROMFS_RECORD).decode('utf-8'))
+        except KeyError: return None
+        except Exception as e: die('%s: %s cannot be read (%s)' % (self.z.filename, ROMFS_RECORD, e))
 
     def entries(self, out_A):
         """(source ZipInfo, archive name in the merged IPA) for each entry of this game"""
@@ -334,7 +344,7 @@ def main():
             n = i.filename
             if not n.startswith(SA): continue
             r = n[len(SA):]
-            if r.startswith(('_CodeSignature/', 'games/', 'Frameworks/', 'romfs/', 'msl/', 'aoc/', 'pso/')) or r in ('embedded.mobileprovision', 'Info.plist') or r.startswith('AppIcon'): continue
+            if r.startswith(('_CodeSignature/', 'games/', 'Frameworks/', 'romfs/', 'msl/', 'aoc/', 'pso/')) or r in ('embedded.mobileprovision', 'Info.plist', ROMFS_RECORD) or r.startswith('AppIcon'): continue
             if r.startswith('dm/') and len(r) > 3 and not r[3:].startswith(SHELL_DM): continue
             o.copy(sz, i, out_A + r)
         for d in ('Payload/', out_A):
@@ -380,11 +390,23 @@ def main():
                     continue
                 o.copy(g.z, i, name); n_guest += name.endswith('/Guest')
             if n_guest != 1: die('%s: its Guest library is missing' % g.name)
+            src_rec = g.romfs_source()
+            if src_rec is not None and not a.link:
+                die('%s keeps its RomFS in the NSP (%s): it can only be merged with --link' % (g.name, ROMFS_RECORD))
             if a.link:
                 st = os.stat(g.z.filename)
                 for d in DATA_DIRS:
                     key = 'games/%s/%s' % (g.tid, d)
-                    if rows[d] or key not in g.link:   # the data is in this source (or the game has none of it)
+                    if d == 'romfs' and src_rec is not None and not rows[d]:
+                        # packed with --romfs-source: the RomFS stays in the NSP; push extracts it from there. The id is
+                        # the one the files would have had in the package (same names, sizes, CRCs), so an iPad that has
+                        # this RomFS already is not sent it again
+                        base = out_A + 'games/%s/romfs/' % g.tid
+                        links[key] = {'ipa': os.path.abspath(g.z.filename), 'size': st.st_size, 'mtime': st.st_mtime_ns,
+                                      'prefix': '', 'source': g.A + ROMFS_RECORD,
+                                      'id': part_id([(base + f[0], f[1], f[2]) for f in src_rec['list']]),
+                                      'bytes': src_rec['bytes'], 'files': src_rec['files']}
+                    elif rows[d] or key not in g.link:   # the data is in this source (or the game has none of it)
                         links[key] = {'ipa': os.path.abspath(g.z.filename), 'size': st.st_size, 'mtime': st.st_mtime_ns,
                                       'prefix': src_pre.get(d, ''), 'id': part_id(rows[d]),
                                       'bytes': sum(r[1] for r in rows[d]), 'files': len(rows[d])}
