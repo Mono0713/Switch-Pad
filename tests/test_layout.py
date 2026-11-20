@@ -325,5 +325,45 @@ class PcFolders(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.r, '合包')))
 
 
+class DesktopInbox(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(); r = os.path.join(self.tmp, 'Switch PAD')
+        self.g1 = os.path.join(r, '遊戲', 'Super Mario Odyssey'); self.g2 = os.path.join(r, '遊戲', 'Unrailed 2 Back on Track')
+        write(os.path.join(self.g1, 'smo [0100000000010000][v0].nsp')); write(os.path.join(self.g2, 'u [010593A5182E4000].xci'))
+        write(os.path.join(self.g1, '存檔', '存檔 1', 'f'), b'old')
+        self.pairs = [(T1, self.g1), (T2, self.g2)]
+        self.inbox = os.path.join(self.tmp, '存檔'); self.seen = os.path.join(r, '程式', 'work', sd.INBOX_SEEN)
+
+    def tearDown(self): shutil.rmtree(self.tmp)
+
+    def run_(self):
+        return sd.import_inbox(self.inbox, self.pairs, NAMES, self.seen, out=lambda *_: None)
+
+    def test_sorts_by_name_and_title_id(self):
+        i = self.inbox
+        write(os.path.join(i, 'Super Mario Odyssey', 'game.bin'), b'a')                # the save itself, named by game
+        write(os.path.join(i, 'JKSV', 'Unrailed 2', 'user - 2026', 'save.dat'), b'b')   # JKSV: <game>/<save>/
+        write(os.path.join(i, '0100000000010000', '0', 'x.bin'), b'c')                 # Ryujinx-like: <title ID>/0/
+        write(os.path.join(i, '不知道哪款', 'x'), b'd')
+        n, unknown = self.run_()
+        self.assertEqual(n, 3)
+        got = {n: sorted(os.listdir(os.path.join(self.g1, '存檔', n))) for n in os.listdir(os.path.join(self.g1, '存檔'))}
+        self.assertEqual(sorted(got.values()), [['f'], ['game.bin'], ['x.bin']])
+        self.assertEqual(sorted(got), ['存檔 1', '桌面存檔', '桌面存檔 (2)'])
+        self.assertEqual(read(os.path.join(self.g2, '存檔', 'user - 2026', 'save.dat')), b'b')
+        self.assertEqual(unknown, ['不知道哪款'])
+        self.assertEqual(read(os.path.join(self.g1, '存檔', '存檔 1', 'f')), b'old')     # nothing replaced
+
+    def test_once_only(self):
+        write(os.path.join(self.inbox, 'Super Mario Odyssey', 'game.bin'), b'a')
+        self.assertEqual(self.run_()[0], 1)
+        shutil.rmtree(os.path.join(self.g1, '存檔', '桌面存檔'))   # deleted later (on the iPad, then by the sync)
+        self.assertEqual(self.run_()[0], 0)
+
+    def test_same_files_already_there(self):
+        write(os.path.join(self.inbox, 'Super Mario Odyssey', 'f'), b'old')
+        self.assertEqual(self.run_()[0], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

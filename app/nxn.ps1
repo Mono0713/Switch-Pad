@@ -606,6 +606,8 @@ try {
     $isPack = (Split-Path $ipaDir -Leaf) -in '遊戲庫', '合包'   # 合包\ 是舊名（pc_layout.py 會搬成 遊戲庫\）
     $syncGames = if ($isPack) { Join-Path $base '遊戲' } else { $ipaDir }
     $packName = [IO.Path]::GetFileNameWithoutExtension($Ipa)
+    # 自己丟進 桌面\存檔（或 Switch PAD\存檔）的存檔：同步前照遊戲名稱或 title ID 放進各遊戲的 存檔\，再跟著同步到 iPad（saves_data.py import_inbox）
+    $inboxArgs = @(); if ($isPack) { foreach ($ib in @((Join-Path (Split-Path $base -Parent) '存檔'), (Join-Path $base '存檔'))) { if (Test-Path -LiteralPath $ib) { $inboxArgs += @('--inbox', $ib) } } }
     $saveRoot = if (-not $isPack) { Join-Path $ipaDir '存檔備份' } elseif ($packName -eq '遊戲庫') { Join-Path $base '備份\iPad存檔' } else { Join-Path $base ('備份\' + $packName) }
     if ($saveMode) {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
@@ -647,7 +649,7 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
             if (-not $c) {
                 Step '和電腦的存檔資料夾雙向同步'
-                $sc = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+                $sc = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot) + $inboxArgs + @('--udid', $dev.Serial))
                 if ($sc) { Warn "存檔同步沒做完（結束碼 $sc），備份是好的" }
             }
         }
@@ -824,7 +826,7 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         $tpy = Transfer-Python
         if ($tpy) {
             Step '和電腦的存檔資料夾雙向同步'
-            $c = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+            $c = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot) + $inboxArgs + @('--udid', $dev.Serial))
             if ($c) { Warn "存檔同步沒做完（結束碼 $c），下次同步會再同步"; $saveNote = '存檔同步沒做完，看上面的記錄' }
         }
     }

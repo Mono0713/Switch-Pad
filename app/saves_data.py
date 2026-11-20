@@ -598,6 +598,85 @@ async def sync(afc, ipa, games, root, now=None, json_out=None):
     return 0
 
 
+# ---- saves a person drops in a folder (桌面\存檔): sorted into each game's 存檔\ before a sync, which then takes them to the iPad ----
+INBOX_SEEN = '桌面存檔已匯入.json'   # in the games' parent's 程式\work: digests already taken, so a save deleted later does not come back
+TID_IN = re.compile(r'(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])')
+
+
+def _key(name):
+    return ''.join(c for c in name.lower() if c.isalnum())
+
+
+def _files_here(d):
+    return [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and not f.startswith('.') and f.lower() not in JUNK]
+
+
+def _dirs_here(d):
+    return sorted(f for f in os.listdir(d) if os.path.isdir(os.path.join(d, f)) and not f.startswith('.'))
+
+
+def inbox_saves(d, label):
+    """[(save name, folder)] in one game's folder of the inbox: the folder itself when it holds files (a save copied as is),
+    else each folder in it (JKSV, Checkpoint: <game>/<save or date>/), and a Ryujinx-style lone 0/ is the save's own contents."""
+    if _files_here(d): return [(label, d)]
+    subs = _dirs_here(d)
+    if subs == ['0'] or subs == ['0', '1']: return [(label, os.path.join(d, '0'))]
+    return [(n, os.path.join(d, n)) for n in subs if clean_files(os.path.join(d, n))]
+
+
+def inbox_match(name, path_tids, games):
+    """The title ID of games ({tid: [names]}) that an inbox folder is for: a title ID in its path, else its name"""
+    for t in path_tids:
+        for c in (t, t[:-3] + '000'):
+            if c in games: return c
+    k = _key(name)
+    if not k: return None
+    hits = [t for t, ns in games.items() if any(_key(n) == k for n in ns)]
+    if not hits:
+        hits = [t for t, ns in games.items() if any(len(_key(n)) >= 5 and len(k) >= 5 and (_key(n) in k or k in _key(n)) for n in ns)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def import_inbox(src, pairs, names, seen_file, out=print):
+    """Copy each save in src into its game's 存檔\ (pairs [(tid, game folder)], names {tid: name}). A save already there with the
+    same files, or taken before (seen_file), is skipped. Returns (copied, [folders no game was found for])."""
+    games = {t: [names.get(t, ''), os.path.basename(g)] for t, g in pairs}
+    gdir = dict(pairs)
+    seen = {}
+    with contextlib.suppress(OSError, ValueError):
+        with open(seen_file, encoding='utf-8') as fh: seen = json.load(fh)
+    copied, unknown = 0, []
+
+    def walk(d, depth, tids):
+        nonlocal copied
+        for n in _dirs_here(d):
+            p = os.path.join(d, n)
+            t_here = [m.upper() for m in TID_IN.findall(n)] + tids
+            t = inbox_match(n, t_here, games)
+            if not t:
+                if depth < 5 and _dirs_here(p) and not _files_here(p): walk(p, depth + 1, t_here)   # nand\user\save\...\<title ID>
+                elif clean_files(p): unknown.append(os.path.relpath(p, src))
+                continue
+            sd = os.path.join(gdir[t], SYNC_DIR)
+            os.makedirs(sd, exist_ok=True)
+            have = {tree_digest(os.path.join(sd, x)) for x in _dirs_here(sd)}
+            label = '桌面存檔' if TID_IN.fullmatch(n) or _key(n) in (_key(x) for x in games[t]) else n
+            for sname, sdir in inbox_saves(p, label):
+                dg = tree_digest(sdir)
+                if dg in have or dg in seen: continue
+                dest = unique_dir(sd, sname)
+                shutil.copytree(sdir, dest, ignore=shutil.ignore_patterns('desktop.ini', 'Thumbs.db', '.DS_Store'))
+                have.add(dg); seen[dg] = os.path.relpath(dest, os.path.dirname(gdir[t])); copied += 1
+                out('%s：桌面的「%s」放進電腦的存檔，同步時會傳到 iPad（存檔名稱「%s」）' % (names.get(t) or os.path.basename(gdir[t]), os.path.relpath(sdir, src), os.path.basename(dest)))
+
+    if os.path.isdir(src): walk(src, 0, [])
+    if copied:
+        os.makedirs(os.path.dirname(seen_file), exist_ok=True)
+        with open(seen_file, 'w', encoding='utf-8') as fh: json.dump(seen, fh, ensure_ascii=False, indent=1)
+    for u in unknown: out('[!] %s：看不出是哪款遊戲（資料夾名稱用遊戲英文名或 title ID），這份沒傳' % os.path.join(os.path.basename(src), u))
+    return copied, unknown
+
+
 # ---- the new layout: 存檔/<game>/<save>/ on the iPad is <game folder>/存檔/<save>/ on the PC, by name ----
 ACTIONS = []   # what sync did, for --json: {'game', 'save', 'action', ...}
 
@@ -1166,10 +1245,18 @@ def main():
     p.add_argument('--report', default=''); p.add_argument('--zip', default=''); p.add_argument('--extra', default='')
     p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--games', default='')
     p = sub.add_parser('sync'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('root'); p.add_argument('--json', default='')
+    p.add_argument('--inbox', action='append', default=[])
+    p = sub.add_parser('inbox'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('src', nargs='+')
     p = sub.add_parser('status'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('--json', default='')
     p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default=''); p.add_argument('--slot', default='')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
+    if a.cmd in ('sync', 'inbox'):
+        for src in (a.inbox if a.cmd == 'sync' else a.src):
+            if os.path.isdir(src) and save_dest(a.ipa, '') != 'save':
+                import_inbox(src, game_folders(a.ipa, a.games), IL.game_names(a.ipa),
+                             os.path.join(os.path.dirname(os.path.abspath(a.games)), '程式', 'work', INBOX_SEEN))
+        if a.cmd == 'inbox': return 0
     try: import pymobiledevice3  # noqa: F401
     except ImportError: raise SystemExit('pymobiledevice3 is not installed')
     if a.cmd == 'migrate': return asyncio.run(migrate_on_device(a))
