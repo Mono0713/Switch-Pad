@@ -11,6 +11,8 @@ Documents survives a reinstall, so after the first install the free account's we
                                            (--order: also put the game order PadSwitch keeps as Documents/game-order.json)
   romfs_data.py space <ipa> [--udid UDID]  one JSON line: the iPad's free and total bytes, whether the app is installed, what
                                            of its data is there; also written to $NXN_STATUS_DIR/ipad-space.json
+  romfs_data.py prune <ipa> [--udid UDID]  delete the data of games no longer in this library from the iPad (before
+                                           the app is signed and installed, so the install has room)
   romfs_data.py sizes <ipa>...             one JSON line: {ipa: bytes it puts on the iPad (its data folders, a RomFS left in
                                            the NSP counted at its size, plus the rest of the package)}
 
@@ -474,15 +476,10 @@ async def _push(a, opened):
                 except Exception: have = {}
             todo = [d for d in want if a.force or have.get(d) != want[d]]
             # a game taken out of a package: its folders go too (they would only take space)
-            gone = [d for d in have if d not in want and d.startswith('games/')]
-            # 先刪：拿掉的遊戲先清掉，騰出 iPad 空間再傳新的
-            if gone: a.status.d['phase'] = '先刪掉拿掉的遊戲，騰出 iPad 空間'; a.status.write(True)
-            for d in gone:
-                if await afc.exists(L.key(d)): await afc.rm(L.key(d), force=True)
-                await drop_list(afc, L, d)
-                a.status.d['removed'].append(d)
-                print('removed %s (no longer in this package)' % d)
-            if gone: print('已刪掉拿掉的遊戲：%s' % '、'.join(sorted({name_of(names, d).rsplit(' ', 1)[0] for d in gone})))
+            # 先刪：拿掉的遊戲先清掉，騰出 iPad 空間再傳新的（同步通常已在簽章前用 prune 刪過，這裡是保險）
+            if any(d not in want and d.startswith('games/') for d in have):
+                a.status.d['phase'] = '先刪掉拿掉的遊戲，騰出 iPad 空間'; a.status.write(True)
+            gone = await remove_gone(afc, L, have, want, names, a.status)
             if not todo:
                 if gone: await afc.set_file_contents(mark, json.dumps(want).encode())
                 await list_missing(afc, L, want, jobs_of)
@@ -570,6 +567,75 @@ async def _push(a, opened):
 ORDER_FILE = 'game-order.json'
 
 
+async def remove_gone(afc, L, have, want, names, status=None):
+    """delete from the iPad the data folders of games no longer in the library (they only take space); returns them"""
+    gone = [d for d in have if d not in want and d.startswith('games/')]
+    for d in gone:
+        if await afc.exists(L.key(d)): await afc.rm(L.key(d), force=True)
+        await drop_list(afc, L, d)
+        if status is not None: status.d['removed'].append(d)
+        print('removed %s (no longer in this package)' % d)
+    if gone: print('已刪掉拿掉的遊戲：%s' % '、'.join(sorted({name_of(names, d).rsplit(' ', 1)[0] for d in gone})))
+    return gone
+
+
+def wanted_folders(z):
+    """the data folders (games/<tid>/romfs ...) this library package wants on the iPad, without reading any game data"""
+    link = read_link(z)
+    if link is not None: return set(link)
+    return {d for _, d in layout(z)[2]}
+
+
+async def installed_app(ld, orig, sizes=False):
+    """(bundle id, the app's record) of the installed app plumesign signed as <id>.<team ID>, or (None, None)"""
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+    async with InstallationProxyService(lockdown=ld) as ip:
+        apps = None
+        if sizes:
+            try: apps = await ip.get_apps(application_type='User', calculate_sizes=True)
+            except Exception: apps = None
+        if apps is None: apps = await ip.get_apps(application_type='User')
+    ids = [b for b in apps if b == orig or b.startswith(orig + '.')]
+    return (ids[0], apps[ids[0]]) if ids else (None, None)
+
+
+async def read_mark(afc, L):
+    try:
+        raw = (await afc.get_file_contents(L.sys(MARK))).decode().strip()
+        return json.loads(raw) if raw.startswith('{') else {}
+    except Exception: return {}
+
+
+async def cmd_prune(a):
+    """Before the app is signed and installed: delete the data of games taken out of the library, so the iPad has the
+    room the install needs (2026-11-20: 2.4 GB left, the app did not fit while a removed game's data still sat there)."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.house_arrest import HouseArrestService
+    with zipfile.ZipFile(a.ipa) as z:
+        app, pl, parts, files, several = layout(z)
+        orig = pl.get('CFBundleIdentifier', '')
+        want = wanted_folders(z)
+        names_all = game_names(z, app)
+    ld = await create_using_usbmux(serial=a.udid or None)
+    async with ld:
+        bid, _ = await installed_app(ld, orig)
+        if not bid: print('App 還沒裝在 iPad 上，沒有要先刪的'); return
+        async with await HouseArrestService.create(lockdown=ld, bundle_id=bid, documents_only=True) as afc:
+            L = await ipad_layout.IPad.load(afc, ipad_layout.game_names(a.ipa) if several else {})
+            have = await read_mark(afc, L)
+            try: free0 = int((await afc.get_device_info()).get('FSFreeBytes', 0))
+            except Exception: free0 = 0
+            gone = await remove_gone(afc, L, have, want, names_all)
+            if not gone:
+                print('iPad 上沒有已拿掉的遊戲資料')
+                await note_space(afc, a, bid, have)
+                return
+            have = {d: v for d, v in have.items() if d not in gone}
+            await afc.set_file_contents(L.sys(MARK), json.dumps(have).encode())
+            d = await note_space(afc, a, bid, have) or {}
+            if free0 and d.get('free'): print('騰出 %.1f GB，iPad 現在剩 %.1f GB' % ((d['free'] - free0) / 2**30, d['free'] / 2**30))
+
+
 async def put_order(afc, L, a):
     """--order: PadSwitch's game order (a JSON list of title IDs) as Documents/game-order.json; the game picker shows the
     games in that order (the ones it does not list after them, by name). Best effort."""
@@ -614,9 +680,8 @@ async def cmd_space(a):
     async with ld:
         try: name = await ld.get_value(key='DeviceName')
         except Exception: name = ''
-        async with InstallationProxyService(lockdown=ld) as ip:
-            apps = await ip.get_apps(application_type='User')
-        ids = [b for b in apps if b == orig or b.startswith(orig + '.')]
+        bid, rec = await installed_app(ld, orig, sizes=True)
+        ids = [bid] if bid else []
         if not ids:
             d = {'installed': False, 'bundle': orig, 'device': name, 'at': now_iso()}
             try:
@@ -631,8 +696,17 @@ async def cmd_space(a):
                 raw = (await afc.get_file_contents(L.sys(MARK))).decode().strip()
                 have = json.loads(raw) if raw.startswith('{') else {}
             except Exception: pass
+            # each data folder's size on the iPad, from the file list push wrote for it (no walk over the iPad)
+            onpad = {}
+            for k in have:
+                lst = await read_list(afc, L, k)
+                if lst is not None: onpad[k] = sum(v[0] for v in lst.values())
             d = await note_space(afc, a, ids[0], have) or {'installed': True, 'bundle': ids[0]}
             d['device'] = name
+            d['data'] = onpad
+            try:
+                if rec: d['app'] = int(rec.get('StaticDiskUsage') or 0) + int(rec.get('DynamicDiskUsage') or 0)
+            except Exception: pass
             write_space(d)
             print(json.dumps(d, ensure_ascii=False))
 
@@ -775,6 +849,7 @@ def main():
     p.add_argument('--order', default='')
     p = sub.add_parser('space'); p.add_argument('ipa'); p.add_argument('--udid', default='')
     p = sub.add_parser('sizes'); p.add_argument('ipa', nargs='+')
+    p = sub.add_parser('prune'); p.add_argument('ipa'); p.add_argument('--udid', default='')
     a = ap.parse_args()
     if a.cmd == 'info': cmd_info(a)
     elif a.cmd == 'lite': cmd_lite(a)
@@ -783,6 +858,7 @@ def main():
         try: import pymobiledevice3  # noqa: F401
         except ImportError: raise SystemExit('pymobiledevice3 is not installed')
         if a.cmd == 'space': asyncio.run(cmd_space(a)); return
+        if a.cmd == 'prune': asyncio.run(cmd_prune(a)); return
         try: asyncio.run(push(a))
         except Mismatch as e: raise SystemExit(str(e))
 

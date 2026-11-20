@@ -685,6 +685,16 @@ try {
         Lap '存檔備份'
     }
 
+    # ---- 先刪：iPad 上有、但已經不在遊戲庫的遊戲資料，在簽章安裝 App 之前就刪掉，App 才裝得進去 ----
+    if ((Test-Path $dataTool) -and (Select-String -LiteralPath $dataTool -SimpleMatch -Quiet -Pattern "add_parser('prune')")) {
+        $tpy = Transfer-Python
+        if ($tpy) {
+            Step '先刪掉 iPad 上拿掉的遊戲，騰出空間'
+            $c = RunExe $tpy @('-I', $dataTool, 'prune', $Ipa, '--udid', $dev.Serial)
+            if ($c) { Warn "先刪拿掉的遊戲沒做成（結束碼 $c），傳資料時會再刪一次" }
+            Lap '騰出空間'
+        }
+    }
     $signIpa = $Ipa; $split = $null
     if ((Test-Path $dataTool) -and $py) {
         $r = Quiet $py @('-I', $dataTool, 'info', $Ipa)
