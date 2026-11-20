@@ -3241,6 +3241,15 @@ function Run-Sync {
         return
     }
     if (-not $dirs.Count) { [void][Windows.MessageBox]::Show('遊戲庫至少要留一款，才能同步。', 'PadSwitch'); return }
+    # 已知放不下就在這裡先擋（不要等簽章、安裝完才在傳資料前失敗），並列出佔最大的 5 款，讓使用者知道拿掉哪幾款最有用。
+    # 用跟空間卡同一份估算（Fit-Info：只算這次要新傳的、拿掉的先空出、保留 1 GB）；還有待核對的項目時估不準，不擋，交給傳送前的檢查
+    $fi = Fit-Info
+    if ($fi.ShowAfter -and -not $fi.Partial -and $fi.Send -and $fi.After -lt 1GB) {
+        $big = @($dirs | ForEach-Object { [pscustomobject]@{ Name = $cards[$_].Tag.Name; B = [long](Game-Bytes $cards[$_].Tag) } } |
+                 Sort-Object B -Descending | Select-Object -First 5 | ForEach-Object { "  • $($_.Name)　$(Fmt-Size $_.B)" }) -join "`n"
+        [void][Windows.MessageBox]::Show($win, ("選的遊戲放不下 iPad，這次先不同步。`n`n這次要傳 {0}，拿掉的遊戲會先空出 {1}，iPad 剩 {2}；傳送要留 1 GB 餘量，所以還差 {3}。`n`n請把暫時不玩的遊戲拖出「遊戲庫」或按「移除」，再按「同步」。`n`n佔最大的幾款：`n{4}" -f (Fmt-Size $fi.Send), (Fmt-Size $fi.Freed), (Fmt-Size $fi.Free), (Fmt-Size (1GB - $fi.After)), $big), 'iPad 空間不夠', 'OK', 'Warning')
+        return
+    }
     if (-not $state.Running) { $freed = Clean-AfterMerge; if ($freed -gt 100MB) { $script:freedNote = '先清掉用不到的舊遊戲包 {0:N1} GB' -f ($freed / 1GB) } else { $script:freedNote = '' } }
     $jobs = @(); $outs = @()
     $glGames = @($dirs | Where-Object { $t = Game-Tid $cards[$_].Tag; $t -and (Test-Path -LiteralPath (Gl-Rec $cards[$_].Tag)) })
