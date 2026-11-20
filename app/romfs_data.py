@@ -292,6 +292,47 @@ def listing_of(x):
 def list_path(L, d): return '%s/%s.json' % (L.sys(LIST_DIR), d.replace('/', '~'))
 
 
+REMOVE_PATH_AND_CONTENTS = 0x22   # AFC RemovePathAndContents (rm -rf on the iPad, iOS 6+)
+
+
+async def rm_tree(afc, path):
+    """Delete a folder and everything in it with one AFC request. pymobiledevice3 11.45's afc.rm walks the tree and removes
+    each file with its own round trip: a shader folder of 300,000 files took over an hour (2026-11-20). Falls back to
+    afc.rm when the device or the library does not take the request."""
+    try:
+        status, _ = await afc._send_and_wait(REMOVE_PATH_AND_CONTENTS, path.encode('utf-8') + b'\0')
+        if int(status) in (0, 8): return   # done, or nothing there
+    except Exception: pass
+    if await afc.exists(path): await afc.rm(path, force=True)
+
+
+async def rm_files(afc, paths, status=None, label=''):
+    """Remove many single files, many requests in flight at once (one connection answers them in any order), with the
+    count in the status file and the log so the step does not look stuck"""
+    paths = list(paths)
+    n, done, t0, shown = len(paths), 0, time.time(), time.time()
+    if not n: return
+    phase = '清掉被換掉的舊檔%s' % (('（%s）' % label) if label else '')
+    single = getattr(afc, 'rm_single', None)
+    async def one(k):
+        try:
+            if single: await single(k, force=True)
+            elif await afc.exists(k): await afc.rm(k, force=True)
+        except Exception: pass
+    for i in range(0, n, 64):
+        await asyncio.gather(*(one(k) for k in paths[i:i + 64]))
+        done = min(n, i + 64)
+        el = time.time() - t0
+        if status is not None:
+            status.d['phase'] = '%s %d／%d' % (phase, done, n)
+            # 剩下的時間 = 還要刪的 + 之後要傳的（還沒開始傳，用 PadSwitch 記下的平均速度，沒有就 12 MB/s）
+            if el > 3: status.d['eta'] = int((n - done) * el / done + max(0, status.d.get('total', 0) - status.d.get('sent', 0)) / max(1, int(os.environ.get('NXN_PUSH_RATE', '0') or 0) or (12 << 20)))
+            status.write()
+        if time.time() - shown > 10 or done == n:
+            shown = time.time()
+            print('%s：%d／%d（%.0f 秒）' % (phase, done, n, el), flush=True)
+
+
 async def read_list(afc, L, d):
     p = list_path(L, d)
     try:
@@ -456,6 +497,13 @@ async def transfer_changes(afc, L, todo, jobs_of, force=False, known_sizes=None)
             continue
         changed = {k for k, value in lists[d].items() if old.get(k) != value}
         removed = old.keys() - lists[d].keys()
+        # 一大半都要換（新版殼把著色器整個重排之類）：整個資料夾一個請求刪掉重傳，比逐檔刪幾十萬個檔快得多
+        touched = len(removed) + sum(1 for k in changed if k in old)
+        if touched >= 2000 and touched * 2 > len(old):   # 舊檔有一半以上要刪或要換（檔少的逐檔刪也很快）
+            plan[d] = None
+            growth += sum(size for size, _ in lists[d].values())
+            released += sum(size for size, _ in old.values())
+            continue
         plan[d] = (old, changed, sorted(removed))
         skipped += len(lists[d]) - len(changed)
         released += sum(old[k][0] for k in removed)
@@ -570,16 +618,25 @@ async def _push(a, opened):
             # forget the parts about to be replaced first, so a copy cut short is redone next time
             keep = {d: v for d, v in have.items() if d in want and d not in todo}
             await afc.set_file_contents(mark, json.dumps(keep).encode())
+            # 先清掉要換掉的：整個重傳的資料夾一次刪（一個請求），只換一部分的逐檔刪，進度寫進狀態檔和記錄
+            nrm = sum(len(plan[d][2]) for d in todo if plan[d] is not None)
+            if nrm or any(plan[d] is None for d in todo):
+                a.status.d['phase'] = '清掉被換掉的舊檔'; a.status.write(True)
+                print('清掉被換掉的舊檔：%d 個資料夾整個換、%d 個檔逐一刪' % (sum(plan[d] is None for d in todo), nrm), flush=True)
             for d in todo:
                 if plan[d] is None:
                     await drop_list(afc, L, d)
-                    if await afc.exists(L.key(d)): await afc.rm(L.key(d), force=True)
+                    t1 = time.time()
+                    await rm_tree(afc, L.key(d))
+                    print('%s：整個資料夾刪掉重傳（%.0f 秒）' % (name_of(names, d), time.time() - t1), flush=True)
                     continue
                 old, changed, removed = plan[d]
                 await write_list(afc, L, d, {k: v for k, v in old.items() if k not in changed and k in lists[d]})
-                for k in removed:
-                    if await afc.exists(L.key(k)): await afc.rm(L.key(k), force=True)
-                if removed: print('%s: removed %d files the new version no longer has' % (d, len(removed)))
+                await rm_files(afc, [L.key(k) for k in removed], a.status, name_of(names, d))
+                if removed: print('%s: removed %d files the new version no longer has' % (d, len(removed)), flush=True)
+            a.status.d.pop('eta', None)
+            a.status.t0, a.status.sent0 = time.time(), a.status.d.get('sent', 0)   # 傳送速度從這裡開始算，不含刪檔的時間
+            a.status.d['phase'] = '傳送中'; a.status.write(True)
 
             # Check again after deletion in case the actual free bytes changed.
             await check_transfer_space(afc, total, growth)
@@ -625,7 +682,7 @@ async def remove_gone(afc, L, have, want, names, status=None):
     """delete from the iPad the data folders of games no longer in the library (they only take space); returns them"""
     gone = [d for d in have if d not in want and d.startswith('games/')]
     for d in gone:
-        if await afc.exists(L.key(d)): await afc.rm(L.key(d), force=True)
+        await rm_tree(afc, L.key(d))
         await drop_list(afc, L, d)
         if status is not None: status.d['removed'].append(d)
         print('removed %s (no longer in this package)' % d)

@@ -363,6 +363,36 @@ class RomfsSourceTest(unittest.TestCase):
 
 
 class TransferSpaceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_mostly_replaced_folder_goes_whole(self):
+        # 2026-11-20: 300,000 old shader files removed one request each took over an hour; most of a big folder
+        # changing is now one request for the folder and a full copy
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        r = rd
+        folder = 'games/0100000000010000/msl'
+        files = [(None, SimpleNamespace(file_size=10, CRC=i), '%s/new%d' % (folder, i)) for i in range(1000)]
+        old = {'%s/old%d' % (folder, i): (10, i) for i in range(3000)}
+        with patch.object(r, 'read_list', AsyncMock(return_value=old)):
+            send, _, plan, _, growth, released = await r.transfer_changes(None, None, [folder], lambda _: files)
+        self.assertIsNone(plan[folder])
+        self.assertEqual(r.jobs_left(send[folder], ()), (1000, 10000))
+        self.assertEqual(released, 30000)
+        # a few removals in a big folder stay file by file
+        old2 = dict(old); files2 = [(None, SimpleNamespace(file_size=10, CRC=i), '%s/old%d' % (folder, i)) for i in range(2990)]
+        with patch.object(r, 'read_list', AsyncMock(return_value=old2)):
+            _, _, plan2, _, _, _ = await r.transfer_changes(None, None, [folder], lambda _: files2)
+        self.assertEqual(len(plan2[folder][2]), 10)
+
+    async def test_rm_files_reports_progress(self):
+        from types import SimpleNamespace
+        r = rd
+        gone = []
+        async def rm_single(k, force=False): gone.append(k); return True
+        st = SimpleNamespace(d={}, write=lambda now=False: None)
+        await r.rm_files(SimpleNamespace(rm_single=rm_single), ['/a%d' % i for i in range(130)], st, 'X')
+        self.assertEqual(len(gone), 130)
+        self.assertEqual(st.d['phase'], '清掉被換掉的舊檔（X） 130／130')
+
     async def test_growth_keeps_unchanged_files_and_checks_before_deletion(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch

@@ -2959,6 +2959,7 @@ function Start-Next {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.EnvironmentVariables['NXN_JOB'] = $job.Id    # nxn.ps1、romfs_data.py 把它寫進進度狀態檔，這裡才找得到這一步的進度
+    try { $psi.EnvironmentVariables['NXN_PUSH_RATE'] = [string][long](Step-Time 'pushRate' (12MB)) } catch { }   # 刪舊檔時估傳送要多久用
     $state.Proc = [Diagnostics.Process]::Start($psi)
     $job.Row.FindName('JTrack').Visibility = 'Visible'
     $timer.Start()
