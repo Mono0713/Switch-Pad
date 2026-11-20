@@ -649,7 +649,7 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
             if (-not $c) {
                 Step '和電腦的存檔資料夾雙向同步'
-                $sc = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot) + $inboxArgs + @('--udid', $dev.Serial))
+                $sc = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--json', (Join-Path $script:stDir 'save-sync.json')) + $inboxArgs + @('--udid', $dev.Serial))
                 if ($sc) { Warn "存檔同步沒做完（結束碼 $sc），備份是好的" }
             }
         }
@@ -829,7 +829,7 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         $tpy = Transfer-Python
         if ($tpy) {
             Step '和電腦的存檔資料夾雙向同步'
-            $c = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot) + $inboxArgs + @('--udid', $dev.Serial))
+            $c = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--json', (Join-Path $script:stDir 'save-sync.json')) + $inboxArgs + @('--udid', $dev.Serial))
             if ($c) { Warn "存檔同步沒做完（結束碼 $c），下次同步會再同步"; $saveNote = '存檔同步沒做完，看上面的記錄' }
         }
     }
