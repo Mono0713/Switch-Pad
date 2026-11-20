@@ -2663,7 +2663,8 @@ function Update-JobProgress($job) {
             $pl = if ($p.eta) { [double]$p.eta } else { ($tot - $sent) / [math]::Max(1, $rate) }
             $left = $pl + 40   # 傳完還有存檔和著色器
             $extra = "傳到 iPad $([math]::Floor($sent * 100 / $tot))% · $(Fmt-Size $sent) / $(Fmt-Size $tot)" + $(if ($p.rate) { ' · {0:N0} MB/s' -f ([double]$p.rate / 1MB) })
-            if ("$($p.phase)" -like '從 NSP*') { $extra += " · $($p.phase)" } elseif ($p.game) { $extra += " · 正在傳 $($p.game)" }
+            if ("$($p.phase)" -like '清掉*') { $extra = "$($p.phase)（刪完才開始傳 $(Fmt-Size $tot)）" }
+            elseif ("$($p.phase)" -like '從 NSP*') { $extra += " · $($p.phase)" } elseif ($p.game) { $extra += " · 正在傳 $($p.game)" }
         } else { $extra = [string]$p.phase }
     } elseif ($job.Mode -eq 'sync' -and $p -and $p.state -eq 'done') { $left = [math]::Max(15, [math]::Min($left, 60)) }
     elseif ($job.RunSt -and $job.RunSt.phase -and $job.Mode -like 'mergepart*') { $extra = "$($job.RunSt.phase)" }
