@@ -439,7 +439,8 @@ def transfer_parts(z, srcs, package_layout=None):
             lambda d: [(z, entry, dest_of(parts, entry.filename)) for entry in by_part[d]])
 
 
-async def transfer_changes(afc, L, todo, jobs_of, force=False):
+async def transfer_changes(afc, L, todo, jobs_of, force=False, known_sizes=None):
+    known_sizes = known_sizes or {}
     send = {d: jobs_of(d) for d in todo}
     lists = {d: listing_of(jobs) for d, jobs in send.items()}
     plan, skipped, growth, released = {}, 0, 0, 0
@@ -450,6 +451,8 @@ async def transfer_changes(afc, L, todo, jobs_of, force=False):
             growth += sum(size for size, _ in lists[d].values())
             if old is not None:
                 released += sum(size for size, _ in old.values())
+            elif known_sizes.get(d) and await afc.exists(L.key(d)):
+                released += known_sizes[d]
             continue
         changed = {k for k, value in lists[d].items() if old.get(k) != value}
         removed = old.keys() - lists[d].keys()
@@ -465,7 +468,8 @@ async def transfer_changes(afc, L, todo, jobs_of, force=False):
     return send, lists, plan, skipped, growth, released
 
 
-async def removable_bytes(afc, L, have, want):
+async def removable_bytes(afc, L, have, want, known_sizes=None):
+    known_sizes = known_sizes or {}
     released = 0
     for d in have.keys() - want.keys():
         if not d.startswith('games/'):
@@ -473,6 +477,8 @@ async def removable_bytes(afc, L, have, want):
         old = await read_list(afc, L, d)
         if old is not None:
             released += sum(size for size, _ in old.values())
+        elif known_sizes.get(d) and await afc.exists(L.key(d)):
+            released += known_sizes[d]
     return released
 
 
@@ -538,10 +544,12 @@ async def _push(a, opened):
                     have = json.loads(raw) if raw.startswith('{') else {}
                 except Exception: have = {}
             todo = [d for d in want if a.force or have.get(d) != want[d]]
-            send, lists, plan, skipped, growth, removed_bytes = await transfer_changes(afc, L, todo, jobs_of, a.force)
+            device_id = getattr(ld, 'identifier', None) or a.udid
+            known_sizes = cached_folder_sizes(bid, have, device_id=device_id)
+            send, lists, plan, skipped, growth, removed_bytes = await transfer_changes(afc, L, todo, jobs_of, a.force, known_sizes)
             total = sum(jobs_left(x, ())[1] for x in send.values())
             nfiles = sum(jobs_left(x, ())[0] for x in send.values())
-            released = removed_bytes + await removable_bytes(afc, L, have, want)
+            released = removed_bytes + await removable_bytes(afc, L, have, want, known_sizes)
             await check_transfer_space(afc, total, growth, released)
             # Check space and validate linked sources before removing data or recording an incomplete copy.
             if any(d not in want and d.startswith('games/') for d in have):
@@ -550,7 +558,7 @@ async def _push(a, opened):
             if not todo:
                 if gone: await afc.set_file_contents(mark, json.dumps(want).encode())
                 await list_missing(afc, L, want, jobs_of)
-                await note_space(afc, a, bid, want)
+                await note_space(afc, a, bid, want, device_id=device_id)
                 print('game files already on the iPad')
                 return
             for d, x in send.items():
@@ -603,7 +611,9 @@ async def _push(a, opened):
 
             await list_missing(afc, L, want, jobs_of, skip=todo)
             await put_order(afc, L, a)
-            await note_space(afc, a, bid, want)
+            sizes_now = {d: known_sizes[d] for d in want if d in known_sizes}
+            sizes_now.update({d: sum(size for size, _ in listing.values()) for d, listing in lists.items()})
+            await note_space(afc, a, bid, want, data=sizes_now, device_id=device_id)
             el = max(time.time() - t0, 0.001)
             print('game files in place (%d files, %d MB in %.0f s over %d connections, %.1f MB/s)' % (nfiles, total >> 20, el, nconn, total / el / 2**20))
 
@@ -650,7 +660,7 @@ async def read_mark(afc, L):
     except Exception: return {}
 
 
-async def check_before_prune(a, afc, L, have):
+async def check_before_prune(a, afc, L, have, known_sizes):
     if not (a.check_transfer or a.check_only):
         return
     srcs = Sources()
@@ -658,9 +668,9 @@ async def check_before_prune(a, afc, L, have):
         with zipfile.ZipFile(a.ipa) as z:
             want, jobs_of = transfer_parts(z, srcs)
             todo = [d for d, identity in want.items() if have.get(d) != identity]
-            send, _, _, _, growth, released = await transfer_changes(afc, L, todo, jobs_of)
+            send, _, _, _, growth, released = await transfer_changes(afc, L, todo, jobs_of, known_sizes=known_sizes)
             total = sum(jobs_left(jobs, ())[1] for jobs in send.values())
-            released += await removable_bytes(afc, L, have, want)
+            released += await removable_bytes(afc, L, have, want, known_sizes)
             print('本次要傳 %.2f GB，估計最多新增 %.2f GB，可先回收 %.2f GB（遊戲資料）。'
                   % tuple(b / 2**30 for b in (total, growth, released)), flush=True)
             await check_transfer_space(afc, total, growth, released)
@@ -698,17 +708,19 @@ async def cmd_prune(a):
             have = await read_mark(afc, L)
             try: free0 = int((await afc.get_device_info()).get('FSFreeBytes', 0))
             except Exception: free0 = 0
-            await check_before_prune(a, afc, L, have)
+            device_id = getattr(ld, 'identifier', None) or a.udid
+            known_sizes = cached_folder_sizes(bid, have, device_id=device_id)
+            await check_before_prune(a, afc, L, have, known_sizes)
             if a.check_only:
                 return
             gone = await remove_gone(afc, L, have, want, names_all)
             if not gone:
                 print('iPad 上沒有已拿掉的遊戲資料')
-                await note_space(afc, a, bid, have)
+                await note_space(afc, a, bid, have, device_id=device_id)
                 return
             have = {d: v for d, v in have.items() if d not in gone}
             await afc.set_file_contents(L.sys(MARK), json.dumps(have).encode())
-            d = await note_space(afc, a, bid, have) or {}
+            d = await note_space(afc, a, bid, have, device_id=device_id) or {}
             if free0 and d.get('free'): print('騰出 %.1f GB，iPad 現在剩 %.1f GB' % ((d['free'] - free0) / 2**30, d['free'] / 2**30))
 
 
@@ -746,13 +758,13 @@ def write_space(d):
     except OSError: pass
 
 
-def cached_folder_sizes(bid, have, device=''):
+def cached_folder_sizes(bid, have, device_id=''):
     status_dir = os.environ.get('NXN_STATUS_DIR')
     if status_dir:
         try:
             with open(os.path.join(status_dir, 'ipad-space.json'), encoding='utf-8') as source:
                 cached = json.load(source)
-            if cached.get('bundle') == bid and (not device or cached.get('device') == device):
+            if device_id and cached.get('bundle') == bid and cached.get('device_id') == device_id:
                 return {k: size for k, size in cached.get('data', {}).items()
                         if k in have and cached.get('have', {}).get(k) == have[k]}
         except (OSError, ValueError, TypeError, AttributeError):
@@ -760,7 +772,7 @@ def cached_folder_sizes(bid, have, device=''):
     return {}
 
 
-async def note_space(afc, a, bid, have=None, data=None, device=''):
+async def note_space(afc, a, bid, have=None, data=None, device='', device_id=''):
     """the iPad's free and total space, for PadSwitch's space bar (ipad-space.json); best effort"""
     try:
         info = await afc.get_device_info()
@@ -768,9 +780,11 @@ async def note_space(afc, a, bid, have=None, data=None, device=''):
              'ipa': os.path.basename(a.ipa), 'at': now_iso()}
         if device:
             d['device'] = device
+        if device_id:
+            d['device_id'] = device_id
         if have is not None:
             d['have'] = have
-            d['data'] = cached_folder_sizes(bid, have, device) if data is None else data
+            d['data'] = cached_folder_sizes(bid, have, device_id) if data is None else data
         if d['total'] <= 0 or 'FSFreeBytes' not in info:
             return None
         write_space(d)
@@ -782,7 +796,9 @@ async def cmd_space(a):
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
     from pymobiledevice3.services.house_arrest import HouseArrestService
-    with zipfile.ZipFile(a.ipa) as z: orig = layout(z)[1].get('CFBundleIdentifier', '')
+    with zipfile.ZipFile(a.ipa) as z:
+        orig = layout(z)[1].get('CFBundleIdentifier', '')
+        local_parts = read_link(z) or {}
     ld = await create_using_usbmux(serial=a.udid or None)
     async with ld:
         try: name = await ld.get_value(key='DeviceName')
@@ -804,24 +820,26 @@ async def cmd_space(a):
                 have = json.loads(raw) if raw.startswith('{') else {}
             except Exception: pass
             # each data folder's size on the iPad, from the file list push wrote for it (no walk over the iPad)
-            onpad = cached_folder_sizes(ids[0], have, device=name)
-            d = await note_space(afc, a, ids[0], have, data=onpad, device=name)
+            device_id = getattr(ld, 'identifier', None) or a.udid
+            onpad = cached_folder_sizes(ids[0], have, device_id)
+            d = await note_space(afc, a, ids[0], have, data=onpad, device=name, device_id=device_id)
             if d is None:
                 raise RuntimeError('無法讀取 iPad 可用空間，請解鎖後重新整理')
             # Get the directory once: legacy installs can have dozens of folders without a list.
             path = L.sys(LIST_DIR)
-            if await afc.exists(path):
-                available = set(await afc.listdir(path))
-                new_sizes = {}
-                for k in have.keys() - onpad.keys():
-                    if k.replace('/', '~') + '.json' in available:
-                        lst = await read_list(afc, L, k)
-                        if lst is not None:
-                            new_sizes[k] = sum(v[0] for v in lst.values())
-                if new_sizes:
-                    onpad.update(new_sizes)
-                    write_space(d)
-            print(json.dumps(d, ensure_ascii=False))
+            available = set(await afc.listdir(path)) if await afc.exists(path) else set()
+            for k in have.keys() - onpad.keys():
+                if k.replace('/', '~') + '.json' in available:
+                    lst = await read_list(afc, L, k)
+                    if lst is not None:
+                        onpad[k] = sum(v[0] for v in lst.values())
+                        continue
+                row = local_parts.get(k)
+                if row and row['id'] == have[k] and (not row['bytes'] or await afc.exists(L.key(k))):
+                    onpad[k] = row['bytes']
+            write_space(d)
+            # The cache uses the device identifier. It is not needed in terminal output.
+            print(json.dumps({k: v for k, v in d.items() if k != 'device_id'}, ensure_ascii=False))
 
 
 def package_bytes(path):
@@ -838,6 +856,35 @@ def package_bytes(path):
         return n
 
 
+def package_parts_size(path):
+    # Use the merge's entry mapping and fingerprint, including RomFS kept in the original NSP.
+    import nxn_merge
+    parts = {}
+    with zipfile.ZipFile(path) as z:
+        embedded = sum(entry.file_size for entry in z.infolist() if not entry.is_dir())
+        linked = read_link(z)
+        if linked is not None:
+            parts = {key: {'id': row['id'], 'bytes': row['bytes']} for key, row in linked.items()}
+            return {'bytes': embedded + sum(row['bytes'] for row in parts.values()), 'parts': parts}
+        app = 'Payload/DmIOS.app/'
+        for game in nxn_merge.games_in(z):
+            prefix = app + 'games/' + game.tid + '/'
+            rows = {kind: [] for kind in nxn_merge.DATA_DIRS}
+            for entry, name in game.entries(app):
+                if name.startswith(prefix) and not entry.is_dir():
+                    kind = name[len(prefix):].split('/', 1)[0]
+                    if kind in rows:
+                        rows[kind].append((name, entry.file_size, entry.CRC))
+            source = game.romfs_source()
+            if source is not None and not rows['romfs']:
+                rows['romfs'] = [(prefix + 'romfs/' + name, size, crc) for name, size, crc in source['list']]
+                embedded += sum(row[1] for row in rows['romfs'])
+            for kind, entries in rows.items():
+                key = 'games/%s/%s' % (game.tid, kind)
+                parts[key] = {'id': nxn_merge.part_id(entries), 'bytes': sum(row[1] for row in entries)}
+    return {'bytes': embedded, 'parts': parts}
+
+
 def cmd_sizes(a):
     paths = a.ipa
     if a.request:
@@ -845,8 +892,8 @@ def cmd_sizes(a):
             paths = json.load(f)
     out = {}
     for p in paths:
-        try: out[p] = package_bytes(p)
-        except Exception: out[p] = -1
+        try: out[p] = package_parts_size(p) if a.details else package_bytes(p)
+        except (Exception, SystemExit): out[p] = -1
     if a.output:
         with open(a.output, 'w', encoding='utf-8') as f:
             json.dump(out, f, ensure_ascii=False)
@@ -970,7 +1017,7 @@ def main():
     p.add_argument('--order', default='')
     p = sub.add_parser('space'); p.add_argument('ipa'); p.add_argument('--udid', default='')
     p = sub.add_parser('sizes'); p.add_argument('ipa', nargs='*')
-    p.add_argument('--request'); p.add_argument('--output')
+    p.add_argument('--request'); p.add_argument('--output'); p.add_argument('--details', action='store_true')
     p = sub.add_parser('prune'); p.add_argument('ipa'); p.add_argument('--udid', default='')
     p.add_argument('--check-transfer', action='store_true')
     p.add_argument('--check-only', action='store_true', help='check data space without pruning or writing to the iPad')

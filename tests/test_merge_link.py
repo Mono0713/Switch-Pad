@@ -60,6 +60,16 @@ class LinkTest(unittest.TestCase):
             app, pl, parts, files, several = rd.layout(z)
             return {d: rd.data_id([i for i in files if i.filename.startswith(p)]) for p, d in parts}
 
+    def test_preview_fingerprints_match_the_final_linked_library(self):
+        linked = os.path.join(self.d, 'linked.ipa')
+        run(MERGE, '-o', linked, '--bundle-id', 'org.nxnative.games.library', '--link', self.a, self.b)
+        preview = {}
+        for part in (self.a, self.b):
+            preview.update(rd.package_parts_size(part)['parts'])
+        with zipfile.ZipFile(linked) as z:
+            actual = {key: {'id': row['id'], 'bytes': row['bytes']} for key, row in rd.read_link(z).items()}
+        self.assertEqual(preview, actual)
+
     def test_link_matches_full(self):
         full, linked = os.path.join(self.d, 'full.ipa'), os.path.join(self.d, 'linked.ipa')
         run(MERGE, '-o', full, '--bundle-id', 'org.nxnative.games.library', self.a, self.b)
@@ -379,6 +389,18 @@ class TransferSpaceTest(unittest.IsolatedAsyncioTestCase):
         afc.get_device_info.reset_mock()
         await r.check_transfer_space(afc, 0, 0)
         afc.get_device_info.assert_not_called()
+
+    async def test_estimate_counts_a_legacy_size_only_when_the_installed_folder_exists(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        folder = 'games/0100000000010000/romfs'
+        afc = SimpleNamespace(exists=AsyncMock(return_value=True))
+        layout = SimpleNamespace(key=lambda folder: '/Documents/' + folder)
+        with patch.object(rd, 'read_list', AsyncMock(return_value=None)):
+            self.assertEqual(await rd.removable_bytes(afc, layout, {folder: 'old'}, {}, {folder: 1024}), 1024)
+            afc.exists.return_value = False
+            self.assertEqual(await rd.removable_bytes(afc, layout, {folder: 'old'}, {}, {folder: 1024}), 0)
 
     async def test_old_install_without_list_cannot_claim_space(self):
         from types import SimpleNamespace

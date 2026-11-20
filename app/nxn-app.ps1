@@ -1111,8 +1111,15 @@ $win.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape' -and $picked.Count) { $
 # ---------------------------------------------------------------- 大小：每款在 iPad 上佔多少（遊戲包 + 留在 NSP 裡的 RomFS），電腦上佔多少
 # 遊戲包的大小要開 zip 讀（romfs_data.py sizes），在背景算好存 work\status\sizes.json（遊戲包路徑|修改時間 → bytes），不卡畫面
 $sizesFile = Join-Path $work 'status\sizes.json'
-$sizes = @{}
-try { ([IO.File]::ReadAllText($sizesFile) | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $sizes[$_.Name] = [int64]$_.Value } } catch { }
+$sizes = @{}; $sizeParts = @{}
+try {
+    foreach ($row in ([IO.File]::ReadAllText($sizesFile) | ConvertFrom-Json).PSObject.Properties) {
+        if ($row.Value.PSObject.Properties['parts']) {
+            $sizes[$row.Name] = [long]$row.Value.bytes
+            $sizeParts[$row.Name] = $row.Value.parts
+        } else { $sizes[$row.Name] = [long]$row.Value }
+    }
+} catch { }
 $sizeJob = @{ Proc = $null; Out = (Join-Path $work 'status\sizes-new.json'); Keys = @{} }
 function Fmt-Size($b) { $b = [double]$b; if ($b -ge 1GB) { '{0:N1} GB' -f ($b / 1GB) } elseif ($b -ge 1MB) { '{0:N0} MB' -f ($b / 1MB) } else { '{0:N0} KB' -f ($b / 1KB) } }
 function Size-Key($f) { "$($f.FullName)|$($f.LastWriteTimeUtc.Ticks)" }
@@ -1140,7 +1147,7 @@ function Start-Sizes {
     try {
         [IO.File]::WriteAllText($request, (ConvertTo-Json -InputObject @($sizeJob.Keys.Keys) -Compress), (New-Object Text.UTF8Encoding $false))
         $q = [char]34
-        $argsLine = '-I ' + $q + $tool + $q + ' sizes --request ' + $q + $request + $q + ' --output ' + $q + $sizeJob.Out + $q
+        $argsLine = '-I ' + $q + $tool + $q + ' sizes --details --request ' + $q + $request + $q + ' --output ' + $q + $sizeJob.Out + $q
         $sizeJob.Proc = Start-Hidden $py $argsLine $here
     } catch { }
 }
@@ -1152,10 +1159,20 @@ function End-Sizes {
     try {
         if ($exitCode -ne 0) { throw 'size scan failed' }
         $j = [IO.File]::ReadAllText($sizeJob.Out) | ConvertFrom-Json
-        foreach ($pr in $j.PSObject.Properties) { if ([int64]$pr.Value -gt 0 -and $sizeJob.Keys[$pr.Name]) { $sizes[$sizeJob.Keys[$pr.Name]] = [int64]$pr.Value } }
+        foreach ($pr in $j.PSObject.Properties) {
+            $key = $sizeJob.Keys[$pr.Name]
+            if ($key -and $pr.Value.PSObject.Properties['parts']) {
+                $sizes[$key] = [long]$pr.Value.bytes
+                $sizeParts[$key] = $pr.Value.parts
+            }
+        }
         # 只留現在還在的遊戲包
-        $keep = [ordered]@{}; foreach ($k in $sizes.Keys) { if (Test-Path -LiteralPath ($k -split '\|')[0]) { $keep[$k] = $sizes[$k] } }
-        [IO.File]::WriteAllText($sizesFile, ($keep | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+        $keep = [ordered]@{}
+        foreach ($k in $sizes.Keys) {
+            if (-not (Test-Path -LiteralPath ($k -split '\|')[0])) { continue }
+            if ($sizeParts.ContainsKey($k)) { $keep[$k] = @{ bytes = $sizes[$k]; parts = $sizeParts[$k] } } else { $keep[$k] = $sizes[$k] }
+        }
+        [IO.File]::WriteAllText($sizesFile, ($keep | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding $false))
     } catch { }
     Remove-Item -LiteralPath $sizeJob.Out, ($sizeJob.Out + '.request') -ErrorAction SilentlyContinue
     return $true
@@ -1222,49 +1239,59 @@ function Start-SpaceProbe([switch]$Force) {
         $ui.IpadR.Text = '讀取中…'
     } catch { $spaceJob.Failed = $true }
 }
-# 顯示已量到的空間與新增遊戲估算。同步時才檢查實際檔案差額。
+# 依選定遊戲的資料指紋預覽同步。缺少大小或還在轉檔的項目留作待核對。
 function Fit-Info {
     $sp = Read-IpadSpace
     $have = @{}; $recorded = @{}; $wanted = @{}
-    foreach ($pr in $sp.have.PSObject.Properties) {
-        if ($pr.Name -match '^games/([0-9a-f]{16})/') {
-            $tid = $Matches[1].ToUpper()
-            $have[$tid] = 1 + [int]$have[$tid]
-        }
-    }
+    foreach ($pr in $sp.have.PSObject.Properties) { $have[$pr.Name] = $pr.Value }
     $knownBytes = 0L
     foreach ($pr in $sp.data.PSObject.Properties) {
-        if ($pr.Name -match '^games/([0-9a-f]{16})/') {
-            $tid = $Matches[1].ToUpper(); $b = [long]$pr.Value
-            $recorded[$tid] = [long]$recorded[$tid] + $b
-            $knownBytes += $b
+        if ($have.ContainsKey($pr.Name) -and $pr.Name -match '^games/([0-9a-f]{16})/') {
+            $recorded[$pr.Name] = [long]$pr.Value
+            $knownBytes += $recorded[$pr.Name]
         }
     }
     $knownInventory = $sp -and ($sp.PSObject.Properties['have'] -or $sp.installed -eq $false)
-    $sel = 0L; $send = 0L; $pending = 0; $unknownTid = $false
+    $sel = 0L; $send = 0L; $delta = 0L; $pending = 0; $unknownTid = $false
     foreach ($dir in $selected) {
-        if (-not $cards.ContainsKey($dir)) { $unknownTid = $true; continue }
+        if (-not $cards.ContainsKey($dir)) { $unknownTid = $true; $pending++; continue }
         $g = $cards[$dir].Tag
-        $b = [long](Game-Bytes $g)
-        $sel += $b
+        $sel += [long](Game-Bytes $g)
         $tid = Game-Tid $g
         if (-not $tid) { $unknownTid = $true; $pending++; continue }
         $wanted[$tid] = $true
-        if (-not $knownInventory -or -not $g.Ready -or $g.Newer -or ($have.ContainsKey($tid) -and $have[$tid] -lt 2)) {
-            $pending++
-        } elseif (-not $have.ContainsKey($tid)) {
-            if ($g.PackageKey -and $sizes.ContainsKey($g.PackageKey)) { $send += $b } else { $pending++ }
+        $parts = if ($g.PackageKey) { $sizeParts[$g.PackageKey] }
+        if (-not $knownInventory -or -not $g.Ready -or -not $parts) { $pending++; continue }
+        $unmeasured = $false
+        foreach ($part in $parts.PSObject.Properties) {
+            if ($have[$part.Name] -eq $part.Value.id) { continue }
+            $bytes = [long]$part.Value.bytes
+            $send += $bytes
+            $delta += $bytes
+            if ($recorded.ContainsKey($part.Name)) { $delta -= $recorded[$part.Name] }
+            elseif ($have.ContainsKey($part.Name)) { $unmeasured = $true }
         }
+        if ($unmeasured) { $pending++ }
     }
-    $freed = 0L
-    if (-not $unknownTid) {
-        foreach ($tid in $recorded.Keys) {
-            if ($have.ContainsKey($tid) -and -not $wanted.ContainsKey($tid)) { $freed += $recorded[$tid] }
+    $freed = 0L; $unknownRemovals = 0; $removedGames = @{}
+    if (-not $unknownTid -and $wanted.Count) {
+        $unknown = @{}
+        foreach ($part in $have.Keys) {
+            if ($part -match '^games/([0-9a-f]{16})/' -and -not $wanted.ContainsKey($Matches[1])) {
+                $removedGames[$Matches[1]] = $true
+                if ($recorded.ContainsKey($part)) { $freed += $recorded[$part] } else { $unknown[$Matches[1]] = $true }
+            }
         }
+        $unknownRemovals = $unknown.Count
     }
+    $free = [long]$sp.free
+    $known = [bool]($sp -and [long]$sp.total -gt 0)
+    $after = $free + $freed - $delta
     @{
         Sel = $sel; Send = $send; Pending = $pending; Freed = $freed; Data = $knownBytes; Snapshot = $sp
-        Known = [bool]($sp -and [long]$sp.total -gt 0); Free = [long]$sp.free; Total = [long]$sp.total
+        Known = $known; Free = $free; Total = [long]$sp.total; After = $after; Removed = $removedGames.Count
+        Partial = [bool](-not $knownInventory -or $pending -or $unknownRemovals -or $unknownTid)
+        ShowAfter = $known -and $knownInventory -and ($wanted.Count -gt 0)
     }
 }
 function Update-Space($fi = $null) {
@@ -1307,9 +1334,16 @@ function Update-Space($fi = $null) {
         if (-not ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited)) { $ui.IpadR.Text = '還沒讀到，接上 iPad 按 ⟳' }
         Set-Bar $ui.IpadBar @()
     }
-    if ($fi.Send) { $leg += @{ Color = '#30D158'; Text = "新增遊戲約 $(Fmt-Size $fi.Send)"; Tip = '用已轉檔的遊戲包估算。同步會檢查實際差額。' } }
-    if ($fi.Freed) { $leg += @{ Color = '#FF9F0A'; Text = "移除已知可回收 $(Fmt-Size $fi.Freed)" } }
-    if ($fi.Pending) { $leg += @{ Color = '#AEAEB2'; Text = "$($fi.Pending) 款待核對"; Tip = '尚未轉檔、更新或 iPad 資料待確認。' } }
+    if ($fi.Send) { $leg += @{ Color = '#0A84FF'; Text = "待比對資料 $(Fmt-Size $fi.Send)"; Tip = '有變動的資料區總量。同步只傳內容不同的檔案。' } }
+    if ($fi.Removed) { $leg += @{ Color = '#FF9F0A'; Text = "移除 $($fi.Removed) 款 · 已知可回收 $(Fmt-Size $fi.Freed)" } }
+    if ($fi.Pending) { $leg += @{ Color = '#AEAEB2'; Text = "$($fi.Pending) 款待核對"; Tip = '尚未轉檔或資料大小待確認。' } }
+    if ($fi.ShowAfter) {
+        $label = if ($fi.Partial) { '依已知項目' } else { '同步後' }
+        $target = if ($fi.Send) { 1GB } else { 0L }
+        $color = if ($fi.Partial) { '#AEAEB2' } elseif ($fi.After -lt $target) { '#FF453A' } else { '#30D158' }
+        $result = if ($fi.After -lt $target) { "$($label)估計還差 $(Fmt-Size ($target - $fi.After))" } else { "$($label)約剩 $(Fmt-Size $fi.After)" }
+        $leg += @{ Color = $color; Fg = $color; Text = $result; Tip = '依遊戲資料的增減估算。同步會在移除前核對實際檔案，並保留 1 GB 傳輸餘量。' }
+    }
     Legend $ui.IpadLegend $leg
 }
 $ui.IpadRefresh.Add_Click({ Start-SpaceProbe -Force; Update-Space })
@@ -1391,7 +1425,7 @@ function Update-SelCount {
     $names = { param($l) (@($l | Select-Object -First 3) -join '、') + $(if ($l.Count -gt 3) { " 等 $($l.Count) 款" } else { '' }) }
     $sign = Sign-Left
     $fi = Fit-Info
-    $t = @("遊戲庫 $($mine.Count) 款，估計總大小 $(Fmt-Size $fi.Sel)" + $(if ($fi.Send) { "，新增遊戲約 $(Fmt-Size $fi.Send)" } else { '' }))
+    $t = @("遊戲庫 $($mine.Count) 款，估計總大小 $(Fmt-Size $fi.Sel)" + $(if ($fi.ShowAfter -and -not $fi.Partial -and $fi.After -ge 0) { "，同步後約剩 $(Fmt-Size $fi.After)" } else { '' }))
     if ($conv.Count) { $t += "$($conv.Count) 款還沒轉檔" }
     if ($sign) { $t += $sign.Text }
     # 同步會做的事（照順序）
@@ -1668,7 +1702,7 @@ function Build-Library {
         $pf = if ($partId) { Part-For $g $partId -UseScan }
         if ($pf.File) {
             $g.PackageKey = Size-Key $pf.File
-            if (-not $sizes.ContainsKey($g.PackageKey) -and -not $sizeTried.Contains($g.PackageKey) -and -not $partMissing.Contains($pf.Path)) { $partMissing.Add($pf.Path) }
+            if (-not $sizeParts.ContainsKey($g.PackageKey) -and -not $sizeTried.Contains($g.PackageKey) -and -not $partMissing.Contains($pf.Path)) { $partMissing.Add($pf.Path) }
         }
         $g | Add-Member -NotePropertyName Ready -NotePropertyValue ([bool]$pf -and $pf.Fresh) -Force
         # iPad 上的是舊的：遊戲包比上次合成的遊戲庫新（換了殼或重新轉換過），裝到 iPad 時會換掉
@@ -3187,7 +3221,7 @@ function Run-Sync {
         $gg = Library-Game; $gg | Add-Member -NotePropertyName GlNames -NotePropertyValue (((@($glGames | ForEach-Object { $cards[$_].Tag.Name }) | Select-Object -First 3) -join '、') + $(if ($glGames.Count -gt 3) { " 等 $($glGames.Count) 款" } else { '' })) -Force
         $jobs += @{ Game = $gg; Mode = 'glsync'; Ipa = $lib }
     }
-    $pushB = 0L
+    $pushB = (Fit-Info).Send
     foreach ($dir in $dirs) {
         $g = $cards[$dir].Tag
         $part = Part-For $g $id
@@ -3198,7 +3232,6 @@ function Run-Sync {
         } elseif (-not $part.Fresh -and $g.Base) {
             $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $part.Path; Shell = $ms.FullName }
         }
-        if (-not $g.OnPad -or $g.Newer -or -not $part.Fresh) { $pushB += Game-Bytes $g }
         $outs += [pscustomobject]@{ Path = $part.Path; Name = $g.Name; Dir = $dir; WasIn = [bool]$g.OnPad }
     }
     New-Item -ItemType Directory -Force -Path (Split-Path $lib -Parent) | Out-Null
