@@ -329,7 +329,7 @@ async def put(afc, src, root, dest, slot='', now=None, tid='', names=None):
 SYNC_DIR = '存檔'
 SYNC_PARTIAL = 6
 SYNC_STATE = '.sync.json'
-JUNK = ('desktop.ini', 'thumbs.db', '.ds_store')
+JUNK = ('desktop.ini', 'thumbs.db', '.ds_store', 'edizon_save_metadata.json')
 
 
 def clean_files(folder):
@@ -615,13 +615,19 @@ def _dirs_here(d):
     return sorted(f for f in os.listdir(d) if os.path.isdir(os.path.join(d, f)) and not f.startswith('.'))
 
 
+TOOL_FILES = ('.dbi_*', 'edizon_save_metadata.json', 'desktop.ini', 'Thumbs.db', '.DS_Store')   # what a save tool adds beside the game's own files
+SAVE_LIKE = re.compile(r'\d| - ')   # JKSV「user - 2026-11-20」, Checkpoint「2026-11-20 120000」, 存檔 1
+
+
 def inbox_saves(d, label):
-    """[(save name, folder)] in one game's folder of the inbox: the folder itself when it holds files (a save copied as is),
-    else each folder in it (JKSV, Checkpoint: <game>/<save or date>/), and a Ryujinx-style lone 0/ is the save's own contents."""
-    if _files_here(d): return [(label, d)]
+    """[(save name, folder)] in one game's folder of the inbox. Mostly the folder itself (a save copied as is: its files, and
+    folders such as Smash's mii\ or Galaxy's MarioGalaxy\, are the save's root); a lone 0\ (Ryujinx) is the save's own
+    contents; only a folder of nothing but folders named like saves (JKSV, Checkpoint) holds one save in each."""
+    if _files_here(d) or os.path.exists(os.path.join(d, '.dbi_save_info.ini')): return [(label, d)]
     subs = _dirs_here(d)
-    if subs == ['0'] or subs == ['0', '1']: return [(label, os.path.join(d, '0'))]
-    return [(n, os.path.join(d, n)) for n in subs if clean_files(os.path.join(d, n))]
+    if subs in (['0'], ['0', '1']): return [(label, os.path.join(d, '0'))]
+    if subs and all(SAVE_LIKE.search(n) for n in subs): return [(n, os.path.join(d, n)) for n in subs if clean_files(os.path.join(d, n))]
+    return [(label, d)] if clean_files(d) else []
 
 
 def inbox_match(name, path_tids, games):
@@ -632,8 +638,11 @@ def inbox_match(name, path_tids, games):
     k = _key(name)
     if not k: return None
     hits = [t for t, ns in games.items() if any(_key(n) == k for n in ns)]
-    if not hits:
-        hits = [t for t, ns in games.items() if any(len(_key(n)) >= 5 and len(k) >= 5 and (_key(n) in k or k in _key(n)) for n in ns)]
+    if not hits:   # 「Kirby Star Allies True Files」: the game's name and more (the longest name wins: Galaxy 2 before Galaxy)
+        part = sorted(((max(len(_key(n)) for n in ns if _key(n) and _key(n) in k), t) for t, ns in games.items()
+                       if len(k) >= 5 and any(len(_key(n)) >= 5 and _key(n) in k for n in ns)), reverse=True)
+        if part and (len(part) == 1 or part[0][0] > part[1][0]): return part[0][1]
+        hits = [t for t, ns in games.items() if len(k) >= 5 and any(len(_key(n)) >= 5 and k in _key(n) for n in ns)]
     return hits[0] if len(hits) == 1 else None
 
 
@@ -665,7 +674,7 @@ def import_inbox(src, pairs, names, seen_file, out=print):
                 dg = tree_digest(sdir)
                 if dg in have or dg in seen: continue
                 dest = unique_dir(sd, sname)
-                shutil.copytree(sdir, dest, ignore=shutil.ignore_patterns('desktop.ini', 'Thumbs.db', '.DS_Store'))
+                shutil.copytree(sdir, dest, ignore=shutil.ignore_patterns(*TOOL_FILES))
                 have.add(dg); seen[dg] = os.path.relpath(dest, os.path.dirname(gdir[t])); copied += 1
                 out('%s：桌面的「%s」放進電腦的存檔，同步時會傳到 iPad（存檔名稱「%s」）' % (names.get(t) or os.path.basename(gdir[t]), os.path.relpath(sdir, src), os.path.basename(dest)))
 
@@ -673,7 +682,7 @@ def import_inbox(src, pairs, names, seen_file, out=print):
     if copied:
         os.makedirs(os.path.dirname(seen_file), exist_ok=True)
         with open(seen_file, 'w', encoding='utf-8') as fh: json.dump(seen, fh, ensure_ascii=False, indent=1)
-    for u in unknown: out('[!] %s：看不出是哪款遊戲（資料夾名稱用遊戲英文名或 title ID），這份沒傳' % os.path.join(os.path.basename(src), u))
+    for u in unknown: out('[!] %s：遊戲庫裡沒有對應的遊戲（不在遊戲庫，或資料夾名稱不是遊戲英文名／title ID），這份沒傳' % os.path.join(os.path.basename(src), u))
     return copied, unknown
 
 
