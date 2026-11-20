@@ -219,14 +219,22 @@ try {
     # ---- 先確認登入狀態，不然白打包一小時（同步時要重簽才查，在連上 iPad 之後） ----
     function Check-AppleId {
         Step '檢查 Apple ID'
-        # plumesign 的記錄寫在 stderr，Stop 模式下會被當成錯誤，所以這裡改用 Continue 收輸出
-        $ErrorActionPreference = 'Continue'
-        $acct = (& $plume account list 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } }) -join "`n"
-        $acctCode = $LASTEXITCODE
-        $ErrorActionPreference = 'Stop'
-        $mail = [regex]::Match($acct, '[\w.+-]+@[\w-]+(\.[\w-]+)+').Value
-        if ($acctCode -or -not $mail) { Write-Host $acct.Trim(); throw "還沒登入 Apple ID：按 PadSwitch 右上角的「登入 Apple ID」（命令列：.\nxn.ps1 -Login）" }
-        Write-Host "已登入：$mail"
+        # 帳號清單由 plumesign 的 info 記錄輸出到 stderr。
+        $savedLog = $env:RUST_LOG
+        try {
+            $env:RUST_LOG = 'info'
+            $ErrorActionPreference = 'Continue'
+            $acct = (& $plume account list 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } }) -join "`n"
+            $acctCode = $LASTEXITCODE
+        } finally {
+            $env:RUST_LOG = $savedLog
+        }
+        if ($acctCode -ne 0) { throw "無法讀取 Apple ID 登入狀態（結束碼 $acctCode）。" }
+        if ($acct -match 'No accounts found') { throw "還沒登入 Apple ID：按 PadSwitch 右上角的「登入 Apple ID」（命令列：.\nxn.ps1 -Login）" }
+        if ($acct -notmatch '(?im)[\w.+-]+@[\w-]+(?:\.[\w-]+)+[ \t]+\(selected\)[ \t]*\r?$') {
+            throw '簽章工具沒有回報已選用的 Apple ID。請在 PadSwitch 右上角確認目前帳號。'
+        }
+        Write-Host '已確認 Apple ID 登入'
     }
     if (-not $PackOnly -and -not $saveMode -and -not $SignIfNeeded) { Check-AppleId }
 
