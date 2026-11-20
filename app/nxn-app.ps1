@@ -5,6 +5,23 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 trap { [void][Windows.MessageBox]::Show($_.ToString(), 'PadSwitch 出錯'); break }
 
 $here = $PSScriptRoot
+# 開啟各步驟花多久（寫在 work\gui-logs\startup.log，2026-11-20 使用者說開啟很慢：視窗 11 秒才出來、之後 15 秒都很卡）
+$startSw = [Diagnostics.Stopwatch]::StartNew()
+$startMarks = New-Object System.Collections.Generic.List[string]
+$startLast = 0L
+try { $startMarks.Add(('PowerShell 啟動和讀程式 {0:N1}s' -f ((Get-Date) - (Get-Process -Id $PID).StartTime).TotalSeconds)) } catch { }
+function Mark($what) {
+    $ms = $startSw.ElapsedMilliseconds
+    $startMarks.Add(('{0} {1:N1}s' -f $what, (($ms - $script:startLast) / 1000.0)))
+    $script:startLast = $ms
+}
+function Flush-Marks($title) {
+    try {
+        $line = '{0:yyyy-MM-dd HH:mm:ss} {1}（共 {2:N1}s）：{3}' -f (Get-Date), $title, ($startSw.ElapsedMilliseconds / 1000.0), ($startMarks -join '／')
+        Add-Content -LiteralPath (Join-Path $logDir 'startup.log') -Value $line -Encoding UTF8
+    } catch { }
+    $startMarks.Clear()
+}
 # 程式檔都在 nxn\程式\，遊戲、合包和 PadSwitch.exe 在上一層 nxn\（舊版全部攤在 nxn\ 最上層，開起來會自己搬）
 $appDirName = '程式'
 $packDirName = '遊戲庫'   # 合成好的遊戲庫.ipa 和其他合包（舊版叫 合包\，pc_layout.py 會搬）
@@ -101,20 +118,33 @@ function Move-ToAppDir {
 }
 # 電腦資料夾統一成跟 iPad 一樣的名稱（pc_layout.py，docs/FOLDERS）：合包→遊戲庫、GL著色器→各遊戲的 著色器紀錄、iPad記錄 和
 # 問題回報→記錄\、合包\存檔備份→備份\、遊戲資料夾改成遊戲本身的名字。正在轉檔或傳送時它自己會等下次
+# 視窗出來之後才在背景跑（掃每個遊戲資料夾要幾秒，不能卡住開啟）；搬了東西就重畫遊戲庫（$tidyJob，bgTimer 看它結束）
+$tidyJob = @{ Proc = $null; Out = '' }
 function Tidy-Folders {
     $tool = Join-Path (Join-Path $base $appDirName) 'pc_layout.py'
     $tpf = Join-Path (Join-Path (Join-Path $base $appDirName) 'work') 'python-transfer.txt'
     $py = if (Test-Path $tpf) { (Get-Content $tpf -Raw).Trim() } else { '' }
     if (-not (Test-Path -LiteralPath $tool) -or -not $py -or -not (Test-Path -LiteralPath $py)) { return }
     try {
-        $log = Join-Path (Join-Path (Join-Path $base $appDirName) 'work') '資料夾搬家.log'
-        $out = & $py -I $tool migrate $base 2>&1 | Out-String
-        if ($out -notmatch '已經是新的樣子') { Add-Content -LiteralPath $log -Value ("== " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`r`n" + $out) -Encoding UTF8 }
-    } catch { }
+        $tidyJob.Out = Join-Path (Join-Path (Join-Path $base $appDirName) 'work') 'status\tidy-out.txt'
+        $psi = New-Object Diagnostics.ProcessStartInfo $py
+        $psi.Arguments = "-I `"$tool`" migrate `"$base`""
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.EnvironmentVariables['PYTHONUTF8'] = '1'
+        $tidyJob.Proc = [Diagnostics.Process]::Start($psi)
+        $tidyJob.Task = $tidyJob.Proc.StandardOutput.ReadToEndAsync(); $tidyJob.ErrTask = $tidyJob.Proc.StandardError.ReadToEndAsync()
+    } catch { $tidyJob.Proc = $null }
+}
+function End-Tidy {
+    if (-not $tidyJob.Proc -or -not $tidyJob.Proc.HasExited) { return $false }
+    $out = try { "$($tidyJob.Task.Result)$($tidyJob.ErrTask.Result)" } catch { '' }
+    $tidyJob.Proc = $null
+    if ($out -match '已經是新的樣子' -or -not $out.Trim()) { return $false }
+    try { Add-Content -LiteralPath (Join-Path $work '資料夾搬家.log') -Value ("== " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`r`n" + $out) -Encoding UTF8 } catch { }
+    return $true
 }
 try {
     Move-ToAppDir
-    Tidy-Folders
     $appDir = Join-Path $base $appDirName
     $exe = Join-Path $base 'PadSwitch.exe'
     $ico = Join-Path $appDir '工具\SwitchPad.ico'
@@ -154,6 +184,7 @@ try {
 }
 
 # 只開一個：已經開著就把那個視窗叫到前面。PadSwitch 自己重開（更新後）時舊的還沒關，等它幾秒
+Mark '搬檔檢查'
 $appMutex = New-Object Threading.Mutex($false, 'Local\SwitchPadApp')
 $owned = $false
 try { $owned = $appMutex.WaitOne($(if ($args -contains '-Restart') { 15000 } else { 0 })) } catch [Threading.AbandonedMutexException] { $owned = $true }
@@ -532,7 +563,7 @@ $xamlText = @'
 '@
 # 樣式要在載入前就放進 Window.Resources，StaticResource 才找得到
 # Windows 的標題列也用深色（Windows 10 1809 以後；舊版不支援就照舊）
-try { Add-Type -Namespace SwitchPad -Name Dwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);' } catch { }
+try { Add-Type -Namespace SwitchPad -Name Dwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size); [DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);' } catch { }   # 一次編譯（每個 Add-Type 都要跑一次 C# 編譯器，約一秒）
 function Dark-TitleBar($w) {
     $w.Add_SourceInitialized({ param($s, $e)
         try {
@@ -554,10 +585,11 @@ function Fade-In($el) {
 function Load-Window([string]$text) { $w = [Windows.Markup.XamlReader]::Parse($text.Replace('__RES__', $styles)); if ($w -is [Windows.Window]) { Dark-TitleBar $w }; $w }
 # 自己的工作列身分，工作列才會用 PadSwitch 的圖示，不是 PowerShell 的
 try {
-    Add-Type -Namespace SwitchPad -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);'
-    [void][SwitchPad.Shell]::SetCurrentProcessExplicitAppUserModelID('PadSwitch.App')
+    [void][SwitchPad.Dwm]::SetCurrentProcessExplicitAppUserModelID('PadSwitch.App')
 } catch { }
+Mark '載入程式'
 $win = Load-Window $xamlText
+Mark '建立視窗'
 if (Test-Path $appIcon) {
     # 讀進記憶體再用：BitmapFrame::Create(Uri) 會一直鎖住檔案，更新時就蓋不過去（"另一個處理程序正在使用檔案 ...\SwitchPad.ico"）
     try {
@@ -702,10 +734,22 @@ function Load-Supported {
     }
 }
 Load-Supported
+Mark '讀支援清單'
 function Precheck-Of($g) {
     $f = Join-Path $g.Dir 'precheck.json'
     if (-not (Test-Path -LiteralPath $f)) { return @() }
     try { @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).items) } catch { @() }
+}
+$provCache = @{ At = [datetime]::MinValue; Set = $null }
+function Provisional-Tids {
+    if (-not $provCache.Set -or ((Get-Date) - $provCache.At).TotalMinutes -gt 5) {
+        $set = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($d in @(Get-ChildItem -Path (Join-Path $work 'multigame\*\src-*\dm\games') -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($t in [IO.Directory]::GetDirectories($d.FullName)) { if ([IO.File]::Exists((Join-Path $t 'game.tsv'))) { [void]$set.Add((Split-Path $t -Leaf).ToUpper()) } }
+        }
+        $provCache.Set = $set; $provCache.At = Get-Date
+    }
+    $provCache.Set
 }
 function Support-Of($g) {
     if (-not $g.Tid) { return @{ Text = ''; Color = '#8E8E93' } }
@@ -721,7 +765,7 @@ function Support-Of($g) {
     }
     if (Test-Path (Join-Path $work "src\dm\games\$($g.Tid)\game.tsv")) { return @{ Text = '● 自訂設定'; Color = '#64D2FF'; Tip = '用本機的設定檔打包（非官方支援）' } }
     # 打包器自動推導的暫定設定檔放在多遊戲殼那版的打包器裡（work\multigame\art*\src-<sha>\dm\games）
-    if (@(Get-ChildItem -Path (Join-Path $work "multigame\*\src-*\dm\games\$($g.Tid)\game.tsv") -ErrorAction SilentlyContinue).Count) { return @{ Text = '● 暫定設定'; Color = '#64D2FF'; Tip = '不在上游的支援清單，用打包器自動推導的設定檔：轉換過了，能不能玩要在 iPad 上試' } }
+    if ((Provisional-Tids).Contains("$($g.Tid)".ToUpper())) { return @{ Text = '● 暫定設定'; Color = '#64D2FF'; Tip = '不在上游的支援清單，用打包器自動推導的設定檔：轉換過了，能不能玩要在 iPad 上試' } }
     return @{ Text = '● 不支援'; Color = '#FF453A'; Tip = '不在上游的支援清單，打包器會試著自動推導，但大多需要在 Mac 上調整才打得開' }
 }
 
@@ -1601,7 +1645,12 @@ function Library-Stamp {
     $t += @(Get-MultiShells | ForEach-Object { $_.Name }); $t += "$($cfg.ShellPin)"
     $t -join ';'
 }
+# 重畫遊戲庫各部分花多久（加總，寫進 startup.log；之後每次重畫超過 1 秒也記一行）
+$blTimes = [ordered]@{}
+$blSw = New-Object Diagnostics.Stopwatch
+function BL($what) { $blTimes[$what] = [int64]$blTimes[$what] + $blSw.ElapsedMilliseconds; $blSw.Restart() }
 function Build-Library {
+    $blAll = [Diagnostics.Stopwatch]::StartNew(); $blTimes.Clear(); $blSw.Restart()
     $script:libStamp = Library-Stamp
     $ui.Library.Children.Clear(); $ui.Others.Children.Clear(); $cards.Clear()
     $inst = @(Get-Installed)
@@ -1610,6 +1659,7 @@ function Build-Library {
     $libTime = (Get-Item -LiteralPath (Library-Ipa) -ErrorAction SilentlyContinue).LastWriteTime
     $newShell = if ($ms) { Shell-Changed $ms.FullName } else { $false }
     $dirs = @(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+    BL '讀遊戲庫和安裝紀錄'
     foreach ($d in $dirs) {
         $g = Scan-Game $d
         if (-not $g.Base -and -not $g.Ipas.Count) { continue }   # 不是遊戲資料夾
@@ -1619,7 +1669,9 @@ function Build-Library {
         $g | Add-Member -NotePropertyName Ready -NotePropertyValue ([bool]$pf -and $pf.Fresh) -Force
         # iPad 上的是舊的：遊戲包比上次合成的遊戲庫新（換了殼或重新轉換過），裝到 iPad 時會換掉
         $g | Add-Member -NotePropertyName Newer -NotePropertyValue ([bool]($g.Ready -and $g.OnPad -and $libTime -and ($newShell -or (Get-Item -LiteralPath $pf.Path).LastWriteTime -gt $libTime))) -Force
+        BL '掃遊戲資料夾'
         $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
+        BL '建卡片'
         $card.Tag = $g
         $card.FindName('Title').Text = $g.Name
         $parts = @()
@@ -1629,7 +1681,7 @@ function Build-Library {
         $card.FindName('Detail').Text = $parts -join ' · '
         $st = $card.FindName('State')
         $glRec = Gl-Rec $g
-        $glN = if ((Game-Tid $g) -and (Test-Path -LiteralPath $glRec)) { @(Get-ChildItem -LiteralPath $glRec -File -ErrorAction SilentlyContinue).Count } else { -1 }
+        $glN = if ((Game-Tid $g) -and [IO.Directory]::Exists($glRec)) { try { [IO.Directory]::GetFiles($glRec).Length } catch { 0 } } else { -1 }
         $green = Brush '#30D158'; $blue = Brush '#0A84FF'; $gray = Brush '#8E8E93'; $st.ToolTip = $null
         $red = Brush '#FF453A'; $orange = Brush '#FF9F0A'
         $why = if ($addFail.ContainsKey($g.Dir)) { $addFail[$g.Dir] } else { '' }
@@ -1668,7 +1720,9 @@ function Build-Library {
             if ($sup.Text -eq '● 已驗證') { Add-Badge $card '已驗證' '#2630D158' '#30D158' $sup.Tip }
             elseif ($sup.Text) { Add-Badge $card '未驗證' '#33FFD60A' '#FFD60A' $(if ($sup.Tip) { $sup.Tip } else { '還沒有人確認這款能玩，可能打不開' }) }
         }
+        BL '狀態和標籤'
         Paint-Icon $card.FindName('Icon') $card.FindName('Letter') $g (Cover-For $g)
+        BL '圖示'
 
         $card.Add_MouseEnter({ param($s, $e) if (-not $picked.Contains($s.Tag.Dir)) { $s.Background = Brush '#1F1F22' } })
         $card.Add_MouseLeave({ param($s, $e) $s.Background = if ($picked.Contains($s.Tag.Dir)) { Brush '#2A0A84FF' } else { [Windows.Media.Brushes]::Transparent }
@@ -1710,6 +1764,7 @@ function Build-Library {
         [void]$panel.Children.Insert($at, $card)
         $cards[$g.Dir] = $card
         Card-Paint $card
+        BL '事件和排版'
     }
     $nIn = $ui.Library.Children.Count; $nOut = $ui.Others.Children.Count
     $onPad = @($ui.Library.Children | Where-Object { $_.Tag.OnPad }).Count
@@ -1724,11 +1779,20 @@ function Build-Library {
         [void]$ui.Others.Children.Add($t)
     }
     Build-Packs $inst
+    BL '合包'
     Start-Sizes
     Update-SelCount
+    BL '空間和底部'
     Update-Banner $inst
     Update-MergeOption
     Update-Notice
+    BL '其他'
+    if ($blAll.ElapsedMilliseconds -gt 1000 -and $script:startMarks.Count -eq 0) {
+        $startMarks.Add(('{0} 款' -f $cards.Count))
+        foreach ($k in @($blTimes.Keys)) { $startMarks.Add(('{0} {1:N1}s' -f $k, ($blTimes[$k] / 1000.0))) }
+        try { Add-Content -LiteralPath (Join-Path $logDir 'startup.log') -Value ('{0:yyyy-MM-dd HH:mm:ss} 重畫遊戲庫（共 {1:N1}s）：{2}' -f (Get-Date), ($blAll.ElapsedMilliseconds / 1000.0), ($startMarks -join '／')) -Encoding UTF8 } catch { }
+        $startMarks.Clear()
+    }
 }
 
 # ---------------------------------------------------------------- 合包：nxn\合包 裡每個 IPA 一張卡，點進去看裡面的遊戲
@@ -2270,10 +2334,31 @@ $win.Add_Activated({
     if (-not $state.Running -and $script:libStamp -and (Library-Stamp) -ne $script:libStamp) { Build-Library } })
 
 # ---------------------------------------------------------------- Apple ID
+# plumesign 在背景問，答案回來才更新右上角（直接跑會讓畫面停一兩秒）
+$acctJob = @{ Proc = $null }
 function Update-Account {
     if (-not (Test-Path $plume)) { $ui.Account.Text = '找不到 plumesign.exe'; return }
+    if ($acctJob.Proc -and -not $acctJob.Proc.HasExited) { return }
     try {
-        $out = (& $plume account list 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $psi = New-Object Diagnostics.ProcessStartInfo $plume
+        $psi.Arguments = 'account list'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $acctJob.Proc = [Diagnostics.Process]::Start($psi)
+        $acctJob.Out = $acctJob.Proc.StandardOutput.ReadToEndAsync(); $acctJob.Err = $acctJob.Proc.StandardError.ReadToEndAsync()
+        if ($ui.Account.Text -eq '' -or $ui.Account.Text -eq '…') { $ui.Account.Text = '…' }
+        $acctTimer.Start()
+    } catch { $ui.Account.Text = '無法確認 Apple ID' }
+}
+$acctTimer = New-Object Windows.Threading.DispatcherTimer
+$acctTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+$acctTimer.Add_Tick({
+    if ($acctJob.Proc -and -not $acctJob.Proc.HasExited) { return }
+    $acctTimer.Stop()
+    if (-not $acctJob.Proc) { return }
+    $acctJob.Proc = $null
+    try { Show-Account ("$($acctJob.Out.Result)`n$($acctJob.Err.Result)") } catch { $ui.Account.Text = '無法確認 Apple ID' } })
+function Show-Account($out) {
+    try {
         $mail = [regex]::Match($out, '[\w.+-]+@[\w-]+(\.[\w-]+)+').Value
         if ($mail) { $ui.Account.Text = $mail; $ui.Account.Foreground = Brush '#C7C7CC'; $ui.AcctDot.Fill = Brush '#30D158'; $ui.Login.Content = '換帳號' }
         else { $ui.Account.Text = '還沒登入 Apple ID'; $ui.AcctDot.Fill = Brush '#FF453A'; $ui.Login.Content = '登入 Apple ID' }
@@ -2362,7 +2447,17 @@ function Show-Login {
 }
 $ui.Login.Add_Click({ Show-Login })
 # 一打開就勾好遊戲庫裡現有的遊戲（Select-Library 會畫卡片）
-$win.Add_ContentRendered({ Select-Library; Update-Account; Check-Updates })
+$win.Add_ContentRendered({
+    Mark '視窗出現'
+    # 先讓「載入遊戲中…」畫出來，再排卡片
+    [void]$win.Dispatcher.BeginInvoke([Action]{
+        try { Select-Library } catch { }
+        Mark '畫遊戲庫'
+        foreach ($k in @($blTimes.Keys)) { $startMarks.Add(('  {0} {1:N1}s' -f $k, ($blTimes[$k] / 1000.0))) }
+        Update-Account; Check-Updates; Tidy-Folders
+        Mark '其他'
+        Flush-Marks '開啟'
+    }, [Windows.Threading.DispatcherPriority]::Background) })
 
 # ---------------------------------------------------------------- 執行：一次一款，每款一個進度列
 $jobXaml = @'
@@ -3437,6 +3532,7 @@ $bgTimer.Add_Tick({
     try { Update-Bg } catch { }
     # 背景算好的遊戲包大小、讀到的 iPad 空間：更新卡片上的大小和空間圖
     try { if ((End-Sizes) -and -not $state.Running -and -not $drag.Card) { Build-Library } } catch { }
+    try { if ((End-Tidy) -and -not $state.Running -and -not $drag.Card) { Build-Library } } catch { }
     try {
         $sf = Get-Item -LiteralPath $spaceFile -ErrorAction SilentlyContinue
         $sig = if ($sf) { $sf.LastWriteTimeUtc.Ticks } else { 0 }

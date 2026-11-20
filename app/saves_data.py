@@ -621,7 +621,7 @@ SAVE_LIKE = re.compile(r'\d| - ')   # JKSV「user - 2026-11-20」, Checkpoint「
 
 def inbox_saves(d, label):
     """[(save name, folder)] in one game's folder of the inbox. Mostly the folder itself (a save copied as is: its files, and
-    folders such as Smash's mii\ or Galaxy's MarioGalaxy\, are the save's root); a lone 0\ (Ryujinx) is the save's own
+    folders such as Smash's mii\\ or Galaxy's MarioGalaxy\\, are the save's root); a lone 0\\ (Ryujinx) is the save's own
     contents; only a folder of nothing but folders named like saves (JKSV, Checkpoint) holds one save in each."""
     if _files_here(d) or os.path.exists(os.path.join(d, '.dbi_save_info.ini')): return [(label, d)]
     subs = _dirs_here(d)
@@ -647,7 +647,7 @@ def inbox_match(name, path_tids, games):
 
 
 def import_inbox(src, pairs, names, seen_file, out=print):
-    """Copy each save in src into its game's 存檔\ (pairs [(tid, game folder)], names {tid: name}). A save already there with the
+    """Copy each save in src into its game's 存檔\\ (pairs [(tid, game folder)], names {tid: name}). A save already there with the
     same files, or taken before (seen_file), is skipped. Returns (copied, [folders no game was found for])."""
     games = {t: [names.get(t, ''), os.path.basename(g)] for t, g in pairs}
     gdir = dict(pairs)
