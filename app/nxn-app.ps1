@@ -1219,7 +1219,7 @@ function Read-IpadSpace {
     } catch { $null }
 }
 function Start-SpaceProbe([switch]$Force) {
-    if ($state.Running) { return }
+    if ($state.Running -or ($script:saveStatusProc -and -not $script:saveStatusProc.HasExited)) { return }
     if ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited) { return }
     if (-not $Force -and ((Get-Date) - $spaceJob.Started).TotalMinutes -lt 10) { return }
     $lib = Library-Ipa; $tool = Join-Path $here 'romfs_data.py'
@@ -3375,7 +3375,7 @@ function Read-Status {
     if (-not (Test-Path -LiteralPath $statusDir)) { return $all }
     $now = Get-Date
     foreach ($f in Get-ChildItem -LiteralPath $statusDir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
-        if ($f.Name -in 'pack-times.json', 'step-times.json', 'sizes.json', 'sizes-new.json', 'ipad-space.json') { continue }
+        if ($f.Name -in 'pack-times.json', 'step-times.json', 'sizes.json', 'sizes-new.json', 'ipad-space.json', 'save-sync.json') { continue }
         $j = $null
         try { $j = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }   # 剛好在寫：下次再讀
         if (-not $j -or -not $j.kind) { continue }
@@ -3858,6 +3858,143 @@ function Start-Report($g) {
     Start-Run @(@{ Game = $g; Mode = 'report'; Ipa = (Library-Ipa); Out = $zip; Shell = $extra })
 }
 
+function Save-StatusRows($report) {
+    $labels = @{
+        'same'='兩邊一致'; 'ipad-newer'='iPad 較新'; 'pc-newer'='電腦較新'; 'both-changed'='兩邊都改過'
+        'only-ipad'='只在 iPad'; 'only-pc'='只在電腦'; 'deleted-on-pc'='電腦已刪除'; 'deleted-on-ipad'='iPad 已刪除'
+    }
+    foreach ($s in $report.saves) {
+        [pscustomobject]@{
+            Name = [string]$s.name
+            Active = $(if ($s.in_use) { '使用中' } else { '' })
+            State = $(if ($labels.ContainsKey([string]$s.state)) { $labels[[string]$s.state] } else { '待核對' })
+            Ipad = $(if ($s.ipad_time) { [DateTimeOffset]::FromUnixTimeSeconds([long]$s.ipad_time).ToLocalTime().ToString('MM/dd HH:mm') } else { '—' })
+            PC = $(if ($s.pc_time) { [DateTimeOffset]::FromUnixTimeSeconds([long]$s.pc_time).ToLocalTime().ToString('MM/dd HH:mm') } else { '—' })
+        }
+    }
+}
+function Show-SaveStatus($owner) {
+    $ipa = Library-Ipa
+    $tids = @(Library-Tids)
+    $games = @($cards.Values | ForEach-Object {
+        $tid = Game-Tid $_.Tag
+        if ($tid -and $tid -in $tids) { [pscustomobject]@{ Name = $_.Tag.Name; Tid = $tid } }
+    } | Sort-Object Name)
+    if (-not $games.Count) { [void][Windows.MessageBox]::Show($owner, '遊戲庫還沒有可查看的遊戲。', '存檔'); return }
+    $saveStatusXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="存檔" Width="910" Height="500" MinWidth="740" MinHeight="380" Background="#141416" Foreground="#F5F5F7"
+ FontFamily="Segoe UI, Microsoft JhengHei UI" FontSize="14" WindowStartupLocation="CenterOwner">
+ <Window.Resources>__RES__</Window.Resources>
+ <Grid Margin="22">
+  <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+  <Border Background="#1C1C1E" CornerRadius="12" Padding="10">
+   <ListBox x:Name="SaveGames" DisplayMemberPath="Name" Background="#1C1C1E" Foreground="#F5F5F7" BorderThickness="0"
+    ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+  </Border>
+  <DockPanel Grid.Column="1" Margin="18,0,0,0">
+   <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+    <DockPanel>
+     <Button x:Name="ReadSave" DockPanel.Dock="Right" Content="讀取 iPad" Style="{StaticResource Primary}"/>
+     <TextBlock x:Name="SaveTitle" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+    </DockPanel>
+    <TextBlock x:Name="SaveMessage" TextWrapping="Wrap" Foreground="#AEAEB2" Margin="0,8,0,0"/>
+   </StackPanel>
+   <TextBlock x:Name="LastSaveSync" DockPanel.Dock="Bottom" TextWrapping="Wrap" Foreground="#AEAEB2" Margin="0,10,0,0"/>
+   <Border Background="#1C1C1E" CornerRadius="12" Padding="6">
+    <DataGrid x:Name="SaveRows" AutoGenerateColumns="False" IsReadOnly="True" GridLinesVisibility="None" HeadersVisibility="Column"
+     Background="#1C1C1E" Foreground="#F5F5F7" BorderThickness="0" RowBackground="#1C1C1E" AlternatingRowBackground="#242426"
+     CanUserReorderColumns="False" CanUserResizeRows="False">
+     <DataGrid.ColumnHeaderStyle><Style TargetType="DataGridColumnHeader"><Setter Property="Background" Value="#2C2C2E"/><Setter Property="Foreground" Value="#F5F5F7"/><Setter Property="Padding" Value="6,5"/></Style></DataGrid.ColumnHeaderStyle>
+     <DataGrid.Columns>
+      <DataGridTextColumn Header="存檔" Binding="{Binding Name}" Width="*"/>
+      <DataGridTextColumn Header="開啟" Binding="{Binding Active}" Width="65"/>
+      <DataGridTextColumn Header="狀態" Binding="{Binding State}" Width="120"/>
+      <DataGridTextColumn Header="iPad" Binding="{Binding Ipad}" Width="90"/>
+      <DataGridTextColumn Header="電腦" Binding="{Binding PC}" Width="90"/>
+     </DataGrid.Columns>
+    </DataGrid>
+   </Border>
+  </DockPanel>
+ </Grid>
+</Window>
+'@
+    $panel = Load-Window $saveStatusXaml
+    $panel.Owner = $owner
+    $picker = $panel.FindName('SaveGames'); $picker.ItemsSource = $games
+    $title = $panel.FindName('SaveTitle'); $message = $panel.FindName('SaveMessage')
+    $table = $panel.FindName('SaveRows'); $read = $panel.FindName('ReadSave')
+    $last = $panel.FindName('LastSaveSync')
+    $last.Text = '最近同步：尚無摘要'
+    try {
+        $summaryFile = Get-Item -LiteralPath (Join-Path $statusDir 'save-sync.json') -ErrorAction Stop
+        $summary = [IO.File]::ReadAllText($summaryFile.FullName) | ConvertFrom-Json
+        $last.Text = "最近同步 $($summaryFile.LastWriteTime.ToString('MM/dd HH:mm')) · 傳至 iPad $($summary.to_ipad) 份 · 存到電腦 $($summary.to_pc) 份"
+        if (@($summary.failed).Count) { $last.Text += " · 待處理 $(@($summary.failed).Count) 款"; $last.ToolTip = @($summary.failed) -join '、' }
+    } catch { }
+
+
+    $view = @{ Proc = $null; File = (Join-Path $statusDir ("save-view-$PID.json")); Started = [datetime]::MinValue }
+    $picker.Add_SelectionChanged({
+        $title.Text = $picker.SelectedItem.Name
+        $table.ItemsSource = $null
+        $message.Text = '連接並解鎖 iPad，按「讀取 iPad」。'
+    })
+    $picker.SelectedIndex = 0
+    $timer = New-Object Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(300)
+    $read.Add_Click({
+        if ($view.Proc) { return }
+        if ($state.Running -or ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited) -or
+            @(Read-Status | Where-Object { $_.state -eq 'running' -and ($_.kind -eq 'push' -or ($_.kind -eq 'run' -and $_.what -notin 'pack','login')) }).Count) {
+            $message.Text = 'iPad 正在讀取或同步，完成後再試。'; return
+        }
+        $transfer = Join-Path $work 'python-transfer.txt'
+        $py = if (Test-Path -LiteralPath $transfer) { (Get-Content -LiteralPath $transfer -Raw).Trim() }
+        if (-not $py -or -not (Test-Path -LiteralPath $py)) { $message.Text = '還沒準備好 iPad 連線工具，請先執行一次同步。'; return }
+        try {
+            if (Test-Path -LiteralPath $view.File) { Remove-Item -LiteralPath $view.File -Force }
+            $argsLine = (@('-I', (Quote (Join-Path $here 'saves_data.py')), 'status', (Quote $ipa), (Quote $gamesDir), '--tid', $picker.SelectedItem.Tid, '--json', (Quote $view.File)) +
+                $(if ($cfg.Udid) { @('--udid', (Quote $cfg.Udid)) })) -join ' '
+            $view.Proc = Start-Hidden $py $argsLine $here
+            $script:saveStatusProc = $view.Proc
+            $view.Started = Get-Date
+            $read.IsEnabled = $false; $picker.IsEnabled = $false
+            $table.ItemsSource = $null
+            $message.Text = '讀取存檔…'
+            $timer.Start()
+        } catch { $message.Text = '讀取無法開始，請確認 iPad 連線後再試。' }
+    })
+    $timer.Add_Tick({
+        if (-not $view.Proc.HasExited) {
+            if (((Get-Date) - $view.Started).TotalSeconds -lt 60) { return }
+            try { $view.Proc.Kill() } catch { }
+            return
+        }
+        $timer.Stop()
+        $code = $view.Proc.ExitCode
+        $view.Proc.Dispose(); $view.Proc = $null; $script:saveStatusProc = $null
+        $read.IsEnabled = $true; $picker.IsEnabled = $true
+        try {
+            if ($code) { throw 'read failed' }
+            $report = @([IO.File]::ReadAllText($view.File) | ConvertFrom-Json) | Select-Object -First 1
+            if (-not $report) { $message.Text = '這款不在目前的遊戲庫。'; return }
+            $table.ItemsSource = @(Save-StatusRows $report)
+            $message.Text = if ($report.note) { $report.note } elseif (-not @($report.saves).Count) { '這款遊戲目前沒有存檔。' } else { "$(@($report.saves).Count) 份存檔" }
+        } catch { $message.Text = '讀取未完成，請確認 iPad 已連接並解鎖，再按「讀取 iPad」。' }
+    })
+    try { [void]$panel.ShowDialog() }
+    finally {
+        $timer.Stop()
+        if ($view.Proc) {
+            if (-not $view.Proc.HasExited) { try { $view.Proc.Kill(); [void]$view.Proc.WaitForExit(1000) } catch { } }
+            $view.Proc.Dispose()
+        }
+        $script:saveStatusProc = $null
+        Remove-Item -LiteralPath $view.File -ErrorAction SilentlyContinue
+    }
+}
+
 # ---------------------------------------------------------------- 設定視窗
 $ui.Settings.Add_Click({
     $sx = @'
@@ -3871,6 +4008,7 @@ $ui.Settings.Add_Click({
       <StackPanel>
         <TextBlock x:Name="LibText" TextWrapping="Wrap"/>
         <WrapPanel Margin="0,10,0,0">
+          <Button x:Name="SaveStatus" Content="查看存檔" Margin="0,0,8,8"/>
           <Button x:Name="SaveBackup" Content="備份 iPad 存檔" Margin="0,0,8,8"/>
           <Button x:Name="SaveRestore" Content="還原存檔…" Margin="0,0,8,8"/>
           <Button x:Name="SaveFolder" Content="存檔備份資料夾" Margin="0,0,8,8"/>
@@ -3957,6 +4095,8 @@ $ui.Settings.Add_Click({
         if ($older) { $cfg.ShellPin = $older.FullName; Save-Settings; & $showShell; Update-MergeOption; Build-Library } })
     $sw.FindName('ShellLock').Add_Click({ if ($cur = Get-MultiShell) { $cfg.ShellPin = $cur.FullName; Save-Settings; & $showShell } })
     $sw.FindName('ShellLatest').Add_Click({ $cfg.ShellPin = ''; Save-Settings; & $showShell; Update-MergeOption; Build-Library })
+    $sw.FindName('SaveStatus').IsEnabled = $have -and $idle
+    $sw.FindName('SaveStatus').Add_Click({ Show-SaveStatus $sw })
     $sw.FindName('SaveBackup').IsEnabled = $have -and $idle
     $sw.FindName('SaveRestore').IsEnabled = $have -and $idle -and [bool]@(Save-Backups (Save-Root $lib)).Count
     $sw.FindName('Migrate').IsEnabled = $idle

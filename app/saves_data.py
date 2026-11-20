@@ -534,6 +534,19 @@ async def sync_game(afc, base, dest, gdir, root, scratch, now, backed):
     return n_up, n_down, busy
 
 
+def write_sync_summary(path, games, up, down, failed, actions=()):
+    if not path:
+        return
+    temp = path + '.tmp'
+    try:
+        with open(temp, 'w', encoding='utf-8') as fh:
+            json.dump({'games': games, 'to_ipad': up, 'to_pc': down, 'failed': failed, 'actions': actions},
+                      fh, ensure_ascii=False, indent=1)
+        os.replace(temp, path)
+    except OSError as exc:
+        print('[!] 無法儲存這次的同步摘要：%s' % exc)
+
+
 async def sync_v2(afc, L, ipa, games, now, backed, json_out=None):
     import tempfile
     del ACTIONS[:]
@@ -553,9 +566,7 @@ async def sync_v2(afc, L, ipa, games, now, backed, json_out=None):
             if busy: failed.append(os.path.basename(g))
     await L.save_folders()
     print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
-    if json_out:
-        with open(json_out, 'w', encoding='utf-8') as fh:
-            json.dump({'games': len(pairs), 'to_ipad': up, 'to_pc': down, 'failed': failed, 'actions': ACTIONS}, fh, ensure_ascii=False, indent=1)
+    write_sync_summary(json_out, len(pairs), up, down, failed, ACTIONS)
     if failed:
         print('沒同步完的：%s' % '、'.join(failed))
         return SYNC_PARTIAL
@@ -592,6 +603,7 @@ async def sync(afc, ipa, games, root, now=None, json_out=None):
             up += a; down += b
             if busy: failed.append(os.path.basename(g))
     print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
+    write_sync_summary(json_out, len(pairs), up, down, failed)
     if failed:   # the rest are done; a nonzero exit makes PadSwitch say so (nxn.ps1)
         print('沒同步完的：%s' % '、'.join(failed))
         return SYNC_PARTIAL
@@ -845,13 +857,15 @@ async def sync_game_v2(afc, L, tid, gdir, scratch, now, backed):
     return up, down, busy
 
 
-async def status(afc, ipa, games, out=None):
+async def status(afc, ipa, games, out=None, title_id=''):
     """Each game's saves on both sides and how they stand, as JSON for PadSwitch's save panel (nothing is changed):
     [{'tid', 'game', 'folder', 'saves': [{'name', 'state', 'in_use', 'ipad_time', 'pc_time', 'files'}]}]"""
     import tempfile
     L = await IL.IPad.load(afc, IL.game_names(ipa))
     res = []
     for tid, gdir in game_folders(ipa, games):
+        if title_id and tid != title_id.upper():
+            continue
         with tempfile.TemporaryDirectory() as scratch:
             if not L.v2:
                 res.append({'tid': tid, 'game': L.names.get(tid, tid), 'folder': gdir, 'saves': [], 'note': '新版 SwitchPad 還沒在 iPad 上開過'}); continue
@@ -1257,6 +1271,7 @@ def main():
     p.add_argument('--inbox', action='append', default=[])
     p = sub.add_parser('inbox'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('src', nargs='+')
     p = sub.add_parser('status'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('--json', default='')
+    p.add_argument('--tid', default='')
     p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default=''); p.add_argument('--slot', default='')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
@@ -1282,7 +1297,7 @@ def main():
         dirs = dict(game_folders(a.ipa, a.games)) if a.games else None
         work = lambda afc: gl_sync(afc, games, a.root, IL.game_names(a.ipa), dirs)
     elif a.cmd == 'sync': work = lambda afc: sync(afc, a.ipa, a.games, a.root, json_out=a.json or None)
-    elif a.cmd == 'status': work = lambda afc: status(afc, a.ipa, a.games, a.json or None)
+    elif a.cmd == 'status': work = lambda afc: status(afc, a.ipa, a.games, a.json or None, a.tid)
     elif a.cmd == 'logs':
         if a.report:
             async def work(afc):

@@ -394,5 +394,27 @@ class DesktopInbox(unittest.TestCase):
         self.assertEqual(self.run_()[0], 0)
 
 
+class SaveStatusTest(unittest.IsolatedAsyncioTestCase):
+    async def test_only_reads_the_selected_games_saves(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        game = SimpleNamespace(v2=True, folder=lambda tid: NAMES[tid])
+        look = AsyncMock(return_value=('', {'Main': {'dir': '', 'digest': 'd1'}}, 'Main', {}, {}))
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, 'status.json')
+            with patch.object(sd.IL.IPad, 'load', AsyncMock(return_value=game)), \
+                 patch.object(sd.IL, 'game_names', return_value=NAMES), \
+                 patch.object(sd, 'game_folders', return_value=[(T1, 'first'), (T2, 'second')]), \
+                 patch.object(sd, 'look', look):
+                await sd.status(None, 'library.ipa', 'games', output, title_id=T2)
+            with open(output, encoding='utf-8') as f:
+                result = json.load(f)
+            self.assertEqual([g['tid'] for g in result], [T2])
+            self.assertEqual(result[0]['saves'][0]['state'], 'only-ipad')
+            self.assertTrue(result[0]['saves'][0]['in_use'])
+            self.assertEqual(look.await_args.args[2], T2)
+
+
 if __name__ == '__main__':
     unittest.main()
