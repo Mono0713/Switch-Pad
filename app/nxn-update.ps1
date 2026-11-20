@@ -15,7 +15,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $Repo = 'Mono0713/ns2ios-shell'
 $AppRepo = 'Mono0713/Switch-Pad'
-$PlumeRepo = 'khcrysalis/Impactor'
+$PlumeRepo = 'claration/Impactor'
 $here = $PSScriptRoot
 # 程式檔、work、工具 在 nxn\程式\，遊戲在上一層（舊版全部在同一層，PadSwitch 開起來會自己搬）
 $base = if ((Split-Path $here -Leaf) -eq '程式') { Split-Path $here -Parent } else { $here }
@@ -41,6 +41,52 @@ function RunExe($exe, $arglist) {
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     return $code
+}
+
+function Get-PlumeVersion($exe) {
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return }
+    try {
+        $v = (& $exe --version 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $v -match '^plumesign (\d+\.\d+\.\d+)$') { return [version]$Matches[1] }
+    } catch { }
+}
+
+function Update-PlumeSign($exe, [switch]$Force) {
+    $installed = Get-PlumeVersion $exe
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$PlumeRepo/releases/latest" -Headers $headers
+    } catch {
+        if (-not $installed -or $Force) { throw }
+        Warn "無法查詢簽章工具新版，沿用 plumesign $installed"
+        return
+    }
+    if ($release.tag_name -notmatch '^v?(\d+\.\d+\.\d+)$') { throw "無法辨識 Impactor 版本：$($release.tag_name)" }
+    $latest = [version]$Matches[1]
+    if (-not $Force -and $installed -and $installed -ge $latest) {
+        Ok "plumesign $installed 已就緒"
+        return
+    }
+
+    $asset = $release.assets | Where-Object { $_.name -eq 'plumesign-windows-x86_64.exe' } | Select-Object -First 1
+    if (-not $asset -or $asset.digest -notmatch '^sha256:([0-9a-f]{64})$') {
+        throw "Impactor $($release.tag_name) 缺少簽章工具或 SHA-256"
+    }
+    $expected = $Matches[1]
+    $staged = Join-Path (Split-Path $exe -Parent) ("plumesign-" + [guid]::NewGuid() + ".exe")
+    try {
+        Download $asset.browser_download_url $staged "plumesign $latest"
+        if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $expected -or (Get-PlumeVersion $staged) -ne $latest) {
+            throw "plumesign $latest 驗證失敗，請重試更新"
+        }
+        if (Test-Path -LiteralPath $exe) {
+            [IO.File]::Replace($staged, $exe, [NullString]::Value)
+        } else {
+            Move-Item -LiteralPath $staged -Destination $exe
+        }
+    } finally {
+        Remove-Item -LiteralPath $staged, "$staged.part" -ErrorAction SilentlyContinue
+    }
+    Ok "plumesign 已更新到 $latest"
 }
 
 try {
@@ -158,13 +204,7 @@ try {
     # ---- plumesign（Impactor 的命令列版）和 Apple 裝置服務 ----
     Step '檢查簽章工具'
     $plume = Join-Path $toolDir 'plumesign.exe'
-    if ($Force -or -not (Test-Path $plume)) {
-        $pr = Invoke-RestMethod -Uri "https://api.github.com/repos/$PlumeRepo/releases/latest" -Headers $headers
-        $pa = $pr.assets | Where-Object { $_.name -eq 'plumesign-windows-x86_64.exe' } | Select-Object -First 1
-        if (-not $pa) { throw "Impactor $($pr.tag_name) 沒有 plumesign-windows-x86_64.exe" }
-        Download $pa.browser_download_url $plume "plumesign $($pr.tag_name)"
-    }
-    Ok 'plumesign 好了'
+    Update-PlumeSign $plume -Force:$Force
     # iPad 要透過 Apple 的裝置服務才連得到（「Apple 裝置」App 或 iTunes 會裝）
     if (-not (Get-Service -Name 'Apple Mobile Device Service' -ErrorAction SilentlyContinue)) {
         Warn '這台電腦沒有 Apple 行動裝置服務，iPad 會連不到。請從 Microsoft Store 安裝「Apple 裝置」（Apple Devices）或 iTunes。'
