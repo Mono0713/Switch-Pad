@@ -92,9 +92,17 @@ f = {'F': F, 'name': nacp.name(ex / 'control.nacp'), 'version': ver, 'display': 
 pdir = work / 'profile' / ('%016X' % app)
 bip.write_profile(pdir, app, f)
 dest = src / 'dm' / 'games' / ('%016X' % app)
+# The game's own patches.py (the shell repository's or one put there by hand: Moving Out 2's CUTS, a folder with no game.tsv
+# in the repository) stays: removing the whole folder took it with it, and the next rewrite stopped where its CUTS were meant to
+# apply. Everything else is the survey's or a previous pack's and is made again
+keep = {}
 if dest.exists():
+    keep = {p.name: p.read_bytes() for p in dest.iterdir() if p.is_file() and p.suffix == '.py' and not (pdir / p.name).exists()}
     shutil.rmtree(dest)
 shutil.copytree(pdir, dest)
+for n, b in keep.items():
+    (dest / n).write_bytes(b)
+    print('kept', dest / n)
 # The shader tables come out empty here (the shader split fills them while packing), but the packer reads an NVN shader
 # table with only its header as "this game has no NVN shaders" and takes the Vulkan route. Leave them out, as Boomerang
 # Fu's profile does, so the packer splits the shaders from the game files.
