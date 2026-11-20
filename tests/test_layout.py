@@ -354,6 +354,35 @@ class DesktopInbox(unittest.TestCase):
         self.assertEqual(unknown, ['不知道哪款'])
         self.assertEqual(read(os.path.join(self.g1, '存檔', '存檔 1', 'f')), b'old')     # nothing replaced
 
+    def test_real_desktop_folder(self):
+        names = {'0100000000010000': 'Super Mario Galaxy', '010099C022B96000': 'Super Mario Galaxy 2', '01004D300C5AE000': 'Kirby and the Forgotten Land',
+                 '01007E3006DDA000': 'Kirby Star Allies', '01006A800016E000': 'Super Smash Bros. Ultimate', '0100F2C0115B6000': 'The Legend of Zelda: Tears of the Kingdom'}
+        r = os.path.join(self.tmp, 'Switch PAD', '遊戲')
+        pairs = [(t, os.path.join(r, IL.folder_name(n))) for t, n in names.items()]
+        i = self.inbox
+        for f in ('file0', 'file1', 'system'): write(os.path.join(i, 'Kirby and the Forgotten Land', f))
+        write(os.path.join(i, 'Kirby Star Allies True Files', 'savedata.dat'))
+        write(os.path.join(i, 'New Super Mario Bros. U Deluxe', 'rp_savedata.dat'))
+        for g in ('Super Mario Galaxy', 'Super Mario Galaxy 2'):
+            write(os.path.join(i, g, 'MarioGalaxy', 'GameData.bin'), g.encode()); write(os.path.join(i, g, '.dbi_save_info.ini')); write(os.path.join(i, g, '.dbi_save_extra'))
+        write(os.path.join(i, 'Super Smash Bros. Ultimate', 'system_data.bin')); write(os.path.join(i, 'Super Smash Bros. Ultimate', 'mii', 'a'))
+        z = os.path.join(i, 'The Legend of Zelda  Tears of the Kingdom')
+        write(os.path.join(z, 'option.sav')); write(os.path.join(z, 'slot_00', 'progress.sav')); write(os.path.join(z, 'album', 'a'))
+        b = os.path.join(i, 'The Legend of Zelda Breath of the Wild')
+        write(os.path.join(b, 'option.sav')); write(os.path.join(b, '0', 'game_data.sav')); write(os.path.join(b, 'edizon_save_metadata.json'))
+        n, unknown = sd.import_inbox(i, pairs, names, self.seen, out=lambda *_: None)
+        self.assertEqual(sorted(unknown), ['New Super Mario Bros. U Deluxe', 'The Legend of Zelda Breath of the Wild'])
+        self.assertEqual(n, 6)
+        g = dict(pairs)
+        def save(t): d = os.path.join(g[t], '存檔'); return {x: sorted(sd.clean_files(os.path.join(d, x))) for x in os.listdir(d)}
+        self.assertEqual(save('0100000000010000'), {'桌面存檔': ['MarioGalaxy/GameData.bin']})
+        self.assertEqual(read(os.path.join(g['010099C022B96000'], '存檔', '桌面存檔', 'MarioGalaxy', 'GameData.bin')), b'Super Mario Galaxy 2')
+        self.assertFalse(os.path.exists(os.path.join(g['0100000000010000'], '存檔', '桌面存檔', '.dbi_save_info.ini')))
+        self.assertEqual(save('01007E3006DDA000'), {'Kirby Star Allies True Files': ['savedata.dat']})
+        self.assertEqual(save('01006A800016E000'), {'桌面存檔': ['mii/a', 'system_data.bin']})
+        self.assertEqual(save('0100F2C0115B6000'), {'桌面存檔': ['album/a', 'option.sav', 'slot_00/progress.sav']})
+        self.assertEqual(save('01004D300C5AE000'), {'桌面存檔': ['file0', 'file1', 'system']})
+
     def test_once_only(self):
         write(os.path.join(self.inbox, 'Super Mario Odyssey', 'game.bin'), b'a')
         self.assertEqual(self.run_()[0], 1)
