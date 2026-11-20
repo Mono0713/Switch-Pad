@@ -1072,13 +1072,29 @@ function Size-Key($f) { "$($f.FullName)|$($f.LastWriteTimeUtc.Ticks)" }
 # 一款在 iPad 上的大小：轉好的遊戲包算得出來就用它，不然用遊戲檔（本體＋更新＋DLC）的大小估
 $partMissing = New-Object System.Collections.Generic.List[string]
 $sizeTried = New-Object 'System.Collections.Generic.HashSet[string]'   # 這次開著時算過（算不出來的也不再算）
+# 算過的記在 $gbCache（遊戲資料夾 → bytes）：畫面每次更新都要加總好幾十款，不能每次都去讀資料夾（2026-11-20 使用者說整個很卡）
+# 重建遊戲庫畫面（Build-Library）或背景算好新的大小時清掉
+$gbCache = @{}
+$gbShell = @{ At = [datetime]::MinValue; Id = $null }
+function Shell-IdCached {
+    if (((Get-Date) - $gbShell.At).TotalSeconds -gt 30) { $ms = Get-MultiShell; $gbShell.Id = if ($ms) { Multi-Id $ms } else { $null }; $gbShell.At = Get-Date }
+    $gbShell.Id
+}
+$gbAt = Get-Date
 function Game-Bytes($g) {
-    $ms = Get-MultiShell
-    if ($ms) {
-        $pf = Get-Item -LiteralPath (Part-For $g (Multi-Id $ms)).Path -ErrorAction SilentlyContinue
-        if ($pf) { $k = Size-Key $pf; if ($sizes.ContainsKey($k)) { return $sizes[$k] }; if (-not $partMissing.Contains($pf.FullName) -and -not $sizeTried.Contains($k)) { $partMissing.Add($pf.FullName) } }
+    if (((Get-Date) - $script:gbAt).TotalSeconds -gt 60) { $gbCache.Clear(); $script:gbAt = Get-Date }   # 轉好新的遊戲包時跟著更新
+    if ($gbCache.ContainsKey($g.Dir)) { return $gbCache[$g.Dir] }
+    $id = Shell-IdCached
+    if ($id) {
+        $pf = Get-Item -LiteralPath (Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")) -ErrorAction SilentlyContinue
+        if ($pf) {
+            $k = Size-Key $pf
+            if ($sizes.ContainsKey($k)) { $gbCache[$g.Dir] = $sizes[$k]; return $sizes[$k] }
+            if (-not $partMissing.Contains($pf.FullName) -and -not $sizeTried.Contains($k)) { $partMissing.Add($pf.FullName) }
+        }
     }
-    [int64](@(Get-ChildItem -LiteralPath $g.Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci', '.nsz', '.xcz' }) | Measure-Object Length -Sum).Sum
+    $b = [int64](@(Get-ChildItem -LiteralPath $g.Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci', '.nsz', '.xcz' }) | Measure-Object Length -Sum).Sum
+    $gbCache[$g.Dir] = $b; $b
 }
 function Start-Sizes {
     if ($sizeJob.Proc -and -not $sizeJob.Proc.HasExited) { return }
@@ -1098,6 +1114,7 @@ function End-Sizes {
     try {
         $j = [IO.File]::ReadAllText($sizeJob.Out) | ConvertFrom-Json
         foreach ($pr in $j.PSObject.Properties) { if ([int64]$pr.Value -gt 0 -and $sizeJob.Keys[$pr.Name]) { $sizes[$sizeJob.Keys[$pr.Name]] = [int64]$pr.Value } }
+        $gbCache.Clear()
         # 只留現在還在的遊戲包
         $keep = [ordered]@{}; foreach ($k in $sizes.Keys) { if (Test-Path -LiteralPath ($k -split '\|')[0]) { $keep[$k] = $sizes[$k] } }
         [IO.File]::WriteAllText($sizesFile, ($keep | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
@@ -1138,7 +1155,14 @@ function Legend($panel, $items) {
         [void]$panel.Children.Add($sp)
     }
 }
-function Read-IpadSpace { try { [IO.File]::ReadAllText($spaceFile) | ConvertFrom-Json } catch { $null } }
+$spaceCache = @{ T = -1L; V = $null }
+function Read-IpadSpace {
+    try {
+        $t = if (Test-Path -LiteralPath $spaceFile) { [IO.File]::GetLastWriteTimeUtc($spaceFile).Ticks } else { 0L }
+        if ($t -ne $spaceCache.T) { $spaceCache.T = $t; $spaceCache.V = if ($t) { [IO.File]::ReadAllText($spaceFile) | ConvertFrom-Json } else { $null } }
+        $spaceCache.V
+    } catch { $null }
+}
 function Start-SpaceProbe([switch]$Force) {
     if ($state.Running) { return }
     if ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited) { return }
@@ -1156,34 +1180,63 @@ function Start-SpaceProbe([switch]$Force) {
     try { $spaceJob.Proc = [Diagnostics.Process]::Start($psi); $spaceJob.Proc.BeginOutputReadLine(); $spaceJob.Proc.BeginErrorReadLine() } catch { }
     $ui.IpadR.Text = '讀取中…'
 }
-# 同步會加進 iPad 和拿掉的遊戲（跟底下那行說的一樣）
-function Sync-Delta {
-    $mine = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
-    $add = @($mine | Where-Object { -not $_.OnPad -and ($_.Ready -or $_.Base) })
-    $del = @($cards.Values | Where-Object { $_.Tag.OnPad -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
-    $upd = @($mine | Where-Object { $_.OnPad -and ($_.Newer -or -not $_.Ready) })
-    @{ Add = $add; Del = $del; Upd = $upd
-       AddB = [int64](@($add | ForEach-Object { Game-Bytes $_ }) | Measure-Object -Sum).Sum
-       DelB = [int64](@($del | ForEach-Object { Game-Bytes $_ }) | Measure-Object -Sum).Sum
-       UpdB = [int64](@($upd | ForEach-Object { Game-Bytes $_ }) | Measure-Object -Sum).Sum
-       PadB = [int64](@($cards.Values | Where-Object { $_.Tag.OnPad } | ForEach-Object { Game-Bytes $_.Tag }) | Measure-Object -Sum).Sum }
-}
-# 選的遊戲加起來多大、iPad 給遊戲庫最多能用多少：iPad 剩的 + 遊戲庫 App 現在整個佔的（同步時會整個換掉），再留 5 GB
-# 給安裝 App 和遊戲執行時的暫存。使用者清不出 iPad 別的空間，只能靠選遊戲控制，所以超過就在按「同步」時擋下
+# 這次同步要用掉多少 iPad 空間：已經在 iPad 上（而且是同一版）的遊戲不用再傳，不算；要傳的是新加的、更新的、只傳了一部分的。
+# 拿掉的遊戲會在安裝 App 之前先刪（romfs_data.py prune），空出的空間可以用。再留 5 GB 給安裝 App 和執行時的暫存。
+# iPad 上每款遊戲實際佔多少：ipad-space.json 的 data（push 留在 iPad 的檔案清單加總，romfs_data.py space 讀的，只讀小 JSON）
 $fitMargin = 5GB
-function Fit-Info {
-    $sel = [int64](@($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { Game-Bytes $_.Tag }) | Measure-Object -Sum).Sum
-    $sp = Read-IpadSpace
-    if (-not $sp -or -not $sp.total) { return @{ Sel = $sel; Known = $false } }
-    $appB = if ($sp.app) { [int64]$sp.app } else { (Sync-Delta).PadB }   # 舊的空間記錄沒有 App 大小：用電腦上算的遊戲大小估
-    $cap = [int64]$sp.free + $appB - $fitMargin
-    @{ Sel = $sel; Known = $true; Cap = [math]::Max([int64]0, $cap); Over = ($sel -gt $cap); Free = [int64]$sp.free; App = $appB }
+function Pad-Bytes($sp, $tid, $g = $null) {
+    if (-not $sp -or -not $sp.data -or -not $tid) { return $null }
+    $n = 0L; $any = $false
+    foreach ($pr in $sp.data.PSObject.Properties) { if ($pr.Name -like "games/$tid/*") { $n += [int64]$pr.Value; $any = $true } }
+    if ($any) { return $n }
+    # iPad 有這款的資料、只是舊版 PadSwitch 傳的沒留檔案清單：當成整款都在
+    if ($g -and $sp.have -and @($sp.have.PSObject.Properties | Where-Object { $_.Name -like "games/$tid/*" }).Count) { return [int64](Game-Bytes $g) }
+    0L
 }
-function Update-Space {
-    # 電腦
+function Fit-Info {
+    $sp = Read-IpadSpace
+    $mine = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
+    $sel = 0L; $send = 0L; $sendList = @()
+    $hasData = [bool]($sp -and $sp.data)
+    foreach ($g in $mine) {
+        $b = [int64](Game-Bytes $g); $sel += $b
+        if (-not ($g.Ready -or $g.Base -or $g.OnPad)) { continue }
+        if ($hasData) {
+            $pb = Pad-Bytes $sp (Game-Tid $g) $g
+            $need = [math]::Max([int64]0, $b - $pb)
+            if ($pb -gt 0 -and -not $g.Newer -and $need -lt 512MB) { $need = 0L }   # 已經在 iPad 上：差的只是 App 裡的小檔
+            if ($g.Newer -and $pb -gt 0) { $need = [math]::Max($need, [int64]($b * 0.1)) }   # 更新：至少換掉一部分
+        } else {
+            $need = if (-not $g.OnPad) { $b } elseif ($g.Newer -or -not $g.Ready) { $b } else { 0L }
+        }
+        if ($need -gt 0) { $send += $need; $sendList += [pscustomobject]@{ Name = $g.Name; B = $need } }
+    }
+    $del = @($cards.Values | Where-Object { $_.Tag.OnPad -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
+    $freed = 0L
+    foreach ($g in $del) { $pb = Pad-Bytes $sp (Game-Tid $g) $g; $freed += $(if ($null -ne $pb -and $pb -gt 0) { $pb } elseif ($hasData) { 0L } else { [int64](Game-Bytes $g) }) }
+    # iPad 上有、但電腦這邊已經沒有卡片的遊戲資料（資料夾刪了）：同步時也會刪
+    if ($hasData) {
+        $known = @{}; foreach ($c in $cards.Values) { $t = Game-Tid $c.Tag; if ($t -and $selected.Contains($c.Tag.Dir)) { $known[$t] = 1 } }
+        foreach ($g in $del) { $t = Game-Tid $g; if ($t) { $known[$t] = 1 } }
+        foreach ($pr in $sp.data.PSObject.Properties) { if ($pr.Name -match '^games/([0-9A-Fa-f]{16})/' -and -not $known.ContainsKey($Matches[1].ToUpper())) { $freed += [int64]$pr.Value } }
+    }
+    $r = @{ Sel = $sel; Send = $send; SendList = $sendList; Freed = $freed; Del = $del; Known = [bool]($sp -and $sp.total); Data = $hasData }
+    if ($r.Known) {
+        $r.Free = [int64]$sp.free; $r.Total = [int64]$sp.total
+        $r.After = $r.Free + $freed - $send
+        $r.Over = ($send -gt 0 -and $r.After -lt $fitMargin)
+        $r.Short = [math]::Max([int64]0, $fitMargin - $r.After)
+    }
+    $r
+}
+function Update-Space($fi = $null) {
+    # 電腦：遊戲資料夾的大小一分鐘最多掃一次（掃幾十個資料夾很慢）
     try {
         $drv = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($base))
-        $games = [int64](@(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue }) | Measure-Object Length -Sum).Sum
+        if (-not $script:pcGames -or ((Get-Date) - $script:pcGames.At).TotalSeconds -gt 60) {
+            $script:pcGames = @{ At = Get-Date; B = [int64](@(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue }) | Measure-Object Length -Sum).Sum }
+        }
+        $games = $script:pcGames.B
         $used = $drv.TotalSize - $drv.AvailableFreeSpace
         $ui.PcL.Text = "電腦（$($drv.Name.TrimEnd('\'))）"
         $ui.PcR.Text = "剩 $(Fmt-Size $drv.AvailableFreeSpace) / 共 $(Fmt-Size $drv.TotalSize)"
@@ -1196,44 +1249,40 @@ function Update-Space {
     } catch { }
     # iPad
     $sp = Read-IpadSpace
-    $dl = Sync-Delta
-    if (-not $sp -or -not $sp.total) {
+    if (-not $fi) { $fi = Fit-Info }
+    if (-not $fi.Known) {
         $ui.IpadL.Text = 'iPad'
         if (-not ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited)) { $ui.IpadR.Text = '還沒讀到，接上 iPad 按 ⟳' }
         Set-Bar $ui.IpadBar @()
-        Legend $ui.IpadLegend @(@{ Color = '#0A84FF'; Text = "遊戲庫約 $(Fmt-Size $dl.PadB)" }) | Out-Null
-        if ($dl.AddB -or $dl.DelB) { Legend $ui.IpadLegend @(@{ Color = '#0A84FF'; Text = "遊戲庫約 $(Fmt-Size $dl.PadB)" }, @{ Color = '#30D158'; Text = "要加 $(Fmt-Size ($dl.AddB))" }, @{ Color = '#FF9F0A'; Text = "要拿掉 $(Fmt-Size $dl.DelB)" }) }
+        $leg = @()
+        if ($fi.Send) { $leg += @{ Color = '#30D158'; Text = "這次要傳約 $(Fmt-Size $fi.Send)" } }
+        if ($fi.Freed) { $leg += @{ Color = '#FF9F0A'; Text = "拿掉的遊戲會先空出約 $(Fmt-Size $fi.Freed)" } }
+        Legend $ui.IpadLegend $leg
         return
     }
     $at = To-Date $sp.at
     $ago = if ($at) { $m = ((Get-Date) - $at).TotalMinutes; if ($m -lt 2) { '剛剛' } elseif ($m -lt 60) { "$([int]$m) 分鐘前" } elseif ($m -lt 1440) { "$([int]($m / 60)) 小時前" } else { $at.ToString('MM/dd') } } else { '' }
-    $total = [int64]$sp.total; $free = [int64]$sp.free
-    $lib = [math]::Min($dl.PadB, $total - $free)
-    $keep = [math]::Max([int64]0, $lib - $dl.DelB)
-    $after = $free + $dl.DelB - $dl.AddB
-    $fi0 = Fit-Info
-    $fits = if ($fi0.Known) { -not $fi0.Over } else { $after -gt 1GB }
+    $total = $fi.Total; $free = $fi.Free
+    $lib = if ($fi.Data) { [int64](@($sp.data.PSObject.Properties | ForEach-Object { [int64]$_.Value }) | Measure-Object -Sum).Sum } else { 0L }
+    if ($sp.app) { $lib += [int64]$sp.app }
+    $lib = [math]::Min($lib, $total - $free)
+    $freedShow = [math]::Min($fi.Freed, $lib)
     $ui.IpadL.Text = if ($sp.device) { "iPad（$($sp.device)）" } else { 'iPad' }
     if (-not ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited)) { $ui.IpadR.Text = "剩 $(Fmt-Size $free) / 共 $(Fmt-Size $total)" + $(if ($ago) { " · $ago" }) }
     $ui.IpadR.Foreground = Brush '#8E8E93'
-    $addShow = [math]::Min($dl.AddB, [math]::Max([int64]0, $free + $dl.DelB))
+    $sendShow = [math]::Min($fi.Send, [math]::Max([int64]0, $free + $freedShow))
     Set-Bar $ui.IpadBar @(@{ Bytes = [math]::Max([int64]0, $total - $free - $lib); Color = '#636366'; Tip = '其他 App、照片和系統' },
-                          @{ Bytes = $keep; Color = '#0A84FF'; Tip = "遊戲庫 $(Fmt-Size $keep)" },
-                          @{ Bytes = [math]::Min($dl.DelB, $lib); Color = '#FF9F0A'; Tip = "同步時拿掉 $(Fmt-Size $dl.DelB)（先刪，騰出空間）" },
-                          @{ Bytes = $addShow; Color = $(if ($fits) { '#30D158' } else { '#FF453A' }); Tip = "同步時加入 $(Fmt-Size $dl.AddB)" },
-                          @{ Bytes = [math]::Max([int64]0, $after); Color = $null })
+                          @{ Bytes = [math]::Max([int64]0, $lib - $freedShow); Color = '#0A84FF'; Tip = "遊戲庫 $(Fmt-Size $lib)" },
+                          @{ Bytes = $freedShow; Color = '#FF9F0A'; Tip = "拿掉的遊戲會先刪，空出 $(Fmt-Size $fi.Freed)" },
+                          @{ Bytes = $sendShow; Color = $(if ($fi.Over) { '#FF453A' } else { '#30D158' }); Tip = "這次要傳 $(Fmt-Size $fi.Send)" },
+                          @{ Bytes = [math]::Max([int64]0, $fi.After); Color = $null })
     $leg = @(@{ Color = '#636366'; Text = "其他 $(Fmt-Size ([math]::Max([int64]0, $total - $free - $lib)))" }, @{ Color = '#0A84FF'; Text = "遊戲庫 $(Fmt-Size $lib)" })
-    if ($dl.DelB) { $leg += @{ Color = '#FF9F0A'; Text = "拿掉 $($dl.Del.Count) 款 −$(Fmt-Size $dl.DelB)"; Tip = (($dl.Del | ForEach-Object { $_.Name }) -join '、') } }
-    if ($dl.AddB) { $leg += @{ Color = $(if ($fits) { '#30D158' } else { '#FF453A' }); Text = "加入 $($dl.Add.Count) 款 +$(Fmt-Size $dl.AddB)"; Tip = (($dl.Add | ForEach-Object { $_.Name }) -join '、') } }
-    if ($dl.AddB -or $dl.DelB) {
-        $leg += if ($fits) { @{ Color = '#3A3A3C'; Text = "同步後剩 $(Fmt-Size $after) ✓ 放得下"; Fg = '#30D158' } }
-                else { @{ Color = '#FF453A'; Text = '放不下：拿掉幾款再同步'; Fg = '#FF453A' } }
-    } else { $leg += @{ Color = '#3A3A3C'; Text = "可用 $(Fmt-Size $free)" } }
-    $fi = Fit-Info
-    if ($fi.Known) {
-        $leg += @{ Color = $(if ($fi.Over) { '#FF453A' } else { '#30D158' }); Fg = $(if ($fi.Over) { '#FF453A' } else { '#F5F5F7' })
-                   Text = "已選 $(Fmt-Size $fi.Sel)／iPad 可用 $(Fmt-Size $fi.Cap)" + $(if ($fi.Over) { "，超過 $(Fmt-Size ($fi.Sel - $fi.Cap))" } else { '' })
-                   Tip = "iPad 可用 = 剩下 $(Fmt-Size $fi.Free) + 遊戲庫 App 現在佔的 $(Fmt-Size $fi.App) − 5 GB（安裝 App 和遊戲執行時的暫存餘量）。超過的話「同步」會先擋下，請拿掉幾款。" }
+    if ($fi.Send) { $leg += @{ Color = $(if ($fi.Over) { '#FF453A' } else { '#30D158' }); Text = "這次要傳 $(Fmt-Size $fi.Send)"; Tip = ((@($fi.SendList | Sort-Object B -Descending | ForEach-Object { "$($_.Name) $(Fmt-Size $_.B)" })) -join '、') } }
+    if ($fi.Freed) { $leg += @{ Color = '#FF9F0A'; Text = "拿掉的遊戲會先空出 $(Fmt-Size $fi.Freed)"; Tip = (($fi.Del | ForEach-Object { $_.Name }) -join '、') } }
+    $leg += @{ Color = '#3A3A3C'; Text = "iPad 剩 $(Fmt-Size $free)" }
+    if ($fi.Send -or $fi.Freed) {
+        $leg += if ($fi.Over) { @{ Color = '#FF453A'; Fg = '#FF453A'; Text = "放不下，還差 $(Fmt-Size $fi.Short)：拿掉幾款再同步"; Tip = '要傳的 + 5 GB 餘量（安裝 App 和暫存）要小於 iPad 剩的 + 拿掉的遊戲空出的' } }
+                else { @{ Color = '#30D158'; Fg = '#30D158'; Text = "同步後約剩 $(Fmt-Size $fi.After) ✓ 放得下" } }
     }
     Legend $ui.IpadLegend $leg
 }
@@ -1299,7 +1348,7 @@ function Update-SelCount {
     $names = { param($l) (@($l | Select-Object -First 3) -join '、') + $(if ($l.Count -gt 3) { " 等 $($l.Count) 款" } else { '' }) }
     $sign = Sign-Left
     $fi = Fit-Info
-    $t = @("遊戲庫 $($mine.Count) 款，共 $(Fmt-Size $fi.Sel)" + $(if ($fi.Known) { "（iPad 可用 $(Fmt-Size $fi.Cap)）" } else { '' }))
+    $t = @("遊戲庫 $($mine.Count) 款，共 $(Fmt-Size $fi.Sel)" + $(if ($fi.Known -and $fi.Send) { "，這次要傳 $(Fmt-Size $fi.Send)" } else { '' }))
     if ($conv.Count) { $t += "$($conv.Count) 款還沒轉檔" }
     if ($sign) { $t += $sign.Text }
     # 同步會做的事（照順序）
@@ -1320,7 +1369,7 @@ function Update-SelCount {
     }
     $ui.SelCount.Text = $t -join ' · '; $ui.SelCount.ToolTip = $null
     $ui.SelCount.Foreground = Brush $(if ($fi.Known -and $fi.Over -and -not $picked.Count) { '#FF453A' } else { '#F5F5F7' })
-    if ($fi.Known -and $fi.Over -and -not $picked.Count) { $sub = "超過 iPad 可用空間 $(Fmt-Size ($fi.Sel - $fi.Cap))：拿掉幾款才能同步" }
+    if ($fi.Known -and $fi.Over -and -not $picked.Count) { $sub = "iPad 放不下：這次要傳 $(Fmt-Size $fi.Send)，拿掉的遊戲先空出 $(Fmt-Size $fi.Freed)，iPad 剩 $(Fmt-Size $fi.Free)，還差 $(Fmt-Size $fi.Short)。拿掉幾款才能同步" }
     $ui.SelSub.Text = $sub; $ui.SelSub.ToolTip = $sub; $ui.SelSub.Visibility = 'Visible'
     # 轉檔：選了就轉選的（轉好過的也重轉），沒選就轉遊戲庫裡還沒轉的
     $pickConv = @(Picked-Dirs | Where-Object { $cards[$_].Tag.Base })
@@ -1342,7 +1391,7 @@ function Update-SelCount {
         }
         $ui.ShowProg.Content = "查看進度（$($busy.Count)）"
     }
-    try { Update-Space } catch { }
+    try { Update-Space $fi } catch { }
 }
 # 重簽：遊戲庫上次簽是什麼時候、還剩幾天（免費 Apple ID 7 天）。同步時一天內簽過、App 沒換就不重簽
 function Sign-Left {
@@ -3021,7 +3070,7 @@ function Run-Sync {
         # 佔最大的前 5 款，讓使用者知道拿掉哪幾款最有用
         $big = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { [pscustomobject]@{ Name = $_.Tag.Name; B = [int64](Game-Bytes $_.Tag) } } |
                  Sort-Object B -Descending | Select-Object -First 5 | ForEach-Object { "  • $($_.Name)　$(Fmt-Size $_.B)" }) -join "`n"
-        [void][Windows.MessageBox]::Show($win, ("選的遊戲放不下 iPad，這次先不同步。`n`n已選 {0}，iPad 能給遊戲庫的只有 {1}（剩下 {2} + 遊戲庫 App 現在佔的 {3}，再留 5 GB 給安裝和暫存）。`n`n請把暫時不玩的遊戲拖出「遊戲庫」或按「移除」，少掉 {4} 以上再按「同步」。同步時會先刪掉拿掉的遊戲，再安裝 App 和傳新遊戲。`n`n佔最大的幾款：`n{5}" -f (Fmt-Size $fi.Sel), (Fmt-Size $fi.Cap), (Fmt-Size $fi.Free), (Fmt-Size $fi.App), (Fmt-Size ($fi.Sel - $fi.Cap)), $big), 'iPad 空間不夠', 'OK', 'Warning')
+        [void][Windows.MessageBox]::Show($win, ("選的遊戲放不下 iPad，這次先不同步。`n`n這次要傳 {0}，拿掉的遊戲會先空出 {1}，iPad 剩 {2}；還要留 5 GB 給安裝 App 和暫存，所以還差 {3}。`n`n請把暫時不玩的遊戲拖出「遊戲庫」或按「移除」，再按「同步」。同步時會先刪掉拿掉的遊戲，再安裝 App 和傳新遊戲。`n`n佔最大的幾款：`n{4}" -f (Fmt-Size $fi.Send), (Fmt-Size $fi.Freed), (Fmt-Size $fi.Free), (Fmt-Size $fi.Short), $big), 'iPad 空間不夠', 'OK', 'Warning')
         return
     }
     if (-not $state.Running) { $freed = Clean-AfterMerge; if ($freed -gt 100MB) { $script:freedNote = '先清掉用不到的舊遊戲包 {0:N1} GB' -f ($freed / 1GB) } else { $script:freedNote = '' } }

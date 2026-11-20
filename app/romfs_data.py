@@ -484,7 +484,7 @@ async def _push(a, opened):
                 if gone: await afc.set_file_contents(mark, json.dumps(want).encode())
                 await list_missing(afc, L, want, jobs_of)
                 await put_order(afc, L, a)
-                await note_space(afc, a, bid)
+                await note_space(afc, a, bid, {d: v for d, v in have.items() if d not in gone})
                 print('game files already on the iPad')
                 return
             send = {d: jobs_of(d) for d in todo}   # (a linked folder whose game package changed stops here, before anything is removed)
@@ -654,6 +654,17 @@ def write_space(d):
     try:
         os.makedirs(sd, exist_ok=True)
         f = os.path.join(sd, 'ipad-space.json')
+        # push/prune only know the free space: keep what space read before (each data folder's size on the iPad, the
+        # app's size), dropping the folders that are no longer there, so PadSwitch can still tell what is already on it
+        if 'data' not in d and d.get('installed'):
+            try:
+                with open(f, encoding='utf-8') as i: old = json.load(i)
+                if old.get('bundle') == d.get('bundle'):
+                    have = d.get('have')
+                    if isinstance(old.get('data'), dict): d['data'] = {k: v for k, v in old['data'].items() if have is None or k in have}
+                    if old.get('app'): d['app'] = old['app']
+                    if old.get('device') and not d.get('device'): d['device'] = old['device']
+            except (OSError, ValueError): pass
         with open(f + '.tmp', 'w', encoding='utf-8') as o: json.dump(d, o, ensure_ascii=False)
         os.replace(f + '.tmp', f)
     except OSError: pass
