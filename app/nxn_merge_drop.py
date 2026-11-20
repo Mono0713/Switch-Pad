@@ -1,10 +1,10 @@
-"""Run nxn_merge.py with some games left out: Switch Pad's "remove a game from a merged package".
+"""Run nxn_merge.py with some games left out: PadSwitch's "remove a game from a merged package".
 
 Usage: python nxn_merge_drop.py <nxn_merge.py> <title IDs, comma-separated> <nxn_merge.py's own arguments...>
 
 nxn_merge.py takes every game of every input. This loads it as a module and filters the games it reads from the
 inputs, so the rest (the picker icon, Info.plist, each game's files copied without recompressing) is nxn_merge.py's
-own work, whichever version of it Switch Pad found.
+own work, whichever version of it PadSwitch found.
 """
 import importlib.util
 import sys

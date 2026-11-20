@@ -1,4 +1,4 @@
-Switch Pad 用到的第三方程式碼與設計 / Third-party code and designs used by Switch Pad
+PadSwitch 用到的第三方程式碼與設計 / Third-party code and designs used by PadSwitch
 
 keys_check.py
   prod.keys 檢查，移植自 NX2Apple 的 frontend/Sources/NSPortBuilder/KeyCheck.swift

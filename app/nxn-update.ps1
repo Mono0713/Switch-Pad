@@ -1,7 +1,7 @@
-﻿# nxn-update.ps1 - Switch Pad 的安裝和更新：Python、Python 套件、打包器（殼、Windows 工具、原始碼）、plumesign、Switch Pad 自己。
-# 全部從 GitHub 下載：殼和打包器取 Mono0713/ns2ios-shell 最新的 release，Switch Pad 取 Mono0713/Switch-Pad 最新的 release，
+﻿# nxn-update.ps1 - PadSwitch 的安裝和更新：Python、Python 套件、打包器（殼、Windows 工具、原始碼）、plumesign、PadSwitch 自己。
+# 全部從 GitHub 下載：殼和打包器取 Mono0713/ns2ios-shell 最新的 release，PadSwitch 取 Mono0713/Switch-Pad 最新的 release，
 # plumesign 取 Impactor 最新的 release。
-# 已經是最新的部分會跳過，所以重複執行沒關係。Switch Pad 的「安裝」「更新」按鈕就是跑這個。
+# 已經是最新的部分會跳過，所以重複執行沒關係。PadSwitch 的「安裝」「更新」按鈕就是跑這個。
 #
 # 用法：
 #   .\nxn-update.ps1            安裝缺的、更新舊的
@@ -17,7 +17,7 @@ $Repo = 'Mono0713/ns2ios-shell'
 $AppRepo = 'Mono0713/Switch-Pad'
 $PlumeRepo = 'khcrysalis/Impactor'
 $here = $PSScriptRoot
-# 程式檔、work、工具 在 nxn\程式\，遊戲在上一層（舊版全部在同一層，Switch Pad 開起來會自己搬）
+# 程式檔、work、工具 在 nxn\程式\，遊戲在上一層（舊版全部在同一層，PadSwitch 開起來會自己搬）
 $base = if ((Split-Path $here -Leaf) -eq '程式') { Split-Path $here -Parent } else { $here }
 $work = Join-Path $here 'work'
 $toolDir = Join-Path $here '工具'
@@ -170,9 +170,9 @@ try {
         Warn '這台電腦沒有 Apple 行動裝置服務，iPad 會連不到。請從 Microsoft Store 安裝「Apple 裝置」（Apple Devices）或 iTunes。'
     }
 
-    # ---- Switch Pad 自己 ----
-    Step '檢查 Switch Pad'
-    # Switch Pad 有自己的 repo；問不到（或還沒有 release）就用殼 release 附的那份
+    # ---- PadSwitch 自己 ----
+    Step '檢查 PadSwitch'
+    # PadSwitch 有自己的 repo；問不到（或還沒有 release）就用殼 release 附的那份
     $appA = $null
     try {
         $ar = Invoke-RestMethod -Uri "https://api.github.com/repos/$AppRepo/releases/latest" -Headers $headers
@@ -181,11 +181,11 @@ try {
     if (-not $appA) { $appA = $rel.assets | Where-Object { $_.name -eq 'SwitchPad.zip' } | Select-Object -First 1 }
     $verFile = Join-Path $work 'app-version.txt'
     $appHave = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { '' }
-    if (-not $appA) { Write-Host '這個 release 沒有附 Switch Pad，跳過' }
-    elseif (-not $Force -and $appHave -eq $appA.updated_at) { Ok 'Switch Pad 已經是最新的' }
+    if (-not $appA) { Write-Host '這個 release 沒有附 PadSwitch，跳過' }
+    elseif (-not $Force -and $appHave -eq $appA.updated_at) { Ok 'PadSwitch 已經是最新的' }
     else {
         $az = Join-Path $work 'SwitchPad.zip'
-        Download $appA.browser_download_url $az 'Switch Pad'
+        Download $appA.browser_download_url $az 'PadSwitch'
         $anew = Join-Path $work 'app-new'
         if (Test-Path $anew) { Remove-Item -Recurse -Force $anew }
         Expand-Archive $az $anew
@@ -196,7 +196,7 @@ try {
         # 程式檔放在這個資料夾（程式\），圖示放到 工具\；遊戲、work、工具 裡的其他東西不碰
         foreach ($f in Get-ChildItem $from -File) {
             $dst = if ($f.Extension -eq '.ico') { Join-Path $toolDir $f.Name } else { Join-Path $here $f.Name }
-            # 沒變的檔案不用蓋（舊版 Switch Pad 開著時會鎖住自己的圖示）；圖示蓋不過去也不算失敗，下次再換
+            # 沒變的檔案不用蓋（舊版 PadSwitch 開著時會鎖住自己的圖示）；圖示蓋不過去也不算失敗，下次再換
             if ((Test-Path -LiteralPath $dst) -and (Get-FileHash -LiteralPath $dst).Hash -eq (Get-FileHash -LiteralPath $f.FullName).Hash) { continue }
             try { Copy-Item -LiteralPath $f.FullName -Destination $dst -Force -ErrorAction Stop }
             catch {
@@ -206,9 +206,9 @@ try {
         }
         Remove-Item -Recurse -Force $anew
         Set-Content $verFile $appA.updated_at
-        # Switch Pad 看到這個檔就會自己重開，換成新版
+        # PadSwitch 看到這個檔就會自己重開，換成新版
         if ($appHave) { Set-Content (Join-Path $work 'app-restart.flag') (Get-Date).ToString('s') }
-        Ok 'Switch Pad 更新好了'
+        Ok 'PadSwitch 更新好了'
     }
 
     Write-Host ''
