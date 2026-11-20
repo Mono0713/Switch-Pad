@@ -3018,7 +3018,10 @@ function Run-Sync {
     # iPad 放不放得下：讀過 iPad 空間的話先看一下（同步時拿掉的會先刪），放不下就問要不要照樣做
     $fi = Fit-Info
     if ($fi.Known -and $fi.Over) {
-        [void][Windows.MessageBox]::Show($win, ("選的遊戲放不下 iPad，這次先不同步。`n`n已選 {0}，iPad 能給遊戲庫的只有 {1}（剩下 {2} + 遊戲庫 App 現在佔的 {3}，再留 5 GB 給安裝和暫存）。`n`n請把暫時不玩的遊戲拖出「遊戲庫」或按「移除」，少掉 {4} 以上再按「同步」。同步時會先刪掉拿掉的遊戲，再安裝 App 和傳新遊戲。" -f (Fmt-Size $fi.Sel), (Fmt-Size $fi.Cap), (Fmt-Size $fi.Free), (Fmt-Size $fi.App), (Fmt-Size ($fi.Sel - $fi.Cap))), 'iPad 空間不夠', 'OK', 'Warning')
+        # 佔最大的前 5 款，讓使用者知道拿掉哪幾款最有用
+        $big = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { [pscustomobject]@{ Name = $_.Tag.Name; B = [int64](Game-Bytes $_.Tag) } } |
+                 Sort-Object B -Descending | Select-Object -First 5 | ForEach-Object { "  • $($_.Name)　$(Fmt-Size $_.B)" }) -join "`n"
+        [void][Windows.MessageBox]::Show($win, ("選的遊戲放不下 iPad，這次先不同步。`n`n已選 {0}，iPad 能給遊戲庫的只有 {1}（剩下 {2} + 遊戲庫 App 現在佔的 {3}，再留 5 GB 給安裝和暫存）。`n`n請把暫時不玩的遊戲拖出「遊戲庫」或按「移除」，少掉 {4} 以上再按「同步」。同步時會先刪掉拿掉的遊戲，再安裝 App 和傳新遊戲。`n`n佔最大的幾款：`n{5}" -f (Fmt-Size $fi.Sel), (Fmt-Size $fi.Cap), (Fmt-Size $fi.Free), (Fmt-Size $fi.App), (Fmt-Size ($fi.Sel - $fi.Cap)), $big), 'iPad 空間不夠', 'OK', 'Warning')
         return
     }
     if (-not $state.Running) { $freed = Clean-AfterMerge; if ($freed -gt 100MB) { $script:freedNote = '先清掉用不到的舊遊戲包 {0:N1} GB' -f ($freed / 1GB) } else { $script:freedNote = '' } }
