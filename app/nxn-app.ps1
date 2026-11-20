@@ -1072,7 +1072,9 @@ function Start-Sizes {
     if (-not (Test-Path $tool) -or -not (Select-String -LiteralPath $tool -SimpleMatch -Quiet -Pattern "add_parser('sizes')")) { return }
     $list = @($partMissing | Select-Object -First 60); $partMissing.Clear()
     $sizeJob.Keys = @{}; foreach ($p in $list) { $f = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue; if ($f) { $sizeJob.Keys[$p] = Size-Key $f; [void]$sizeTried.Add((Size-Key $f)) } }
-    $argLine = "/d /c `"`"$py`" -I `"$tool`" sizes $(($list | ForEach-Object { "`"$_`"" }) -join ' ') > `"$($sizeJob.Out)`" 2>nul`""
+    $q = [char]34
+    $files = ($list | ForEach-Object { $q + $_ + $q }) -join ' '
+    $argLine = '/d /c ' + $q + $q + $py + $q + ' -I ' + $q + $tool + $q + ' sizes ' + $files + ' > ' + $q + $sizeJob.Out + $q + ' 2>nul' + $q
     try { $sizeJob.Proc = Start-Hidden 'cmd.exe' $argLine $here } catch { }
 }
 function End-Sizes {
