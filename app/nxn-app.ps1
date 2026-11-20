@@ -693,10 +693,13 @@ function Get-Installed {
 
 # ---------------------------------------------------------------- 掃遊戲資料夾：從檔名看出本體、更新、DLC（打包器自己也會挑最新的）
 function Scan-Game($dir) {
-    $g = [pscustomobject]@{ Dir = $dir.FullName; Name = $dir.Name; Base = $false; BaseFile = ''; Update = ''; UpdateN = -1; Dlc = 0; Ipas = @(); Stray = 0; Tid = '' }
+    $g = [pscustomobject]@{ Dir = $dir.FullName; Name = $dir.Name; Base = $false; BaseFile = ''; Update = ''; UpdateN = -1; Dlc = 0; Ipas = @(); Stray = 0; Tid = ''; SourceBytes = 0L; LocalBytes = 0L; NewestSourceWrite = [datetime]::MinValue; PackageKey = ''; HasPendingSave = $false }
     foreach ($f in Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue) {
+        $g.LocalBytes += [long]$f.Length
         if ($f.Extension -eq '.ipa') { if ($f.Name -notlike '*-multi-*') { $g.Ipas += $f }; continue }   # -multi- 是合包的半成品，不能單獨裝
         if ($f.Extension -notin '.nsp', '.xci', '.nsz', '.xcz') { continue }   # NSZ / XCZ 打包時會先解壓（nxn.ps1）
+        $g.SourceBytes += [long]$f.Length
+        if ($f.LastWriteTime -gt $g.NewestSourceWrite) { $g.NewestSourceWrite = $f.LastWriteTime }
         $tid = if ($f.Name -match '(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])') { $Matches[1].ToUpper() } else { '' }
         $low = if ($tid) { [Convert]::ToInt32($tid.Substring(13), 16) } else { 0 }
         if (-not $tid -or $low -eq 0) { $g.Base = $true; $g.BaseFile = $f.FullName; if ($tid) { $g.Tid = $tid } }
@@ -1116,61 +1119,52 @@ function Size-Key($f) { "$($f.FullName)|$($f.LastWriteTimeUtc.Ticks)" }
 # 一款在 iPad 上的大小：轉好的遊戲包算得出來就用它，不然用遊戲檔（本體＋更新＋DLC）的大小估
 $partMissing = New-Object System.Collections.Generic.List[string]
 $sizeTried = New-Object 'System.Collections.Generic.HashSet[string]'   # 這次開著時算過（算不出來的也不再算）
-# 算過的記在 $gbCache（遊戲資料夾 → bytes）：畫面每次更新都要加總好幾十款，不能每次都去讀資料夾（2026-11-20 使用者說整個很卡）
-# 重建遊戲庫畫面（Build-Library）或背景算好新的大小時清掉
-$gbCache = @{}
-$gbShell = @{ At = [datetime]::MinValue; Id = $null }
-function Shell-IdCached {
-    if (((Get-Date) - $gbShell.At).TotalSeconds -gt 30) { $ms = Get-MultiShell; $gbShell.Id = if ($ms) { Multi-Id $ms } else { $null }; $gbShell.At = Get-Date }
-    $gbShell.Id
-}
-$gbAt = Get-Date
 function Game-Bytes($g) {
-    if (((Get-Date) - $script:gbAt).TotalSeconds -gt 60) { $gbCache.Clear(); $script:gbAt = Get-Date }   # 轉好新的遊戲包時跟著更新
-    if ($gbCache.ContainsKey($g.Dir)) { return $gbCache[$g.Dir] }
-    $id = Shell-IdCached
-    if ($id) {
-        $pf = Get-Item -LiteralPath (Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")) -ErrorAction SilentlyContinue
-        if ($pf) {
-            $k = Size-Key $pf
-            if ($sizes.ContainsKey($k)) { $gbCache[$g.Dir] = $sizes[$k]; return $sizes[$k] }
-            if (-not $partMissing.Contains($pf.FullName) -and -not $sizeTried.Contains($k)) { $partMissing.Add($pf.FullName) }
-        }
-    }
-    $b = [int64](@(Get-ChildItem -LiteralPath $g.Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci', '.nsz', '.xcz' }) | Measure-Object Length -Sum).Sum
-    $gbCache[$g.Dir] = $b; $b
+    if ($g.PackageKey -and $sizes.ContainsKey($g.PackageKey)) { return $sizes[$g.PackageKey] }
+    $g.SourceBytes
 }
 function Start-Sizes {
-    if ($sizeJob.Proc -and -not $sizeJob.Proc.HasExited) { return }
+    if ($sizeJob.Proc) { return }
     if (-not $partMissing.Count) { return }
     $py = Get-Python; $tool = Join-Path $here 'romfs_data.py'
     if (-not (Test-Path $tool) -or -not (Select-String -LiteralPath $tool -SimpleMatch -Quiet -Pattern "add_parser('sizes')")) { return }
-    $list = @($partMissing | Select-Object -First 60); $partMissing.Clear()
-    $sizeJob.Keys = @{}; foreach ($p in $list) { $f = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue; if ($f) { $sizeJob.Keys[$p] = Size-Key $f; [void]$sizeTried.Add((Size-Key $f)) } }
-    $q = [char]34
-    $files = ($list | ForEach-Object { $q + $_ + $q }) -join ' '
-    $argLine = '/d /c ' + $q + $q + $py + $q + ' -I ' + $q + $tool + $q + ' sizes ' + $files + ' > ' + $q + $sizeJob.Out + $q + ' 2>nul' + $q
-    try { $sizeJob.Proc = Start-Hidden 'cmd.exe' $argLine $here } catch { }
+    $list = @($partMissing | Select-Object -First 60)
+    foreach ($p in $list) { [void]$partMissing.Remove($p) }
+    $sizeJob.Keys = @{}
+    foreach ($p in $list) {
+        $f = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue
+        if ($f) { $sizeJob.Keys[$p] = Size-Key $f; [void]$sizeTried.Add($sizeJob.Keys[$p]) }
+    }
+    if (-not $sizeJob.Keys.Count) { return }
+    $request = $sizeJob.Out + '.request'
+    try {
+        [IO.File]::WriteAllText($request, (ConvertTo-Json -InputObject @($sizeJob.Keys.Keys) -Compress), (New-Object Text.UTF8Encoding $false))
+        $q = [char]34
+        $argsLine = '-I ' + $q + $tool + $q + ' sizes --request ' + $q + $request + $q + ' --output ' + $q + $sizeJob.Out + $q
+        $sizeJob.Proc = Start-Hidden $py $argsLine $here
+    } catch { }
 }
 function End-Sizes {
     if (-not $sizeJob.Proc -or -not $sizeJob.Proc.HasExited) { return $false }
+    $exitCode = $sizeJob.Proc.ExitCode
+    $sizeJob.Proc.Dispose()
     $sizeJob.Proc = $null
     try {
+        if ($exitCode -ne 0) { throw 'size scan failed' }
         $j = [IO.File]::ReadAllText($sizeJob.Out) | ConvertFrom-Json
         foreach ($pr in $j.PSObject.Properties) { if ([int64]$pr.Value -gt 0 -and $sizeJob.Keys[$pr.Name]) { $sizes[$sizeJob.Keys[$pr.Name]] = [int64]$pr.Value } }
-        $gbCache.Clear()
         # 只留現在還在的遊戲包
         $keep = [ordered]@{}; foreach ($k in $sizes.Keys) { if (Test-Path -LiteralPath ($k -split '\|')[0]) { $keep[$k] = $sizes[$k] } }
         [IO.File]::WriteAllText($sizesFile, ($keep | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
     } catch { }
-    Remove-Item -LiteralPath $sizeJob.Out -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sizeJob.Out, ($sizeJob.Out + '.request') -ErrorAction SilentlyContinue
     return $true
 }
 
 # ---------------------------------------------------------------- 空間圖：電腦硬碟（遊戲、其他、剩下）、iPad（其他 App、遊戲庫、這次同步要加的和要拿掉的、剩下）
 # iPad 的空間每次同步時記下（romfs_data.py 寫 work\status\ipad-space.json），按 ⟳ 或打開 PadSwitch 時 iPad 接著也會在背景讀一次
 $spaceFile = Join-Path $work 'status\ipad-space.json'
-$spaceJob = @{ Proc = $null; Started = [datetime]::MinValue }
+$spaceJob = @{ Proc = $null; Started = [datetime]::MinValue; Failed = $false; SyncPending = $false }
 function Set-Bar($grid, $segs) {
     $grid.ColumnDefinitions.Clear(); $grid.Children.Clear()
     $segs = @($segs | Where-Object { $_.Bytes -gt 0 })
@@ -1203,7 +1197,7 @@ $spaceCache = @{ T = -1L; V = $null }
 function Read-IpadSpace {
     try {
         $t = if (Test-Path -LiteralPath $spaceFile) { [IO.File]::GetLastWriteTimeUtc($spaceFile).Ticks } else { 0L }
-        if ($t -ne $spaceCache.T) { $spaceCache.T = $t; $spaceCache.V = if ($t) { [IO.File]::ReadAllText($spaceFile) | ConvertFrom-Json } else { $null } }
+        if ($t -ne $spaceCache.T) { $spaceCache.V = if ($t) { [IO.File]::ReadAllText($spaceFile) | ConvertFrom-Json } else { $null }; $spaceCache.T = $t }
         $spaceCache.V
     } catch { $null }
 }
@@ -1217,70 +1211,67 @@ function Start-SpaceProbe([switch]$Force) {
     $tpy = if (Test-Path $tpf) { (Get-Content $tpf -Raw).Trim() } else { '' }
     if (-not $tpy -or -not (Test-Path -LiteralPath $tpy)) { return }
     $spaceJob.Started = Get-Date
+    $spaceJob.Failed = $false
     $psi = New-Object Diagnostics.ProcessStartInfo $tpy
     $psi.Arguments = "-I `"$tool`" space `"$lib`"" + $(if ($cfg.Udid) { " --udid `"$($cfg.Udid)`"" } else { '' })
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.EnvironmentVariables['NXN_STATUS_DIR'] = $statusDir; $psi.EnvironmentVariables['PYTHONUTF8'] = '1'
-    try { $spaceJob.Proc = [Diagnostics.Process]::Start($psi); $spaceJob.Proc.BeginOutputReadLine(); $spaceJob.Proc.BeginErrorReadLine() } catch { }
-    $ui.IpadR.Text = '讀取中…'
+    try {
+        $spaceJob.Proc = [Diagnostics.Process]::Start($psi)
+        $spaceJob.Proc.BeginOutputReadLine(); $spaceJob.Proc.BeginErrorReadLine()
+        $ui.IpadR.Text = '讀取中…'
+    } catch { $spaceJob.Failed = $true }
 }
-# 這次同步要用掉多少 iPad 空間：已經在 iPad 上（而且是同一版）的遊戲不用再傳，不算；要傳的是新加的、更新的、只傳了一部分的。
-# 拿掉的遊戲會在安裝 App 之前先刪（romfs_data.py prune），空出的空間可以用。再留 5 GB 給安裝 App 和執行時的暫存。
-# iPad 上每款遊戲實際佔多少：ipad-space.json 的 data（push 留在 iPad 的檔案清單加總，romfs_data.py space 讀的，只讀小 JSON）
-$fitMargin = 5GB
-function Pad-Bytes($sp, $tid, $g = $null) {
-    if (-not $sp -or -not $sp.data -or -not $tid) { return $null }
-    $n = 0L; $any = $false
-    foreach ($pr in $sp.data.PSObject.Properties) { if ($pr.Name -like "games/$tid/*") { $n += [int64]$pr.Value; $any = $true } }
-    if ($any) { return $n }
-    # iPad 有這款的資料、只是舊版 PadSwitch 傳的沒留檔案清單：當成整款都在
-    if ($g -and $sp.have -and @($sp.have.PSObject.Properties | Where-Object { $_.Name -like "games/$tid/*" }).Count) { return [int64](Game-Bytes $g) }
-    0L
-}
+# 顯示已量到的空間與新增遊戲估算。同步時才檢查實際檔案差額。
 function Fit-Info {
     $sp = Read-IpadSpace
-    $mine = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
-    $sel = 0L; $send = 0L; $sendList = @()
-    $hasData = [bool]($sp -and $sp.data)
-    foreach ($g in $mine) {
-        $b = [int64](Game-Bytes $g); $sel += $b
-        if (-not ($g.Ready -or $g.Base -or $g.OnPad)) { continue }
-        if ($hasData) {
-            $pb = Pad-Bytes $sp (Game-Tid $g) $g
-            $need = [math]::Max([int64]0, $b - $pb)
-            if ($pb -gt 0 -and -not $g.Newer -and $need -lt 512MB) { $need = 0L }   # 已經在 iPad 上：差的只是 App 裡的小檔
-            if ($g.Newer -and $pb -gt 0) { $need = [math]::Max($need, [int64]($b * 0.1)) }   # 更新：至少換掉一部分
-        } else {
-            $need = if (-not $g.OnPad) { $b } elseif ($g.Newer -or -not $g.Ready) { $b } else { 0L }
+    $have = @{}; $recorded = @{}; $wanted = @{}
+    foreach ($pr in $sp.have.PSObject.Properties) {
+        if ($pr.Name -match '^games/([0-9a-f]{16})/') {
+            $tid = $Matches[1].ToUpper()
+            $have[$tid] = 1 + [int]$have[$tid]
         }
-        if ($need -gt 0) { $send += $need; $sendList += [pscustomobject]@{ Name = $g.Name; B = $need } }
     }
-    $del = @($cards.Values | Where-Object { $_.Tag.OnPad -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag })
+    $knownBytes = 0L
+    foreach ($pr in $sp.data.PSObject.Properties) {
+        if ($pr.Name -match '^games/([0-9a-f]{16})/') {
+            $tid = $Matches[1].ToUpper(); $b = [long]$pr.Value
+            $recorded[$tid] = [long]$recorded[$tid] + $b
+            $knownBytes += $b
+        }
+    }
+    $knownInventory = $sp -and ($sp.PSObject.Properties['have'] -or $sp.installed -eq $false)
+    $sel = 0L; $send = 0L; $pending = 0; $unknownTid = $false
+    foreach ($dir in $selected) {
+        if (-not $cards.ContainsKey($dir)) { $unknownTid = $true; continue }
+        $g = $cards[$dir].Tag
+        $b = [long](Game-Bytes $g)
+        $sel += $b
+        $tid = Game-Tid $g
+        if (-not $tid) { $unknownTid = $true; $pending++; continue }
+        $wanted[$tid] = $true
+        if (-not $knownInventory -or -not $g.Ready -or $g.Newer -or ($have.ContainsKey($tid) -and $have[$tid] -lt 2)) {
+            $pending++
+        } elseif (-not $have.ContainsKey($tid)) {
+            if ($g.PackageKey -and $sizes.ContainsKey($g.PackageKey)) { $send += $b } else { $pending++ }
+        }
+    }
     $freed = 0L
-    foreach ($g in $del) { $pb = Pad-Bytes $sp (Game-Tid $g) $g; $freed += $(if ($null -ne $pb -and $pb -gt 0) { $pb } elseif ($hasData) { 0L } else { [int64](Game-Bytes $g) }) }
-    # iPad 上有、但電腦這邊已經沒有卡片的遊戲資料（資料夾刪了）：同步時也會刪
-    if ($hasData) {
-        $known = @{}; foreach ($c in $cards.Values) { $t = Game-Tid $c.Tag; if ($t -and $selected.Contains($c.Tag.Dir)) { $known[$t] = 1 } }
-        foreach ($g in $del) { $t = Game-Tid $g; if ($t) { $known[$t] = 1 } }
-        foreach ($pr in $sp.data.PSObject.Properties) { if ($pr.Name -match '^games/([0-9A-Fa-f]{16})/' -and -not $known.ContainsKey($Matches[1].ToUpper())) { $freed += [int64]$pr.Value } }
+    if (-not $unknownTid) {
+        foreach ($tid in $recorded.Keys) {
+            if ($have.ContainsKey($tid) -and -not $wanted.ContainsKey($tid)) { $freed += $recorded[$tid] }
+        }
     }
-    $r = @{ Sel = $sel; Send = $send; SendList = $sendList; Freed = $freed; Del = $del; Known = [bool]($sp -and $sp.total); Data = $hasData }
-    if ($r.Known) {
-        $r.Free = [int64]$sp.free; $r.Total = [int64]$sp.total
-        $r.After = $r.Free + $freed - $send
-        $r.Over = ($send -gt 0 -and $r.After -lt $fitMargin)
-        $r.Short = [math]::Max([int64]0, $fitMargin - $r.After)
+    @{
+        Sel = $sel; Send = $send; Pending = $pending; Freed = $freed; Data = $knownBytes; Snapshot = $sp
+        Known = [bool]($sp -and [long]$sp.total -gt 0); Free = [long]$sp.free; Total = [long]$sp.total
     }
-    $r
 }
 function Update-Space($fi = $null) {
-    # 電腦：遊戲資料夾的大小一分鐘最多掃一次（掃幾十個資料夾很慢）
+    # 遊戲大小用掃描遊戲庫時取得的快照。
     try {
         $drv = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($base))
-        if (-not $script:pcGames -or ((Get-Date) - $script:pcGames.At).TotalSeconds -gt 60) {
-            $script:pcGames = @{ At = Get-Date; B = [int64](@(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue }) | Measure-Object Length -Sum).Sum }
-        }
-        $games = $script:pcGames.B
+        $games = $script:pcGameBytes
         $used = $drv.TotalSize - $drv.AvailableFreeSpace
         $ui.PcL.Text = "電腦（$($drv.Name.TrimEnd('\'))）"
         $ui.PcR.Text = "剩 $(Fmt-Size $drv.AvailableFreeSpace) / 共 $(Fmt-Size $drv.TotalSize)"
@@ -1292,42 +1283,33 @@ function Update-Space($fi = $null) {
                               @{ Color = '#3A3A3C'; Text = "可用 $(Fmt-Size $drv.AvailableFreeSpace)" })
     } catch { }
     # iPad
-    $sp = Read-IpadSpace
     if (-not $fi) { $fi = Fit-Info }
-    if (-not $fi.Known) {
+    $sp = $fi.Snapshot
+    $leg = @()
+    if ($fi.Known) {
+        $total = $fi.Total; $free = $fi.Free
+        $lib = [math]::Min([long]$fi.Data, [math]::Max(0L, $total - $free))
+        $other = [math]::Max(0L, $total - $free - $lib)
+        $ui.IpadL.Text = if ($sp.device) { "iPad（$($sp.device)）" } else { 'iPad' }
+        if (-not ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited)) {
+            $ui.IpadR.Text = "剩 $(Fmt-Size $free) / 共 $(Fmt-Size $total)"
+            $at = To-Date $sp.at
+            if ($at) { $ui.IpadR.Text += (' · ' + $at.ToString('HH:mm')) }
+            if ($spaceJob.Failed) { $ui.IpadR.Text += '（上次讀取）' }
+        }
+        Set-Bar $ui.IpadBar @(@{ Bytes = $other; Color = '#636366'; Tip = '系統、其他 App 與未量到的遊戲資料' },
+                              @{ Bytes = $lib; Color = '#0A84FF'; Tip = 'iPad 已有檔案清單的遊戲資料' },
+                              @{ Bytes = $free; Color = $null })
+        if ($lib) { $leg += @{ Color = '#0A84FF'; Text = "已量到的遊戲資料 $(Fmt-Size $lib)" } }
+        $leg += @{ Color = '#636366'; Text = "其他及未量到 $(Fmt-Size $other)" }
+    } else {
         $ui.IpadL.Text = 'iPad'
         if (-not ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited)) { $ui.IpadR.Text = '還沒讀到，接上 iPad 按 ⟳' }
         Set-Bar $ui.IpadBar @()
-        $leg = @()
-        if ($fi.Send) { $leg += @{ Color = '#30D158'; Text = "這次要傳約 $(Fmt-Size $fi.Send)" } }
-        if ($fi.Freed) { $leg += @{ Color = '#FF9F0A'; Text = "拿掉的遊戲會先空出約 $(Fmt-Size $fi.Freed)" } }
-        Legend $ui.IpadLegend $leg
-        return
     }
-    $at = To-Date $sp.at
-    $ago = if ($at) { $m = ((Get-Date) - $at).TotalMinutes; if ($m -lt 2) { '剛剛' } elseif ($m -lt 60) { "$([int]$m) 分鐘前" } elseif ($m -lt 1440) { "$([int]($m / 60)) 小時前" } else { $at.ToString('MM/dd') } } else { '' }
-    $total = $fi.Total; $free = $fi.Free
-    $lib = if ($fi.Data) { [int64](@($sp.data.PSObject.Properties | ForEach-Object { [int64]$_.Value }) | Measure-Object -Sum).Sum } else { 0L }
-    if ($sp.app) { $lib += [int64]$sp.app }
-    $lib = [math]::Min($lib, $total - $free)
-    $freedShow = [math]::Min($fi.Freed, $lib)
-    $ui.IpadL.Text = if ($sp.device) { "iPad（$($sp.device)）" } else { 'iPad' }
-    if (-not ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited)) { $ui.IpadR.Text = "剩 $(Fmt-Size $free) / 共 $(Fmt-Size $total)" + $(if ($ago) { " · $ago" }) }
-    $ui.IpadR.Foreground = Brush '#8E8E93'
-    $sendShow = [math]::Min($fi.Send, [math]::Max([int64]0, $free + $freedShow))
-    Set-Bar $ui.IpadBar @(@{ Bytes = [math]::Max([int64]0, $total - $free - $lib); Color = '#636366'; Tip = '其他 App、照片和系統' },
-                          @{ Bytes = [math]::Max([int64]0, $lib - $freedShow); Color = '#0A84FF'; Tip = "遊戲庫 $(Fmt-Size $lib)" },
-                          @{ Bytes = $freedShow; Color = '#FF9F0A'; Tip = "拿掉的遊戲會先刪，空出 $(Fmt-Size $fi.Freed)" },
-                          @{ Bytes = $sendShow; Color = $(if ($fi.Over) { '#FF453A' } else { '#30D158' }); Tip = "這次要傳 $(Fmt-Size $fi.Send)" },
-                          @{ Bytes = [math]::Max([int64]0, $fi.After); Color = $null })
-    $leg = @(@{ Color = '#636366'; Text = "其他 $(Fmt-Size ([math]::Max([int64]0, $total - $free - $lib)))" }, @{ Color = '#0A84FF'; Text = "遊戲庫 $(Fmt-Size $lib)" })
-    if ($fi.Send) { $leg += @{ Color = $(if ($fi.Over) { '#FF453A' } else { '#30D158' }); Text = "這次要傳 $(Fmt-Size $fi.Send)"; Tip = ((@($fi.SendList | Sort-Object B -Descending | ForEach-Object { "$($_.Name) $(Fmt-Size $_.B)" })) -join '、') } }
-    if ($fi.Freed) { $leg += @{ Color = '#FF9F0A'; Text = "拿掉的遊戲會先空出 $(Fmt-Size $fi.Freed)"; Tip = (($fi.Del | ForEach-Object { $_.Name }) -join '、') } }
-    $leg += @{ Color = '#3A3A3C'; Text = "iPad 剩 $(Fmt-Size $free)" }
-    if ($fi.Send -or $fi.Freed) {
-        $leg += if ($fi.Over) { @{ Color = '#FF453A'; Fg = '#FF453A'; Text = "放不下，還差 $(Fmt-Size $fi.Short)：拿掉幾款再同步"; Tip = '要傳的 + 5 GB 餘量（安裝 App 和暫存）要小於 iPad 剩的 + 拿掉的遊戲空出的' } }
-                else { @{ Color = '#30D158'; Fg = '#30D158'; Text = "同步後約剩 $(Fmt-Size $fi.After) ✓ 放得下" } }
-    }
+    if ($fi.Send) { $leg += @{ Color = '#30D158'; Text = "新增遊戲約 $(Fmt-Size $fi.Send)"; Tip = '用已轉檔的遊戲包估算。同步會檢查實際差額。' } }
+    if ($fi.Freed) { $leg += @{ Color = '#FF9F0A'; Text = "移除已知可回收 $(Fmt-Size $fi.Freed)" } }
+    if ($fi.Pending) { $leg += @{ Color = '#AEAEB2'; Text = "$($fi.Pending) 款待核對"; Tip = '尚未轉檔、更新或 iPad 資料待確認。' } }
     Legend $ui.IpadLegend $leg
 }
 $ui.IpadRefresh.Add_Click({ Start-SpaceProbe -Force; Update-Space })
@@ -1354,6 +1336,23 @@ function Add-Badge($card, $text, $bg, $fg, $tip, $dot = $null, $at = -1) {
     $b.ToolTip = if ($tip) { $tip } else { $text }   # 框框太窄被截掉時也看得到全文
     $p = $card.FindName('Badges')
     if ($at -ge 0 -and $at -le $p.Children.Count) { [void]$p.Children.Insert($at, $b) } else { [void]$p.Children.Add($b) }
+}
+function Update-GameSizeBadge($card) {
+    $panel = $card.FindName('Badges')
+    $badge = $null
+    $at = -1
+    foreach ($child in $panel.Children) { if ($child.Tag.Kind -eq 'game-size') { $badge = $child; $at = $panel.Children.IndexOf($child); break } }
+    $g = $card.Tag
+    $bytes = Game-Bytes $g
+    if ($bytes -le 0) { if ($badge) { $panel.Children.Remove($badge) }; return }
+    $packed = [bool]($g.PackageKey -and $sizes.ContainsKey($g.PackageKey))
+    $tip = if ($packed) { '轉檔後的估計大小，含遊戲資料與程式' } else { '原始遊戲檔大小，轉檔後可能不同' }
+    $label = Fmt-Size $bytes
+    if ($badge -and $badge.Tag.Bytes -eq $bytes -and $badge.Tag.Packed -eq $packed) { return }
+    if ($badge) { $panel.Children.Remove($badge) }
+    Add-Badge $card $label '#1C1C1E' '#8E8E93' $tip $null $at
+    $index = if ($at -lt 0) { $panel.Children.Count - 1 } else { $at }
+    $panel.Children[$index].Tag = @{ Kind = 'game-size'; Bytes = $bytes; Packed = $packed }
 }
 # 狀態那行（State）和版本（Detail）改成左邊的小框框：狀態第一個（帶彩色小點），版本、DLC 接著；原本的兩行不顯示
 function State-Badges($card, $parts) {
@@ -1388,11 +1387,11 @@ function Update-SelCount {
     $add = @($mine | Where-Object { -not $_.OnPad -and ($_.Ready -or $_.Base) } | ForEach-Object { $_.Name })
     $del = @($cards.Values | Where-Object { $_.Tag.OnPad -and -not $selected.Contains($_.Tag.Dir) } | ForEach-Object { $_.Tag.Name })
     $upd = @($mine | Where-Object { $_.OnPad -and ($_.Newer -or (-not $_.Ready -and $_.Base)) } | ForEach-Object { $_.Name })
-    $saves = @($mine | Where-Object { Test-Path -LiteralPath (Join-Path $_.Dir '存檔待傳') } | ForEach-Object { $_.Name })
+    $saves = @($mine | Where-Object { $_.HasPendingSave } | ForEach-Object { $_.Name })
     $names = { param($l) (@($l | Select-Object -First 3) -join '、') + $(if ($l.Count -gt 3) { " 等 $($l.Count) 款" } else { '' }) }
     $sign = Sign-Left
     $fi = Fit-Info
-    $t = @("遊戲庫 $($mine.Count) 款，共 $(Fmt-Size $fi.Sel)" + $(if ($fi.Known -and $fi.Send) { "，這次要傳 $(Fmt-Size $fi.Send)" } else { '' }))
+    $t = @("遊戲庫 $($mine.Count) 款，估計總大小 $(Fmt-Size $fi.Sel)" + $(if ($fi.Send) { "，新增遊戲約 $(Fmt-Size $fi.Send)" } else { '' }))
     if ($conv.Count) { $t += "$($conv.Count) 款還沒轉檔" }
     if ($sign) { $t += $sign.Text }
     # 同步會做的事（照順序）
@@ -1412,8 +1411,7 @@ function Update-SelCount {
         $sub = '按「轉檔」只在電腦上轉好這幾款（不用接 iPad）；拖曳可以一起搬。按 Esc 取消選取'
     }
     $ui.SelCount.Text = $t -join ' · '; $ui.SelCount.ToolTip = $null
-    $ui.SelCount.Foreground = Brush $(if ($fi.Known -and $fi.Over -and -not $picked.Count) { '#FF453A' } else { '#F5F5F7' })
-    if ($fi.Known -and $fi.Over -and -not $picked.Count) { $sub = "iPad 放不下：這次要傳 $(Fmt-Size $fi.Send)，拿掉的遊戲先空出 $(Fmt-Size $fi.Freed)，iPad 剩 $(Fmt-Size $fi.Free)，還差 $(Fmt-Size $fi.Short)。拿掉幾款才能同步" }
+    $ui.SelCount.Foreground = Brush '#F5F5F7'
     $ui.SelSub.Text = $sub; $ui.SelSub.ToolTip = $sub; $ui.SelSub.Visibility = 'Visible'
     # 轉檔：選了就轉選的（轉好過的也重轉），沒選就轉遊戲庫裡還沒轉的
     $pickConv = @(Picked-Dirs | Where-Object { $cards[$_].Tag.Base })
@@ -1660,15 +1658,21 @@ function Build-Library {
     $newShell = if ($ms) { Shell-Changed $ms.FullName } else { $false }
     $dirs = @(Get-ChildItem -LiteralPath $gamesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
     BL '讀遊戲庫和安裝紀錄'
+    $script:pcGameBytes = 0L
     foreach ($d in $dirs) {
         $g = Scan-Game $d
+        $script:pcGameBytes += $g.LocalBytes
         if (-not $g.Base -and -not $g.Ipas.Count) { continue }   # 不是遊戲資料夾
         $g | Add-Member -NotePropertyName InLib -NotePropertyValue $selected.Contains($g.Dir) -Force
         $g | Add-Member -NotePropertyName OnPad -NotePropertyValue ([bool](Game-Tid $g) -and $libTids -contains (Game-Tid $g)) -Force
-        $pf = if ($partId) { Part-For $g $partId }
+        $pf = if ($partId) { Part-For $g $partId -UseScan }
+        if ($pf.File) {
+            $g.PackageKey = Size-Key $pf.File
+            if (-not $sizes.ContainsKey($g.PackageKey) -and -not $sizeTried.Contains($g.PackageKey) -and -not $partMissing.Contains($pf.Path)) { $partMissing.Add($pf.Path) }
+        }
         $g | Add-Member -NotePropertyName Ready -NotePropertyValue ([bool]$pf -and $pf.Fresh) -Force
         # iPad 上的是舊的：遊戲包比上次合成的遊戲庫新（換了殼或重新轉換過），裝到 iPad 時會換掉
-        $g | Add-Member -NotePropertyName Newer -NotePropertyValue ([bool]($g.Ready -and $g.OnPad -and $libTime -and ($newShell -or (Get-Item -LiteralPath $pf.Path).LastWriteTime -gt $libTime))) -Force
+        $g | Add-Member -NotePropertyName Newer -NotePropertyValue ([bool]($g.Ready -and $g.OnPad -and $libTime -and ($newShell -or $pf.File.LastWriteTime -gt $libTime))) -Force
         BL '掃遊戲資料夾'
         $card = [Windows.Markup.XamlReader]::Parse($cardXaml)
         BL '建卡片'
@@ -1704,7 +1708,8 @@ function Build-Library {
         elseif ($why) { $st.Text = '● 上次轉換失敗'; $st.Foreground = $red; $st.ToolTip = $why; $g.Order = 1 }
         elseif ($g.Ready) { $st.Text = '● 轉換過了，加入就能裝'; $st.Foreground = $gray; $g.Order = 2 }
         else { $st.Text = '' }
-        if (Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')) {
+        $g.HasPendingSave = Test-Path -LiteralPath (Join-Path $g.Dir '存檔待傳')
+        if ($g.HasPendingSave) {
             Add-Badge $card '存檔待傳' '#330A84FF' '#64D2FF' $(if ((Get-Content -LiteralPath (Join-Path $g.Dir '存檔待傳.txt') -ErrorAction SilentlyContinue) -match '^slot=') { '💾 下次「同步」時把拖進來的存檔另存成一份新存檔（iPad 上開遊戲前的「存檔」裡切換）；右鍵可以取消' } else { '💾 下次「同步」時用拖進來的存檔取代 iPad 上這款的（原本的先備份到電腦）；右鍵可以取消' })
         }
         $warn = @()
@@ -1712,8 +1717,7 @@ function Build-Library {
         if ($preWarn.Count -and -not $why) { $warn += $preWarn }
         if ($warn.Count) { Add-Badge $card '要注意' '#33FF9F0A' '#FF9F0A' (($warn | ForEach-Object { "⚠ $_" }) -join "`n") }
         State-Badges $card $parts
-        $gb = Game-Bytes $g
-        if ($gb -gt 0) { Add-Badge $card (Fmt-Size $gb) '#1C1C1E' '#8E8E93' $(if ($g.Ready -or $g.OnPad) { "在 iPad 上佔 $(Fmt-Size $gb)（遊戲資料、著色器和程式）" } else { "大約佔 $(Fmt-Size $gb)（還沒轉檔，用遊戲檔的大小估）" }) }
+        Update-GameSizeBadge $card
         # 支援程度只在「還沒加入」顯示，幫你挑：左上角的小標籤；已經在遊戲庫的看狀態那行就好
         if (-not $g.InLib) {
             $sup = Support-Of $g
@@ -2772,7 +2776,7 @@ function New-Job($g, $mode, $ipa, $out = '', $shellPath = '') {
         }
     }
     if ($cfg.Udid) { $a += @('-Udid', (Quote $cfg.Udid)) }
-    $job = [pscustomobject]@{ Game = $g; Row = $row; Steps = $pills; StepNames = $names; Args = $a; Call = ''; NeedAllOk = $false; Log = ''; Pos = 0; Report = $(if ($mode -eq 'report') { $out } else { '' }); Dec = $null
+    $job = [pscustomobject]@{ Game = $g; Row = $row; Steps = $pills; StepNames = $names; Args = $a; Call = ''; NeedAllOk = $false; Log = ''; Pos = 0L; LogLine = ''; Report = $(if ($mode -eq 'report') { $out } else { '' }); Dec = $null
                              Started = $null; Cur = -1; Text = $row.FindName('Log'); Msg = $row.FindName('Msg'); Time = $row.FindName('Time')
                              Mode = $mode; Id = [guid]::NewGuid().ToString('N').Substring(0, 12); Est = (Job-Est $g $mode $ipa); Done = $false; Ended = $null
                              Frac = 0.0; Left = $null; RunFile = $null; PushFile = $null; PushSeen = [datetime]::MinValue; Push = $null; RunSt = $null; ItemsAt = [datetime]::MinValue }
@@ -2888,7 +2892,7 @@ function Start-Next {
     $state.Job = $job
     $job.Row.FindName('Drop').Visibility = 'Collapsed'
     $job.Log = Join-Path $logDir ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($job.Game.Name -replace '[^\w.-]', '_') + '.log')
-    $job.Pos = 0; $job.Dec = [Text.Encoding]::UTF8.GetDecoder(); $job.Started = Get-Date
+    $job.Pos = 0L; $job.LogLine = ''; $job.Dec = [Text.Encoding]::UTF8.GetDecoder(); $job.Started = Get-Date
     Set-Step $job 0 'active'
     $job.Msg.Text = '開始…'
     # Write-Host 走資訊串流（6），*>&1 才收得到；結束碼交給外層的 exit
@@ -2911,16 +2915,25 @@ function Read-Log($job) {
         try {
             if ($fs.Length -le $job.Pos) { return }
             [void]$fs.Seek($job.Pos, 'Begin')
-            $buf = New-Object byte[] ($fs.Length - $job.Pos)
+            $buf = New-Object byte[] ([int][math]::Min(64KB, $fs.Length - $job.Pos))
             $n = $fs.Read($buf, 0, $buf.Length)
             $job.Pos += $n
-            $chars = New-Object char[] ($job.Dec.GetCharCount($buf, 0, $n))
-            [void]$job.Dec.GetChars($buf, 0, $n, $chars, 0)
-            $text = (-join $chars).Replace([string][char]0xFEFF, '')
+            $chars = New-Object char[] ([Text.Encoding]::UTF8.GetMaxCharCount($n))
+            $count = $job.Dec.GetChars($buf, 0, $n, $chars, 0)
+            $text = ([string]::new($chars, 0, $count)).Replace([string][char]0xFEFF, '')
             if (-not $text) { return }
+            # 畫面只留尾端；完整記錄仍在檔案中。
+            if ($job.Text.Text.Length -gt 256KB) {
+                $job.Text.Text = $job.Text.Text.Substring($job.Text.Text.Length - 128KB)
+            }
             $job.Text.AppendText($text); $job.Text.ScrollToEnd()
+            $combined = $job.LogLine + $text
+            $end = $combined.LastIndexOf([char]10)
+            $job.LogLine = $combined.Substring($end + 1)
+            if ($job.LogLine.Length -gt 4KB) { $job.LogLine = '' }
+            if ($end -lt 0) { return }
             # 看到哪一步的開頭就把那一步點亮
-            foreach ($line in ($text -split "`r?`n")) {
+            foreach ($line in ($combined.Substring(0, $end) -split "`r?`n")) {
                 $l = $line.Trim()
                 if (-not $l) { continue }
                 for ($i = $job.Cur + 1; $i -lt $job.StepNames.Count; $i++) {
@@ -3110,13 +3123,15 @@ function Multi-Id($ms) {
     $abiCache[$k] = $id; $id
 }
 # 遊戲包還能用嗎：同一個多遊戲殼做的，而且比資料夾裡所有遊戲檔都新（加了更新檔或 DLC 就要重做）
-function Part-For($g, $id) {
+function Part-For($g, $id, [switch]$UseScan) {
     $o = Join-Path $g.Dir ("$($g.Name)-multi-$id.ipa")
     $f = Get-Item -LiteralPath $o -ErrorAction SilentlyContinue
     if ($f -and (Test-Path -LiteralPath "$o.repack")) { Remove-Item -LiteralPath "$o.repack" -ErrorAction SilentlyContinue }   # 已經重新打包好了，舊的那份不用留
-    $newest = Get-ChildItem -LiteralPath $g.Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci', '.nsz', '.xcz' } |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    [pscustomobject]@{ Path = $o; Fresh = [bool]($f -and (-not $newest -or $f.LastWriteTime -ge $newest.LastWriteTime)) }
+    $newest = if ($UseScan) { $g.NewestSourceWrite } else {
+        (Get-ChildItem -LiteralPath $g.Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.nsp', '.xci', '.nsz', '.xcz' } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+    }
+    [pscustomobject]@{ Path = $o; File = $f; Fresh = [bool]($f -and (-not $newest -or $f.LastWriteTime -ge $newest)) }
 }
 function Select-Library {
     $selected.Clear()
@@ -3151,6 +3166,12 @@ function Write-Order {
     try { [IO.File]::WriteAllText($orderFile, (ConvertTo-Json @($tids) -Compress), (New-Object Text.UTF8Encoding $false)) } catch { }
 }
 function Run-Sync {
+    if ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited) {
+        $spaceJob.SyncPending = $true
+        $ui.Sync.Content = '讀取 iPad 後同步'
+        return
+    }
+    $spaceJob.SyncPending = $false
     $lib = Library-Ipa
     $libGame = Library-Game
     $ms = Get-MultiShell; $mg = Get-MergeScript
@@ -3159,15 +3180,6 @@ function Run-Sync {
     $busy = @(Busy-Dirs)
     $dirs = @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Base -or $cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad -or $busy -contains $_) })
     if (-not $dirs.Count -and -not (Test-Path -LiteralPath $lib)) { [void][Windows.MessageBox]::Show('遊戲庫是空的：先把遊戲拖進「遊戲庫」或按「加入」。', 'PadSwitch'); return }
-    # iPad 放不放得下：讀過 iPad 空間的話先看一下（同步時拿掉的會先刪），放不下就問要不要照樣做
-    $fi = Fit-Info
-    if ($fi.Known -and $fi.Over) {
-        # 佔最大的前 5 款，讓使用者知道拿掉哪幾款最有用
-        $big = @($cards.Values | Where-Object { $selected.Contains($_.Tag.Dir) } | ForEach-Object { [pscustomobject]@{ Name = $_.Tag.Name; B = [int64](Game-Bytes $_.Tag) } } |
-                 Sort-Object B -Descending | Select-Object -First 5 | ForEach-Object { "  • $($_.Name)　$(Fmt-Size $_.B)" }) -join "`n"
-        [void][Windows.MessageBox]::Show($win, ("選的遊戲放不下 iPad，這次先不同步。`n`n這次要傳 {0}，拿掉的遊戲會先空出 {1}，iPad 剩 {2}；還要留 5 GB 給安裝 App 和暫存，所以還差 {3}。`n`n請把暫時不玩的遊戲拖出「遊戲庫」或按「移除」，再按「同步」。同步時會先刪掉拿掉的遊戲，再安裝 App 和傳新遊戲。`n`n佔最大的幾款：`n{4}" -f (Fmt-Size $fi.Send), (Fmt-Size $fi.Freed), (Fmt-Size $fi.Free), (Fmt-Size $fi.Short), $big), 'iPad 空間不夠', 'OK', 'Warning')
-        return
-    }
     if (-not $state.Running) { $freed = Clean-AfterMerge; if ($freed -gt 100MB) { $script:freedNote = '先清掉用不到的舊遊戲包 {0:N1} GB' -f ($freed / 1GB) } else { $script:freedNote = '' } }
     $jobs = @(); $outs = @()
     $glGames = @($dirs | Where-Object { $t = Game-Tid $cards[$_].Tag; $t -and (Test-Path -LiteralPath (Gl-Rec $cards[$_].Tag)) })
@@ -3531,14 +3543,28 @@ $spaceSeen = $null
 $bgTimer.Add_Tick({
     try { Update-Bg } catch { }
     # 背景算好的遊戲包大小、讀到的 iPad 空間：更新卡片上的大小和空間圖
-    try { if ((End-Sizes) -and -not $state.Running -and -not $drag.Card) { Build-Library } } catch { }
+    try {
+        if (End-Sizes) {
+            foreach ($card in $cards.Values) { Update-GameSizeBadge $card }
+            Update-SelCount
+            Start-Sizes
+        }
+    } catch { }
     try { if ((End-Tidy) -and -not $state.Running -and -not $drag.Card) { Build-Library } } catch { }
     try {
         $sf = Get-Item -LiteralPath $spaceFile -ErrorAction SilentlyContinue
         $sig = if ($sf) { $sf.LastWriteTimeUtc.Ticks } else { 0 }
+        if ($spaceJob.Proc -and -not $spaceJob.Proc.HasExited -and ((Get-Date) - $spaceJob.Started).TotalSeconds -gt 45) {
+            try { $spaceJob.Proc.Kill() } catch { }
+        }
         $probeDone = $spaceJob.Proc -and $spaceJob.Proc.HasExited
-        if ($probeDone) { $spaceJob.Proc = $null }
-        if ($probeDone -or $sig -ne $script:spaceSeen) { $script:spaceSeen = $sig; Update-Space }
+        if ($probeDone) {
+            $spaceJob.Failed = $spaceJob.Proc.ExitCode -ne 0
+            $spaceJob.Proc.Dispose()
+            $spaceJob.Proc = $null
+        }
+        if ($probeDone -or $sig -ne $script:spaceSeen) { $script:spaceSeen = $sig; Update-SelCount }
+        if ($probeDone -and $spaceJob.SyncPending) { $spaceJob.SyncPending = $false; Run-Sync }
     } catch { } })
 
 # 跑選的遊戲：mode = both / pack / install；merge = 合成一包
