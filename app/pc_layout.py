@@ -1,11 +1,10 @@
 """PadSwitch's folders on the PC (ns2ios-shell docs/FOLDERS.zh-TW.md), and the one-time move from the old ones.
 
-  遊戲/<game>/原始檔/          the player's game files (.nsp .nsz .xci .xcz .nup) and NSZ原檔/
+  遊戲/<game>/                 the player's game files (.nsp .nsz .xci; the packer reads only this folder's first level, so they stay
+                               here) and what packing makes beside them: <title ID>_pack, <title ID>_shader_cache, *-multi-*.ipa
   遊戲/<game>/存檔/<save>/      the saves, the same folders as the iPad's 存檔/<game>/<save>/ (saves_data.py sync)
   遊戲/<game>/存檔備份/         this game's saves before they were replaced or deleted
   遊戲/<game>/著色器紀錄/        what the iPad recorded for the next pack (was 合包/GL著色器/<title ID>)
-  遊戲/<game>/轉檔結果/          the game's package (.ipa), precheck.json, <title ID>_pack, <title ID>_shader_cache, provisional_survey:
-                               all made again by the next pack
   遊戲庫/                      遊戲庫.ipa (was 合包/)
   備份/iPad存檔/                every save on the iPad before something changed them (was 合包/存檔備份/遊戲庫/)
   記錄/iPad記錄/, 記錄/問題回報/   (were 合包/iPad記錄/ and 問題回報/)
@@ -18,7 +17,7 @@ stays where it is.
   pc_layout.py plan    <Switch PAD folder>      what migrate would move, one line each
   pc_layout.py migrate <Switch PAD folder>      move it (refused while a pack or transfer runs: work/status)
 
-Every move is a rename on the same disk. The moves are recorded in 程式/work/搬家紀錄.json, and moved() turns a path recorded
+Every move is a rename on the same disk (a game folder renamed to its game's name included). The moves are recorded in 程式/work/搬家紀錄.json, and moved() turns a path recorded
 before the move (a game package's romfs.source.json naming its NSP, a library linked to its game packages) into where it is
 now. Paths in 程式/work/app-settings.json, installed.json and pack-times.json are rewritten.
 """
@@ -172,13 +171,6 @@ def plan(root):
         dest = gp
         if want != g and want.lower() not in taken:
             moves.append((gp, os.path.join(gd, want))); taken.add(want.lower()); dest = os.path.join(gd, want)
-        for n in sorted(os.listdir(gp)):
-            p, low = os.path.join(gp, n), n.lower()
-            if os.path.isfile(p) and low.endswith(GAME_FILES) or (n == 'NSZ原檔' and os.path.isdir(p)):
-                moves.append((os.path.join(dest, n), os.path.join(dest, SRC, n)))
-            elif (os.path.isfile(p) and (low.endswith('.ipa') or n == 'precheck.json')) or \
-                 (os.path.isdir(p) and (re.fullmatch(r'[0-9A-Fa-f]{16}_(pack.*|shader_cache)', n) or n == 'provisional_survey')):
-                moves.append((os.path.join(dest, n), os.path.join(dest, OUT, n)))
         if tid and os.path.isdir(j('合包', 'GL著色器', tid)):
             moves.append((j('合包', 'GL著色器', tid), os.path.join(dest, SHADERS)))
     return moves

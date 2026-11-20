@@ -277,11 +277,13 @@ try {
         $nx = Get-ChildItem (Join-Path $root 'tools') -Recurse -Filter 'nx_extract.exe' | Select-Object -First 1
         if (-not $nx) { throw "在 $root\tools 找不到 nx_extract.exe，請先在 PadSwitch 按「安裝」。" }
 
-        # OpenGL 遊戲、執行時才編譯著色器的遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
+        # OpenGL 遊戲、執行時才編譯著色器的遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 遊戲資料夾\著色器紀錄，舊版在 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
         $glArg = @(); $glDir = $null
         $tidGuess = Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Name -match '\[(01[0-9A-Fa-f]{11}000)\]' } | Sort-Object Length -Descending | Select-Object -First 1
         if ($tidGuess -and $tidGuess.Name -match '\[(01[0-9A-Fa-f]{11}000)\]') {
-            $glDir = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
+            $glDir = Join-Path $GameDir '著色器紀錄'
+            $glOld = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
+            if (-not (Test-Path -LiteralPath $glDir) -and (Test-Path -LiteralPath $glOld)) { $glDir = $glOld }
             $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
             # 執行時才用 GLSLC 編譯著色器的 NVN 遊戲（Unrailed 2）記下的是 <hash>.glslc，放在同一個資料夾
             $glslcN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.glslc$' }).Count
@@ -597,24 +599,26 @@ try {
         return ''
     }
     # ---- 存檔：裝之前先把 iPad 上的備份到電腦（免費帳號過期、App 被刪掉時還救得回來），或把一份備份還原回去 ----
-    # 遊戲的備份在 <遊戲資料夾>\存檔備份\，合包的在 合包\存檔備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
+    # 遊戲的備份在 <遊戲資料夾>\存檔備份\，遊戲庫的在 備份\iPad存檔\，其他合包在 備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
     $saveTool = Join-Path $here 'saves_data.py'
     $ipaDir = Split-Path $Ipa -Parent
     # 雙向同步的存檔資料夾（saves_data.py sync）：每款遊戲資料夾裡的 存檔\，合包和遊戲庫是 遊戲\ 底下每一款，單款 App 是它自己的資料夾
-    $syncGames = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $base '遊戲' } else { $ipaDir }
-    $saveRoot = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $ipaDir ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($Ipa)) } else { Join-Path $ipaDir '存檔備份' }
+    $isPack = (Split-Path $ipaDir -Leaf) -in '遊戲庫', '合包'   # 合包\ 是舊名（pc_layout.py 會搬成 遊戲庫\）
+    $syncGames = if ($isPack) { Join-Path $base '遊戲' } else { $ipaDir }
+    $packName = [IO.Path]::GetFileNameWithoutExtension($Ipa)
+    $saveRoot = if (-not $isPack) { Join-Path $ipaDir '存檔備份' } elseif ($packName -eq '遊戲庫') { Join-Path $base '備份\iPad存檔' } else { Join-Path $base ('備份\' + $packName) }
     if ($saveMode) {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
         $tpy = Transfer-Python
         if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，讀不到 iPad 上的存檔。' }
         if ($GlSync) {
-            $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial)
+            $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--games', (Join-Path $base '遊戲'), '--udid', $dev.Serial)
             if ($c -and $c -ne 3) { Warn "沒拿到 iPad 上記下的著色器（結束碼 $c），照舊打包" }
             Finish '著色器同步好了' Green
             return
         }
         if ($PullLogs) {
-            $logRoot = Join-Path $ipaDir 'iPad記錄'
+            $logRoot = if ($isPack) { Join-Path $base '記錄\iPad記錄' } else { Join-Path $ipaDir 'iPad記錄' }
             $la = @('-I', $saveTool, 'logs', $Ipa, $logRoot, '--udid', $dev.Serial)
             if ($ReportTid) { $la += @('--report', $ReportTid, '--zip', $ReportZip); if ($ReportExtra) { $la += @('--extra', $ReportExtra) } }
             $c = RunExe $tpy $la
@@ -657,7 +661,7 @@ try {
     try {
         $db = Join-Path $root 'installed.json'
         if (Test-Path $db) {
-            $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -eq '合包') { $Ipa } else { Split-Path $Ipa -Parent }
+            $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -in '遊戲庫', '合包') { $Ipa } else { Split-Path $Ipa -Parent }
             $rec = (Get-Content $db -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | Where-Object { $_.Name -eq $key } | Select-Object -First 1
             if ($rec -and $rec.Value.ipa -eq $Ipa) { $signedAt = [datetime]$rec.Value.time }
         }
@@ -770,7 +774,7 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
             (Get-Content $db -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $map[$_.Name] = $_.Value }
         }
         # 合包資料夾裡每包是不同的 App，用 IPA 本身當鍵；遊戲資料夾只記最新一次
-        $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -eq '合包') { $Ipa } else { Split-Path $Ipa -Parent }
+        $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -in '遊戲庫', '合包') { $Ipa } else { Split-Path $Ipa -Parent }
         $map[$key] = [ordered]@{ ipa = $Ipa; time = (Get-Date).ToString('s') }
         $map | ConvertTo-Json -Depth 3 | Set-Content $db -Encoding UTF8
     } catch { Warn "記錄安裝紀錄失敗：$($_.Exception.Message)" } }
@@ -779,7 +783,7 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
     # 裝好後放進 iPad 上那款的存檔（saves_data.py put：先備份 App 的存檔，只換那一款），放好的搬到 存檔備份\已匯入\<時間>，
     # 之後重簽或更新不會再蓋一次。遊戲庫和合包：遊戲\ 裡每款有待傳的都試，不在這個 App 裡的跳過。沒放成功不算安裝失敗，待傳的留著下次再試。
     $saveNote = ''
-    $gameDirs = if ((Split-Path $ipaDir -Leaf) -eq '合包') { @(Get-ChildItem -LiteralPath (Join-Path $base '遊戲') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) } else { @($ipaDir) }
+    $gameDirs = if ($isPack) { @(Get-ChildItem -LiteralPath (Join-Path $base '遊戲') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) } else { @($ipaDir) }
     $pending = @($gameDirs | Where-Object { Test-Path -LiteralPath (Join-Path $_ '存檔待傳') })
     if ($pending.Count -and (Test-Path $saveTool)) {
         $tpy = Transfer-Python
@@ -818,7 +822,7 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
     # OpenGL 遊戲：先在 iPad 上建好記錄著色器的資料夾（殼只寫進已經有的資料夾），順便拿回上次記下的
     if (Test-Path $saveTool) {
         $tpy = Transfer-Python
-        if ($tpy) { Step '拿回 iPad 記下的著色器'; $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial) }
+        if ($tpy) { Step '拿回 iPad 記下的著色器'; $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--games', (Join-Path $base '遊戲'), '--udid', $dev.Serial) }
     }
     if ($saveNote) { Warn $saveNote }
     if ($needSign) { Finish "裝好了：$Ipa 已經在 iPad 上，可以直接開。（免費帳號 7 天後要重簽）" Green }

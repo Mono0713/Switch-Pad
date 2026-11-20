@@ -291,19 +291,19 @@ class PcFolders(unittest.TestCase):
         self.assertTrue(os.path.isfile(j('記錄', 'iPad記錄', '20261101-000000', 'log.txt')))
         self.assertTrue(os.path.isdir(j('程式', '舊版', 'backup-before-abc')))
         u = j('遊戲', 'Unrailed 2 Back on Track')
-        self.assertTrue(os.path.isfile(os.path.join(u, '原始檔', 'Unrailed 2 [010593A5182E4000] [v1.0.0].xci')))
-        self.assertTrue(os.path.isfile(os.path.join(u, '轉檔結果', 'Unrailed 2 Back on Track-multi-f1.ipa')))
-        self.assertTrue(os.path.isdir(os.path.join(u, '轉檔結果', T2 + '_pack')))
+        self.assertTrue(os.path.isfile(os.path.join(u, 'Unrailed 2 [010593A5182E4000] [v1.0.0].xci')))
+        self.assertTrue(os.path.isfile(os.path.join(u, 'Unrailed 2 Back on Track-multi-f1.ipa')))
+        self.assertTrue(os.path.isdir(os.path.join(u, T2 + '_pack')))
         self.assertTrue(os.path.isfile(os.path.join(u, '著色器紀錄', 'k.keys')))
         self.assertTrue(os.path.isfile(os.path.join(u, '我的筆記.txt')))          # a person's own file stays
         self.assertTrue(os.path.isfile(os.path.join(u, '存檔', '存檔 1', 'x')))
         s = j('遊戲', 'Super Mario Odyssey')                                       # renamed to the game's name
-        self.assertTrue(os.path.isfile(os.path.join(s, '原始檔', 'NSZ原檔', 'a.nsz')))
+        self.assertTrue(os.path.isfile(os.path.join(s, 'NSZ原檔', 'a.nsz')))
         self.assertFalse(os.path.exists(j('合包')))
         with open(j('程式', 'work', 'app-settings.json'), encoding='utf-8') as f: want = json.load(f)['Want']
         self.assertEqual(want[0], s)
         # a path recorded before (a package's romfs.source.json) is found where it went
-        self.assertEqual(pcl.moved(self.old_nsp, r), os.path.normcase(os.path.join(s, '原始檔', os.path.basename(self.old_nsp))))
+        self.assertEqual(pcl.moved(self.old_nsp, r), os.path.normcase(os.path.join(s, os.path.basename(self.old_nsp))))
         self.assertEqual(pcl.plan(r), [])   # done once
 
     def test_busy_waits(self):

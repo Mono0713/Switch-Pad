@@ -7,6 +7,7 @@ trap { [void][Windows.MessageBox]::Show($_.ToString(), 'PadSwitch 出錯'); brea
 $here = $PSScriptRoot
 # 程式檔都在 nxn\程式\，遊戲、合包和 PadSwitch.exe 在上一層 nxn\（舊版全部攤在 nxn\ 最上層，開起來會自己搬）
 $appDirName = '程式'
+$packDirName = '遊戲庫'   # 合成好的遊戲庫.ipa 和其他合包（舊版叫 合包\，pc_layout.py 會搬）
 $base = if ((Split-Path $here -Leaf) -eq $appDirName) { Split-Path $here -Parent } else { $here }
 # 用 Start-Process 開 powershell 會走 ShellExecute：Windows 11 的預設主控台是 Windows Terminal，-WindowStyle Hidden 藏不住，
 # 會留下一個標題「powershell」的視窗。跟 PadSwitch.exe 一樣用 CreateNoWindow 開就沒有視窗
@@ -60,7 +61,7 @@ function Move-ToAppDir {
     $appDir = Join-Path $base $appDirName
     $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'nxn[\w-]*\.ps1' })
-    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'icon_hd.py', 'saves_data.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'PadSwitch.cmd', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
+    $plain = @('nxn*.ps1', 'nxn_*.py', 'fix_empty_romfs.py', 'make_provisional.py', 'romfs_data.py', 'keys_check.py', 'icon_read.py', 'icon_hd.py', 'saves_data.py', 'ipad_layout.py', 'pc_layout.py', 'NOTICE.txt', 'LibraryIcon.png', 'SwitchPad.ico', 'PadSwitch.cmd', 'Switch Pad.cmd', '打包安裝視窗.cmd', '一鍵打包安裝.cmd', '首次登入AppleID.cmd') |
         ForEach-Object { Get-ChildItem -LiteralPath $base -File -Filter $_ -ErrorAction SilentlyContinue }
     $dirs = @('work', '工具') | ForEach-Object { Join-Path $base $_ } | Where-Object { Test-Path -LiteralPath $_ }
     if (-not ($plain.Count + @($dirs).Count)) { return }
@@ -98,8 +99,22 @@ function Move-ToAppDir {
         try { if ((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).Arguments -like '*nxn-app.ps1*') { Remove-Item -LiteralPath $lnk } } catch { }
     }
 }
+# 電腦資料夾統一成跟 iPad 一樣的名稱（pc_layout.py，docs/FOLDERS）：合包→遊戲庫、GL著色器→各遊戲的 著色器紀錄、iPad記錄 和
+# 問題回報→記錄\、合包\存檔備份→備份\、遊戲資料夾改成遊戲本身的名字。正在轉檔或傳送時它自己會等下次
+function Tidy-Folders {
+    $tool = Join-Path (Join-Path $base $appDirName) 'pc_layout.py'
+    $tpf = Join-Path (Join-Path (Join-Path $base $appDirName) 'work') 'python-transfer.txt'
+    $py = if (Test-Path $tpf) { (Get-Content $tpf -Raw).Trim() } else { '' }
+    if (-not (Test-Path -LiteralPath $tool) -or -not $py -or -not (Test-Path -LiteralPath $py)) { return }
+    try {
+        $log = Join-Path (Join-Path (Join-Path $base $appDirName) 'work') '資料夾搬家.log'
+        $out = & $py -I $tool migrate $base 2>&1 | Out-String
+        if ($out -notmatch '已經是新的樣子') { Add-Content -LiteralPath $log -Value ("== " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`r`n" + $out) -Encoding UTF8 }
+    } catch { }
+}
 try {
     Move-ToAppDir
+    Tidy-Folders
     $appDir = Join-Path $base $appDirName
     $exe = Join-Path $base 'PadSwitch.exe'
     $ico = Join-Path $appDir '工具\SwitchPad.ico'
@@ -1368,13 +1383,22 @@ function Fill-CardMenu($cm, $g) {
     Menu-Item $cm '🗑  刪除…' $g.Dir 'delete' (-not $state.Running)
 }
 # ---------------------------------------------------------------- iPad 存檔：備份、還原都由 nxn.ps1 做（saves_data.py 經 App 的 Documents 讀寫）
-# 備份在 <遊戲資料夾>\存檔備份\<時間>\，合包的在 合包\存檔備份\<合包名稱>\；每次安裝前也會自動備份一次
+# 備份在 <遊戲資料夾>\存檔備份\<時間>\；遊戲庫的整包快照在 備份\iPad存檔\<時間 原因>\（其他合包 備份\<合包名稱>\）；每次動 iPad 存檔前都會自動備份
 function Save-Root($ipa) {
     $d = Split-Path $ipa -Parent
-    if ((Split-Path $d -Leaf) -eq '合包') { Join-Path $d ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($ipa)) } else { Join-Path $d '存檔備份' }
+    if ((Split-Path $d -Leaf) -in $packDirName, '合包') {
+        $n = [IO.Path]::GetFileNameWithoutExtension($ipa)
+        Join-Path (Join-Path $base '備份') $(if ($n -eq '遊戲庫') { 'iPad存檔' } else { $n })
+    } else { Join-Path $d '存檔備份' }
+}
+# 備份資料夾名稱有新舊兩種：2026-11-20 11.30.05 同步前、20261101-012757-before-sync
+function Backup-Time($name) {
+    if ($name -match '^(\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2})') { return [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH.mm.ss', $null) }
+    if ($name -match '^(\d{8}-\d{6})') { return [datetime]::ParseExact($Matches[1], 'yyyyMMdd-HHmmss', $null) }
+    return $null
 }
 function Save-Backups($root) {
-    @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{8}-\d{6}' -and $_.Name -notmatch '\.part$' } | Sort-Object Name -Descending)
+    @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object { (Backup-Time $_.Name) -and $_.Name -notmatch '\.part$' } | Sort-Object { Backup-Time $_.Name } -Descending)
 }
 # iPad 上裝的是哪個 IPA：安裝紀錄裡的那個，沒有就用資料夾裡最新的（同一款的 IPA bundle ID 都一樣）
 function Save-Ipa($g) {
@@ -1391,7 +1415,7 @@ function Pick-Backup($title, $list) {
   <Window.Resources>__RES__</Window.Resources>
   <StackPanel Margin="22">
     <TextBlock Foreground="#8E8E93" TextWrapping="Wrap" Margin="0,0,0,10"
-               Text="選一份備份還原回 iPad。iPad 上現在的存檔會先另外備份一份（名稱有 before-restore），選錯也救得回來。還原前先在 iPad 上把遊戲關掉。"/>
+               Text="選一份備份還原回 iPad。iPad 上現在的存檔會先另外備份一份（名稱有「還原前」），選錯也救得回來。還原前先在 iPad 上把遊戲關掉。"/>
     <ListBox x:Name="List" Height="260" Background="#1C1C1E" Foreground="White" BorderThickness="0" Padding="4"/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
       <Button x:Name="Cancel" Content="取消" IsCancel="True" Margin="0,0,8,0"/>
@@ -1405,8 +1429,9 @@ function Pick-Backup($title, $list) {
     $lb = $bw.FindName('List')
     foreach ($b in $list) {
         $it = New-Object Windows.Controls.ListBoxItem
-        $when = [datetime]::ParseExact($b.Name.Substring(0, 15), 'yyyyMMdd-HHmmss', $null)
-        $it.Content = $when.ToString('yyyy/MM/dd HH:mm:ss') + $(if ($b.Name -match 'before-restore') { '（還原前自動備份）' } else { '' })
+        $when = Backup-Time $b.Name
+        $why = if ($b.Name -match 'before-restore|還原前') { '（還原前自動備份）' } elseif ($b.Name -match 'before-sync|同步前') { '（同步前自動備份）' } elseif ($b.Name -match 'before-import|匯入前') { '（匯入前自動備份）' } else { '' }
+        $it.Content = $when.ToString('yyyy/MM/dd HH:mm:ss') + $why
         $it.Tag = $b.FullName; $it.Padding = '8,6'
         [void]$lb.Items.Add($it)
     }
@@ -1532,7 +1557,7 @@ function Build-Library {
         if ($g.Dlc) { $parts += "$($g.Dlc) DLC" }
         $card.FindName('Detail').Text = $parts -join ' · '
         $st = $card.FindName('State')
-        $glRec = Join-Path $base "合包\GL著色器\$(Game-Tid $g)"
+        $glRec = Gl-Rec $g
         $glN = if ((Game-Tid $g) -and (Test-Path -LiteralPath $glRec)) { @(Get-ChildItem -LiteralPath $glRec -File -ErrorAction SilentlyContinue).Count } else { -1 }
         $green = Brush '#30D158'; $blue = Brush '#0A84FF'; $gray = Brush '#8E8E93'; $st.ToolTip = $null
         $red = Brush '#FF453A'; $orange = Brush '#FF9F0A'
@@ -1706,7 +1731,7 @@ function Pack-Icon($ipa) {
 }
 function Build-Packs($inst) {
     $ui.Packs.Children.Clear()
-    $mdir = Join-Path $base '合包'
+    $mdir = (Pack-Dir)
     $ipas = @(Get-ChildItem -LiteralPath $mdir -Filter '*.ipa' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
         if (-not $ipas.Count) {
         $t = New-Object Windows.Controls.TextBlock
@@ -1780,8 +1805,8 @@ function Pack-Action($p, $action) {
 function Pack-Path($name) {
     $safe = ($name -replace '[\\/:*?"<>|]', '_').Trim()
     if (-not $safe) { $safe = '遊戲合包' }
-    $p = Join-Path (Join-Path $base '合包') "$safe.ipa"
-    if (Test-Path -LiteralPath $p) { $p = Join-Path (Join-Path $base '合包') ("$safe-" + (Get-Date -Format 'MMdd-HHmm') + '.ipa') }
+    $p = Join-Path ((Pack-Dir)) "$safe.ipa"
+    if (Test-Path -LiteralPath $p) { $p = Join-Path ((Pack-Dir)) ("$safe-" + (Get-Date -Format 'MMdd-HHmm') + '.ipa') }
     return $p
 }
 # 改名：用 nxn_merge.py 拿舊的合包當輸入重新寫一份（原樣複製壓縮資料，很快），成功才刪掉舊的
@@ -2853,7 +2878,12 @@ function Add-ToPack($p, $dirs, $mode) {
 $libName = '遊戲庫'          # 合包\遊戲庫.ipa 的檔名（電腦上找它用，不改）
 $libAppName = 'SwitchPad'    # iPad 主畫面上 App 的名字
 $libBid = 'org.nxnative.games.library'
-function Library-Ipa { Join-Path (Join-Path $base '合包') "$libName.ipa" }
+function Library-Ipa {
+    $p = Join-Path (Join-Path $base $packDirName) "$libName.ipa"
+    if (-not (Test-Path -LiteralPath $p) -and (Test-Path -LiteralPath (Join-Path (Join-Path $base '合包') "$libName.ipa"))) { return (Join-Path (Join-Path $base '合包') "$libName.ipa") }   # 還沒搬（正在轉檔時不搬）
+    return $p
+}
+function Pack-Dir { Split-Path (Library-Ipa) -Parent }
 # 遊戲庫上次是用哪個殼合成的（合成好時記在 遊戲庫.ipa.shell）；換了殼，遊戲包沒變也要重新合成，iPad 才用得到新殼
 function Shell-Changed($shell) {
     $lib = Library-Ipa; $li = Get-Item -LiteralPath $lib -ErrorAction SilentlyContinue
@@ -2881,6 +2911,13 @@ function Library-Tids {
     $f = Get-Item -LiteralPath (Library-Ipa) -ErrorAction SilentlyContinue
     if (-not $f) { return @() }
     @(Read-Pack $f | ForEach-Object { $_.Tid })
+}
+# 從 iPad 收回來的著色器紀錄：遊戲資料夾\著色器紀錄（舊版在 合包\GL著色器\<title ID>，還沒搬就用舊的）
+function Gl-Rec($g) {
+    $p = Join-Path $g.Dir '著色器紀錄'
+    $t = Game-Tid $g
+    if (-not (Test-Path -LiteralPath $p) -and $t) { $o = Join-Path $base "合包\GL著色器\$t"; if (Test-Path -LiteralPath $o) { return $o } }
+    return $p
 }
 function Game-Tid($g) {
     if ($g.Tid) { return "$($g.Tid)".ToUpper() }
@@ -2963,7 +3000,7 @@ function Run-Sync {
     }
     if (-not $state.Running) { $freed = Clean-AfterMerge; if ($freed -gt 100MB) { $script:freedNote = '先清掉用不到的舊遊戲包 {0:N1} GB' -f ($freed / 1GB) } else { $script:freedNote = '' } }
     $jobs = @(); $outs = @()
-    $glGames = @($dirs | Where-Object { $t = Game-Tid $cards[$_].Tag; $t -and (Test-Path -LiteralPath (Join-Path (Split-Path $lib -Parent) "GL著色器\$t")) })
+    $glGames = @($dirs | Where-Object { $t = Game-Tid $cards[$_].Tag; $t -and (Test-Path -LiteralPath (Gl-Rec $cards[$_].Tag)) })
     if ($glGames.Count -and (Test-Path -LiteralPath $lib) -and -not $state.Running) {
         $gg = Library-Game; $gg | Add-Member -NotePropertyName GlNames -NotePropertyValue (((@($glGames | ForEach-Object { $cards[$_].Tag.Name }) | Select-Object -First 3) -join '、') + $(if ($glGames.Count -gt 3) { " 等 $($glGames.Count) 款" } else { '' })) -Force
         $jobs += @{ Game = $gg; Mode = 'glsync'; Ipa = $lib }
@@ -3342,7 +3379,7 @@ function Run-Games($dirs, $mode, $merge) {
         if ($mode -ne 'install' -and $dirs.Count -lt 2) { [void][Windows.MessageBox]::Show('合成一包至少要選 2 款。', '合成一包'); return }
         if ($mode -eq 'install') {
             # 只安裝：裝 nxn\合包 裡最新的那包，不管勾了哪些遊戲
-            $mdir = Join-Path $base '合包'
+            $mdir = (Pack-Dir)
             $last = Get-ChildItem -LiteralPath $mdir -Filter '*.ipa' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if (-not $last) { [void][Windows.MessageBox]::Show('還沒有合成好的包，先用「打包並安裝」或「只打包」。', '合成一包'); return }
             $mg2 = [pscustomobject]@{ Dir = $mdir; Name = "合包（$($last.Name)）"; Ipas = @($last); Base = $false }
@@ -3360,7 +3397,7 @@ function Run-Games($dirs, $mode, $merge) {
             $outs += $o
             $jobs += @{ Game = $g; Mode = 'mergepart'; Ipa = ''; Out = $o; Shell = $ms.FullName }
         }
-        $mdir = Join-Path $base '合包'
+        $mdir = (Pack-Dir)
         New-Item -ItemType Directory -Force -Path $mdir | Out-Null
         $names = ($dirs | ForEach-Object { $cards[$_].Tag.Name }) -join '、'
         $pname = Ask-Text '合成一包' 'iPad 主畫面上顯示的名稱（之後也可以在「合包」裡改）' '遊戲合包'
@@ -3581,7 +3618,7 @@ function Start-Report($g) {
             @(Get-ChildItem -Path (Join-Path $work "src\dm\games\$($g.Tid)\game.tsv") -ErrorAction SilentlyContinue) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($prof) { Copy-Item -LiteralPath $prof.FullName -Destination (Join-Path $extra 'game.tsv') -ErrorAction SilentlyContinue }
     $safe = ($g.Name -replace '[\\/:*?"<>|]', '_')
-    $zip = Join-Path $base "問題回報\$safe-$stamp.zip"
+    $zip = Join-Path $base "記錄\問題回報\$safe-$stamp.zip"
     Start-Run @(@{ Game = $g; Mode = 'report'; Ipa = (Library-Ipa); Out = $zip; Shell = $extra })
 }
 
