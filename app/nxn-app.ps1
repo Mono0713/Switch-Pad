@@ -3363,7 +3363,13 @@ function Fmt-Dur($sec) {
     if ($m) { "$h 小時 $m 分" } else { "$h 小時" }
 }
 function Fmt-GB($b) { '{0:N1} GB' -f ([double]$b / 1GB) }
-function Pid-Alive($id) { if (-not $id) { return $false }; [bool](Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue) }
+function Pid-Alive($id, $started) {
+    if (-not $id) { return $false }
+    $process = Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
+    if (-not $process -or $process.ProcessName -notmatch '^(powershell|pwsh|python.*)$') { return $false }
+    $at = To-Date $started
+    $process.StartTime -and (-not $at -or $process.StartTime -le $at.AddMinutes(2))
+}
 function Read-Status {
     $all = @()
     if (-not (Test-Path -LiteralPath $statusDir)) { return $all }
@@ -3373,7 +3379,7 @@ function Read-Status {
         $j = $null
         try { $j = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }   # 剛好在寫：下次再讀
         if (-not $j -or -not $j.kind) { continue }
-        $alive = Pid-Alive $j.pid
+        $alive = Pid-Alive $j.pid $j.started
         # 跑到一半程式沒了（被停止、關機）：當成中斷
         if ($j.state -eq 'running' -and -not $alive) {
             $j.state = 'failed'
