@@ -2840,6 +2840,7 @@ function Add-Jobs($jobs) {
         if ($j.PushBytes) { $nj.Est += [double]$j.PushBytes / (Step-Time 'pushRate' (12MB)) }
         if ($j.Lib) { $nj | Add-Member -NotePropertyName Lib -NotePropertyValue $j.Lib -Force }
         elseif ($j.Call) { $nj.Call = $j.Call; $nj.NeedAllOk = $true }
+        if ($j.SyncPlan) { $nj | Add-Member -NotePropertyName SyncPlan -NotePropertyValue $j.SyncPlan }
         $state.Queue.Enqueue($nj)
         $state.All += $nj
     }
@@ -2907,8 +2908,17 @@ function Start-Next {
     }
     if ($job.PSObject.Properties['Lib']) {
         $lc = Library-Call $job.Lib $state.Fail
+        if ($lc.Blocked) {
+            Set-Step $job 0 'fail'
+            $job.Msg.Text = "缺少已選遊戲的可用轉檔：$($lc.Skip -join '、')"
+            $job.Msg.Foreground = Brush '#FF453A'
+            $state.Fail += $job.Game.Name
+            $job.Done = $true
+            Start-Next; return
+        }
         if (-not $lc.Call) {
             # 遊戲庫沒有要變的（沒加減遊戲、沒重新轉檔、沒換殼）：不用重新合成，後面的同步照做
+            if ($job.SyncPlan) { $job.SyncPlan.Ready = $true }
             Set-Step $job $job.StepNames.Count 'done'; $job.Done = $true; $job.Ended = Get-Date
             $job.Msg.Text = '遊戲庫不用重新合成（沒有加減或更新遊戲）' + $(if ($lc.Skip.Count) { "；轉檔失敗的先跳過：$($lc.Skip -join '、')" } else { '' })
             $job.Msg.Foreground = Brush $(if ($lc.Skip.Count) { '#FF9F0A' } else { '#30D158' })
@@ -2919,8 +2929,8 @@ function Start-Next {
         $job.Call = $lc.Call
         if ($lc.Skip.Count) { $job.Msg.Text = "跳過 $($lc.Skip -join '、')，其他照樣放進去" }
     }
-    if ($job.Mode -eq 'sync' -and -not (Test-Path -LiteralPath (Library-Ipa))) {
-        Set-Step $job 0 'fail'; $job.Msg.Text = '還沒有遊戲庫（前面的轉檔或合成沒成功），這次沒有同步到 iPad'; $job.Msg.Foreground = Brush '#FF453A'
+    if ($job.Mode -eq 'sync' -and (-not (Test-Path -LiteralPath (Library-Ipa)) -or ($job.SyncPlan -and -not $job.SyncPlan.Ready))) {
+        Set-Step $job 0 'fail'; $job.Msg.Text = '目前選擇的遊戲庫尚未合成成功，這次未同步到 iPad'; $job.Msg.Foreground = Brush '#FF453A'
         $state.Fail += '同步'; $job.Done = $true; Start-Next; return
     }
     $state.Job = $job
@@ -2996,6 +3006,7 @@ $timer.Add_Tick({
         $state.Proc = $null
         $job.Done = $true; $job.Ended = Get-Date
         if ($code -eq 0) {
+            if ($job.Mode -eq 'merge' -and $job.SyncPlan) { $job.SyncPlan.Ready = $true }
             $state.Ok++
             Save-StepTime $job
             if ($job.Mode -eq 'sync') { try { Update-Space; Start-SpaceProbe -Force } catch { } }
@@ -3213,7 +3224,11 @@ function Run-Sync {
     $id = Multi-Id $ms
     $busy = @(Busy-Dirs)
     $dirs = @($selected | Where-Object { $cards.ContainsKey($_) -and ($cards[$_].Tag.Base -or $cards[$_].Tag.Ready -or $cards[$_].Tag.OnPad -or $busy -contains $_) })
-    if (-not $dirs.Count -and -not (Test-Path -LiteralPath $lib)) { [void][Windows.MessageBox]::Show('遊戲庫是空的：先把遊戲拖進「遊戲庫」或按「加入」。', 'PadSwitch'); return }
+    if ($dirs.Count -ne $selected.Count) {
+        [void][Windows.MessageBox]::Show('部分已選遊戲缺少遊戲檔。請補上遊戲檔或從遊戲庫移除該款，再同步。', 'PadSwitch')
+        return
+    }
+    if (-not $dirs.Count) { [void][Windows.MessageBox]::Show('遊戲庫至少要留一款，才能同步。', 'PadSwitch'); return }
     if (-not $state.Running) { $freed = Clean-AfterMerge; if ($freed -gt 100MB) { $script:freedNote = '先清掉用不到的舊遊戲包 {0:N1} GB' -f ($freed / 1GB) } else { $script:freedNote = '' } }
     $jobs = @(); $outs = @()
     $glGames = @($dirs | Where-Object { $t = Game-Tid $cards[$_].Tag; $t -and (Test-Path -LiteralPath (Gl-Rec $cards[$_].Tag)) })
@@ -3237,14 +3252,17 @@ function Run-Sync {
     New-Item -ItemType Directory -Force -Path (Split-Path $lib -Parent) | Out-Null
     $before = @(Library-Tids)
     $now = @($dirs | ForEach-Object { Game-Tid $cards[$_].Tag })
-    $gone = @($cards.Values | Where-Object { $t = Game-Tid $_.Tag; $t -and $before -contains $t -and $now -notcontains $t } | ForEach-Object { $_.Tag.Name })
-    # 合成那一步等前面跑完才決定（轉檔失敗的那款先跳過，其他照樣放進去；什麼都沒變就不合成）
-    if ($dirs.Count) {
-        $jobs += @{ Game = $libGame; Mode = 'merge'; Ipa = ''; Call = '-';
-                    Lib = [pscustomobject]@{ Parts = $outs; Gone = $gone; Mode = 'merge'; Shell = $ms.FullName; Merge = $mg } }
-    }
+    $removed = @($before | Where-Object { $_ -and $_ -notin $now })
+    $gone = @(foreach ($tid in $removed) {
+        $card = $cards.Values | Where-Object { (Game-Tid $_.Tag) -eq $tid } | Select-Object -First 1
+        if ($card) { $card.Tag.Name } else { $tid }
+    })
+    # 尚未合成這次的遊戲庫時，不能用磁碟上原有的合包進行同步。
+    $syncPlan = @{ Ready = $false }
+    $jobs += @{ Game = $libGame; Mode = 'merge'; Ipa = ''; SyncPlan = $syncPlan
+                Lib = [pscustomobject]@{ Parts = $outs; Gone = $gone; Mode = 'merge'; Shell = $ms.FullName; Merge = $mg; RequireAll = $true } }
     Write-Order
-    $jobs += @{ Game = $libGame; Mode = 'sync'; Ipa = $lib; Out = $orderFile; PushBytes = $pushB }
+    $jobs += @{ Game = $libGame; Mode = 'sync'; Ipa = $lib; Out = $orderFile; PushBytes = $pushB; SyncPlan = $syncPlan }
     Start-Run $jobs
 }
 function Run-Library($dirs, $mode) { Run-Sync }   # 舊的呼叫方式（重簽、裝到 iPad）都是同步
@@ -3282,6 +3300,7 @@ function Library-Call($lib, $fail) {
         $bad = $fail -contains $p.Name
         if ((-not $bad -or $p.WasIn) -and (Test-Path -LiteralPath $p.Path)) { $use += $p } else { $skip += $p.Name }
     }
+    if ($lib.RequireAll -and $skip.Count) { return @{ Blocked = $true; Skip = $skip } }
     $added = @($use | Where-Object { -not $_.WasIn })
     # 遊戲包重新轉換過（比遊戲庫新）或換了殼，也要重新合成
     $libT = (Get-Item -LiteralPath $libIpa -ErrorAction SilentlyContinue).LastWriteTime
@@ -3290,7 +3309,7 @@ function Library-Call($lib, $fail) {
     $newLook = Look-Changed
     # 還是舊式（遊戲資料整份在包裡）的遊戲庫：重新合成一次換成連結式，電腦上少 40 幾 GB，iPad 上的資料對得上不會重傳
     $relink = (Test-Path -LiteralPath $libIpa) -and (Merge-CanLink $lib.Merge) -and -not (Lib-IsLinked $libIpa)
-    if (-not $use.Count -or (-not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $newLook -and -not $relink)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
+    if (-not $use.Count -or ($libT -and -not $added.Count -and -not $lib.Gone.Count -and -not $newer.Count -and -not $newShell -and -not $newLook -and -not $relink)) { return @{ Call = ''; Skip = $skip } }   # 遊戲庫沒有要變的，不重包也不重裝
     $what = "$($use.Count) 款" + $(if ($added.Count) { "，加入 $(($added | ForEach-Object { $_.Name }) -join '、')" } else { '' }) +
             $(if ($lib.Gone.Count) { "，拿掉 $($lib.Gone -join '、')" } else { '' }) + $(if ($skip.Count) { "，跳過 $($skip -join '、')" } else { '' }) +
             $(if ($newShell) { '，換新殼' } elseif ($newLook) { "，App 改名 $libAppName、換圖示" } elseif ($newer.Count) { "，更新 $(($newer | ForEach-Object { $_.Name }) -join '、')" } elseif ($relink) { '，改成遊戲資料不重複存一份' } else { '' })
@@ -3301,7 +3320,7 @@ function Library-Call($lib, $fail) {
             $(if (Merge-CanLink $lib.Merge) { ' --link' } else { '' }) +
             $(if (Test-Path $icon) { " --icon $(Quote $icon)" } else { '' }) + $(if (Select-String -LiteralPath $lib.Merge -Pattern 'hd-icons' -SimpleMatch -Quiet) { " --hd-icons $(Quote (Join-Path $coverDir 'hd'))" } else { '' }) + " $(($use | ForEach-Object { Quote $_.Path }) -join ' '); " +
             "if (`$LASTEXITCODE) { Write-Host '出錯了：遊戲庫合成失敗'; Remove-Item -LiteralPath $(Quote $tmp) -ErrorAction SilentlyContinue; `$global:LASTEXITCODE = 1; return }; " +
-            "Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force; " +
+            "try { Move-Item -LiteralPath $(Quote $tmp) -Destination $(Quote $libIpa) -Force -ErrorAction Stop } catch { Write-Host '出錯了：無法更新遊戲庫合包' `$_; `$global:LASTEXITCODE = 1; return }; " +
             "Set-Content -LiteralPath $(Quote "$libIpa.shell") -Value $(Quote (Split-Path $lib.Shell -Leaf)) -Encoding UTF8; " +
             "Set-Content -LiteralPath $(Quote "$libIpa.look") -Value $(Quote (Library-Look)) -Encoding UTF8; Write-Host '遊戲庫合成好了'"
     if ($lib.Mode -eq 'both') { $call += "; & $(Quote $script) -Ipa $(Quote $libIpa) -NoPause" }   # 同步把裝到 iPad 另外排成一步（sync），這裡是 merge
