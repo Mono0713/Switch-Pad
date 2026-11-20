@@ -375,7 +375,7 @@ def main():
         pl.pop('DMLanguage', None)   # each game's own, from its game.json (main.m)
         icon = None
         if a.icon:
-            # one fixed icon (Switch Pad's game library), so the home screen does not change as games come and go
+            # one fixed icon (PadSwitch's game library), so the home screen does not change as games come and go
             with open(a.icon, 'rb') as f: icon = f.read()
             try:
                 w, h, _ = png_read(icon)

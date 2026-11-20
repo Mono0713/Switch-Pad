@@ -16,7 +16,7 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py logs    <ipa> <logs folder> [--udid UDID] [--report TITLEID --zip FILE [--extra DIR]]
   saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
 
-put places one game's save from the PC (what Switch Pad takes when a save is dropped on a game card: an emulator's, JKSV's or
+put places one game's save from the PC (what PadSwitch takes when a save is dropped on a game card: an emulator's, JKSV's or
 Checkpoint's export, which are the same plain tree the shell keeps) as that game's save: save/ in a one-game app, save/<title
 ID> in the library or a package, which must have that game (exit 5 when it does not). The app's saves are backed up first, as
 restore does, and only that one game's folder (and its .work / .new) is replaced. With --slot the save in use is not touched: the
@@ -46,7 +46,7 @@ last two runs in Documents/logs/) to <logs folder>/<time>/ and prints what the h
 does not have yet are what a game stops on, and this is the list to implement next (Ryujinx's HLE, MIT, is the reference).
 With --report it then packs one game's problem report into --zip: that game's logs from this pull (its last two runs, its last two
 crashes kept apart by the shell as logs/<title ID>.crash*.txt, and log.txt / log.prev.txt when that game ran last), a summary of
-their red lines and crash lines, and the files in --extra (Switch Pad's diagnostics, the packing log, the game profile). E-mail
+their red lines and crash lines, and the files in --extra (PadSwitch's diagnostics, the packing log, the game profile). E-mail
 addresses are masked in every text file. Nothing else from the iPad, no save, key or game file, goes into it.
 
 migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
@@ -592,7 +592,7 @@ async def sync(afc, ipa, games, root, now=None, json_out=None):
             up += a; down += b
             if busy: failed.append(os.path.basename(g))
     print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
-    if failed:   # the rest are done; a nonzero exit makes Switch Pad say so (nxn.ps1)
+    if failed:   # the rest are done; a nonzero exit makes PadSwitch say so (nxn.ps1)
         print('沒同步完的：%s' % '、'.join(failed))
         return SYNC_PARTIAL
     return 0
@@ -956,18 +956,24 @@ def gl_games(ipa):
             if not m: continue
             for line in z.read(n).decode('utf-8', 'replace').splitlines():
                 k, _, v = line.partition('=')
-                if k.strip() in KIND and v.strip() and not v.strip().startswith('/'):
-                    out[m.group(1).upper()] = v.strip(); gl_kind[m.group(1).upper()] = k.strip()
+                if k.strip() in ('DM_GL_CAPTURE', 'DM_GLSLC_CAPTURE', 'DM_SHADER_RECORD', 'DM_VK_CAPTURE') and v.strip() and not v.strip().startswith('/'):
+                    out[m.group(1).upper()] = v.strip()
+                    GL_KIND[m.group(1).upper()] = k.strip()
+        for n in z.namelist():   # each game's name, for the lines PadSwitch shows (「Super Mario Galaxy：Vulkan 著色器 3,089 個」)
+            m = re.match(r'Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/game\.json$', n)
+            if m and m.group(1).upper() in out:
+                try: GL_NAME[m.group(1).upper()] = json.loads(z.read(n).decode('utf-8')).get('name') or ''
+                except Exception: pass
     return out
 
 
-gl_kind = {}   # title ID → which of KIND its package records
+GL_KIND, GL_NAME = {}, {}
+GL_WHAT = {'DM_GL_CAPTURE': 'OpenGL 著色器', 'DM_GLSLC_CAPTURE': '執行時編譯的著色器', 'DM_SHADER_RECORD': '缺的著色器', 'DM_VK_CAPTURE': 'Vulkan 著色器'}
 
 
 SHADER_FILE = re.compile(r'[0-9a-f]{16}\.(vert|frag|glslc|keys|spv)')   # what the host writes: <key>.vert / .frag (hle_gl.m), <hash>.glslc (hle_glslc.c), <run>.keys (nvn_mtl.m shader_record_miss), <key>.spv (hle_vk.m)
 
 
-KIND = {'DM_GL_CAPTURE': 'OpenGL 著色器', 'DM_GLSLC_CAPTURE': 'GLSLC 著色器', 'DM_SHADER_RECORD': 'Unity 用到的著色器', 'DM_VK_CAPTURE': 'Vulkan 著色器'}
 
 
 async def gl_sync(afc, games, root, names=None, game_dirs=None):
@@ -998,10 +1004,11 @@ async def gl_sync(afc, games, root, names=None, game_dirs=None):
             if n.endswith('.keys'):
                 with open(os.path.join(dest, n), encoding='utf-8', errors='replace') as f: keys.update(l.strip() for l in f if len(l.strip()) == 16)
         totals[tid] = len(keys) + len([n for n in names if not n.endswith('.keys')])
-        who = '%s（%s）' % (L.names.get(tid) or L.folder(tid), tid)
-        kind = KIND.get(gl_kind.get(tid, ''), '著色器')
-        print('遊戲名稱：%s，記錄種類：%s，iPad 記下 %d 個（這次新拿回 %d 個檔案）' % (who, kind, totals[tid], new) if totals[tid]
-              else '遊戲名稱：%s，記錄種類：%s，還沒記下，在 iPad 上打開這款玩一下' % (who, kind))
+        who = '%s（%s）' % (GL_NAME[tid], tid) if GL_NAME.get(tid) else tid
+        what = GL_WHAT.get(GL_KIND.get(tid, ''), '著色器')
+        if not totals[tid]: print('著色器紀錄｜%s｜%s：還沒記下，在 iPad 上打開這款玩一下' % (who, what))
+        elif new: print('著色器紀錄｜%s｜%s：iPad 記下 %s 個，這次新拿回 %d 個檔（下次同步會重新轉檔把它們加進去）' % (who, what, format(totals[tid], ','), new))
+        else: print('著色器紀錄｜%s｜%s：iPad 記下 %s 個，沒有新的' % (who, what, format(totals[tid], ',')))
     return totals
 
 
@@ -1104,7 +1111,7 @@ def make_report(dest, tid, zip_path, extra=None, game=None):
             with open(f, encoding='utf-8', errors='replace') as fh:
                 if last_game(fh.read()) == tid: picks.append(('iPad/' + name, f))
     if not picks: return None
-    summary = ['Switch Pad 問題回報：%s（%s）' % (tid, datetime.datetime.now().strftime('%Y-%m-%d %H:%M')), '']
+    summary = ['PadSwitch 問題回報：%s（%s）' % (tid, datetime.datetime.now().strftime('%Y-%m-%d %H:%M')), '']
     os.makedirs(os.path.dirname(os.path.abspath(zip_path)), exist_ok=True)
     put = []
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:

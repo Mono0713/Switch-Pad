@@ -1,6 +1,6 @@
 name: Release
 
-# Every change to app/ on main becomes a new release with app/ zipped as SwitchPad.zip. Switch Pad's updater
+# Every change to app/ on main becomes a new release with app/ zipped as SwitchPad.zip. PadSwitch's updater
 # (app/nxn-update.ps1) downloads SwitchPad.zip from this repository's latest release; the shell, the packer and their
 # tools still come from Mono0713/ns2ios-shell.
 
@@ -32,12 +32,12 @@ jobs:
           mkdir -p dist
           (cd app && zip -q -r ../dist/SwitchPad.zip .)
           cat > notes.md <<NOTES
-          下載 **SwitchPad.zip**，解壓後打開 \`Switch Pad.cmd\`。使用說明見 [README](https://github.com/$GITHUB_REPOSITORY#readme)。
-          已經裝好的 Switch Pad 會自己發現這個新版本（設定裡按「更新」）。
+          下載 **SwitchPad.zip**，解壓後打開 \`PadSwitch.cmd\`。使用說明見 [README](https://github.com/$GITHUB_REPOSITORY#readme)。
+          已經裝好的 PadSwitch 會自己發現這個新版本（設定裡按「更新」）。
 
-          Download **SwitchPad.zip**, unzip it and open \`Switch Pad.cmd\`. See the [README](https://github.com/$GITHUB_REPOSITORY#readme).
+          Download **SwitchPad.zip**, unzip it and open \`PadSwitch.cmd\`. See the [README](https://github.com/$GITHUB_REPOSITORY#readme).
 
           Commit: $GITHUB_SHA
           NOTES
-          gh release create "$TAG" dist/SwitchPad.zip --repo "$GITHUB_REPOSITORY" --title "Switch Pad $TAG" --notes-file notes.md --latest
+          gh release create "$TAG" dist/SwitchPad.zip --repo "$GITHUB_REPOSITORY" --title "PadSwitch $TAG" --notes-file notes.md --latest
           echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"

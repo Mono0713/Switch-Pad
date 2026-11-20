@@ -1,7 +1,7 @@
 name: Tests
 
 # The Python helpers' tests (no device, no keys, no games: hand-made inputs only) and a parse of every PowerShell script
-# with Windows PowerShell 5.1, the one Switch Pad runs on.
+# with Windows PowerShell 5.1, the one PadSwitch runs on.
 
 on:
   push:
@@ -39,11 +39,15 @@ jobs:
       - name: UI preview as text (for viewers without artifact access)
         shell: powershell
         run: |
-          $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes('ui-preview.png'))
-          for ($i = 0; $i -lt $b.Length; $i += 4000) { Write-Host ("PNG64 " + $b.Substring($i, [Math]::Min(4000, $b.Length - $i))) }
+          foreach ($png in 'ui-preview.png', 'ui-preview-progress.png') {
+            if (-not (Test-Path $png)) { continue }
+            Write-Host "PNGFILE $png"
+            $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes($png))
+            for ($i = 0; $i -lt $b.Length; $i += 4000) { Write-Host ("PNG64 " + $b.Substring($i, [Math]::Min(4000, $b.Length - $i))) }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ui-preview
-          path: ui-preview.png
+          path: ui-preview*.png
           if-no-files-found: ignore

@@ -1,5 +1,5 @@
-﻿# nxn-queue.ps1 - 背景佇列：一款一款跑 nxn.ps1（不用開 Switch Pad），進度寫進 work\status\queue-<名稱>.json，
-# Switch Pad 主視窗的「背景工作」卡片每幾秒讀一次：正在做哪一款、第幾款、完成/失敗/排隊、失敗原因、預估還要多久。
+﻿# nxn-queue.ps1 - 背景佇列：一款一款跑 nxn.ps1（不用開 PadSwitch），進度寫進 work\status\queue-<名稱>.json，
+# PadSwitch 主視窗的「背景工作」卡片每幾秒讀一次：正在做哪一款、第幾款、完成/失敗/排隊、失敗原因、預估還要多久。
 # 一款失敗不影響後面的。每款的完整記錄在 work\gui-logs\<時間>-<遊戲>.log。
 #
 # 用法：
@@ -35,7 +35,7 @@ function Save($q, [switch]$KeepNote) {
             [IO.File]::WriteAllText("$file.tmp", ($q | ConvertTo-Json -Depth 5 -Compress), $utf8)
             if (Test-Path -LiteralPath $file) { [IO.File]::Replace("$file.tmp", $file, [NullString]::Value) } else { [IO.File]::Move("$file.tmp", $file) }
             return
-        } catch { Start-Sleep -Milliseconds 300 }   # Switch Pad 剛好在讀
+        } catch { Start-Sleep -Milliseconds 300 }   # PadSwitch 剛好在讀
     }
 }
 
@@ -83,7 +83,7 @@ try {
         Save $q
         $argv = @('-GameDir', (Q $it.dir)) + @($Pass | ForEach-Object { if ($_ -match '^-') { $_ } else { Q $_ } }) + @($it.extra | ForEach-Object { if ($_ -match '^-') { $_ } else { Q $_ } }) + '-NoPause'
         $cmd = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; `$env:PYTHONUTF8='1'; `$global:LASTEXITCODE=0; & { & $(Q $nxn) $($argv -join ' ') } *>&1 | Out-File -Encoding utf8 -Width 400 $(Q $it.log); exit `$LASTEXITCODE"
-        # 跟 Switch Pad 開子程序的方式一樣（Start-Process 在 PowerShell 5.1 不會幫有空白的參數加引號）
+        # 跟 PadSwitch 開子程序的方式一樣（Start-Process 在 PowerShell 5.1 不會幫有空白的參數加引號）
         $psi = New-Object Diagnostics.ProcessStartInfo 'powershell.exe'
         $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$($cmd -replace '"', '\"')`""
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true

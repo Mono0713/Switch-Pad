@@ -27,7 +27,7 @@ r = subprocess.run([str(Path(tools) / 'nx_extract.exe'), keys, base, upd, str(ex
 
 
 def key_problem(text, keys_path):
-    """A plain explanation (Traditional Chinese, for Switch Pad's log) of an extraction that failed for want of a key, or None.
+    """A plain explanation (Traditional Chinese, for PadSwitch's log) of an extraction that failed for want of a key, or None.
     LibHac's messages: 'Missing NCA title key.' (no ticket for the NCA's rights ID: the NSP has no ticket, or only a
     personalized one, which nx_extract skips with a [RED] line) and 'Unable to decrypt title key.' (the ticket is there but
     prod.keys has no titlekek for the NCA's key generation: keys dumped from older firmware than the game needs)."""
@@ -85,7 +85,7 @@ except ImportError:
     pass   # 舊版打包器沒有 nso_zbic.py
 F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv')
 dv = re.search(r'display version (\S+)', r.stdout)
-# the title ID: given (Switch Pad passes the one the packer asked for), else from the file name's [0100…]
+# the title ID: given (PadSwitch passes the one the packer asked for), else from the file name's [0100…]
 app = int(sys.argv[7], 16) if len(sys.argv) > 7 else int(Path(base).name.split('[')[1].split(']')[0], 16)
 f = {'F': F, 'name': nacp.name(ex / 'control.nacp'), 'version': ver, 'display': dv.group(1) if dv else '?',
      'survey': 'Windows, make_provisional.py'}
@@ -137,7 +137,7 @@ print('profile installed:', dest)
 # nor the RomFS holds a source): profile_guess calls it gl_capture. The packer takes the GL route only for a profile with
 # a gl_capture.tsv (upstream's lists what its Mac run captured); with none it splits NVN shaders, finds none and fails.
 # A table with no rows says "GL route, nothing captured yet": the packer then builds a package that records the shaders
-# on the phone (Documents/gl_capture/<title ID>), which Switch Pad brings back for the next pack.
+# on the phone (Documents/gl_capture/<title ID>), which PadSwitch brings back for the next pack.
 imp = F['mods'].get('main', {}).get('imports', set())
 try:
     files = (ex / 'romfs_manifest.tsv').read_text(encoding='utf-8', errors='replace').lower()
