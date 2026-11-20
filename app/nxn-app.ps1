@@ -2375,32 +2375,44 @@ $win.Add_Activated({
 # plumesign 在背景問，答案回來才更新右上角（直接跑會讓畫面停一兩秒）
 $acctJob = @{ Proc = $null }
 function Update-Account {
-    if (-not (Test-Path $plume)) { $ui.Account.Text = '找不到 plumesign.exe'; return }
+    if (-not (Test-Path $plume)) { Show-Account '' 1; $ui.Account.Text = '找不到 plumesign.exe'; return }
     if ($acctJob.Proc -and -not $acctJob.Proc.HasExited) { return }
     try {
         $psi = New-Object Diagnostics.ProcessStartInfo $plume
         $psi.Arguments = 'account list'
+        # plumesign 的帳號清單走 info 記錄；系統設定 warn 時會成功卻完全沒有輸出。
+        $psi.EnvironmentVariables['RUST_LOG'] = 'info'
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
         $acctJob.Proc = [Diagnostics.Process]::Start($psi)
         $acctJob.Out = $acctJob.Proc.StandardOutput.ReadToEndAsync(); $acctJob.Err = $acctJob.Proc.StandardError.ReadToEndAsync()
         if ($ui.Account.Text -eq '' -or $ui.Account.Text -eq '…') { $ui.Account.Text = '…' }
         $acctTimer.Start()
-    } catch { $ui.Account.Text = '無法確認 Apple ID' }
+    } catch { Show-Account '' 1 }
 }
 $acctTimer = New-Object Windows.Threading.DispatcherTimer
 $acctTimer.Interval = [TimeSpan]::FromMilliseconds(300)
 $acctTimer.Add_Tick({
     if ($acctJob.Proc -and -not $acctJob.Proc.HasExited) { return }
     $acctTimer.Stop()
-    if (-not $acctJob.Proc) { return }
+    $proc = $acctJob.Proc
+    if (-not $proc) { return }
     $acctJob.Proc = $null
-    try { Show-Account ("$($acctJob.Out.Result)`n$($acctJob.Err.Result)") } catch { $ui.Account.Text = '無法確認 Apple ID' } })
-function Show-Account($out) {
-    try {
-        $mail = [regex]::Match($out, '[\w.+-]+@[\w-]+(\.[\w-]+)+').Value
-        if ($mail) { $ui.Account.Text = $mail; $ui.Account.Foreground = Brush '#C7C7CC'; $ui.AcctDot.Fill = Brush '#30D158'; $ui.Login.Content = '換帳號' }
-        else { $ui.Account.Text = '還沒登入 Apple ID'; $ui.AcctDot.Fill = Brush '#FF453A'; $ui.Login.Content = '登入 Apple ID' }
-    } catch { $ui.Account.Text = '無法確認 Apple ID' }
+    try { Show-Account ("$($acctJob.Out.Result)`n$($acctJob.Err.Result)") $proc.ExitCode }
+    catch { Show-Account '' 1 }
+    finally { $proc.Dispose() }
+})
+function Show-Account($out, $code) {
+    $mail = [regex]::Match($out, '(?im)([\w.+-]+@[\w-]+(?:\.[\w-]+)+)[ \t]+\(selected\)[ \t]*\r?$').Groups[1].Value
+    $ui.Account.Foreground = Brush '#C7C7CC'
+    if ($code -eq 0 -and $mail) {
+        $ui.Account.Text = $mail
+        $ui.AcctDot.Fill = Brush '#30D158'; $ui.Login.Content = '換帳號'
+    } else {
+        $empty = $code -eq 0 -and $out -match 'No accounts found'
+        $ui.Account.Text = if ($empty) { '還沒登入 Apple ID' } else { '無法確認 Apple ID' }
+        $ui.AcctDot.Fill = Brush $(if ($empty) { '#FF453A' } else { '#8E8E93' })
+        $ui.Login.Content = '登入 Apple ID'
+    }
 }
 # 在 app 裡登入：plumesign 在背景跑，密碼和雙重驗證碼從它的標準輸入餵進去（不放在命令列上），輸出寫進檔案再輪詢
 function Show-Login {
