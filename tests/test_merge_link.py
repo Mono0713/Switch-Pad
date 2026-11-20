@@ -60,6 +60,16 @@ class LinkTest(unittest.TestCase):
             app, pl, parts, files, several = rd.layout(z)
             return {d: rd.data_id([i for i in files if i.filename.startswith(p)]) for p, d in parts}
 
+    def test_preview_fingerprints_match_the_final_linked_library(self):
+        linked = os.path.join(self.d, 'linked.ipa')
+        run(MERGE, '-o', linked, '--bundle-id', 'org.nxnative.games.library', '--link', self.a, self.b)
+        preview = {}
+        for part in (self.a, self.b):
+            preview.update(rd.package_parts_size(part)['parts'])
+        with zipfile.ZipFile(linked) as z:
+            actual = {key: {'id': row['id'], 'bytes': row['bytes']} for key, row in rd.read_link(z).items()}
+        self.assertEqual(preview, actual)
+
     def test_link_matches_full(self):
         full, linked = os.path.join(self.d, 'full.ipa'), os.path.join(self.d, 'linked.ipa')
         run(MERGE, '-o', full, '--bundle-id', 'org.nxnative.games.library', self.a, self.b)
@@ -143,6 +153,7 @@ class FakeAfc:
     async def __aexit__(self, *a): return False
     async def exists(self, p): return p == '/Documents' or p in self.fs or any(k.startswith(p + '/') for k in self.fs)
     async def get_file_contents(self, p): return self.fs[p]
+    async def get_device_info(self): return {'FSFreeBytes': 8 << 30, 'FSTotalBytes': 128 << 30}
     async def set_file_contents(self, p, b): self.fs[p] = bytes(b)
     async def rm(self, p, force=False):
         for k in [k for k in self.fs if k == p or k.startswith(p + '/')]: del self.fs[k]
@@ -227,6 +238,21 @@ class FileDiffTest(unittest.TestCase):
         # --force: everything again
         self.assertEqual(len(self.push(self.lib(v2, 'v3'), fs, force=True)), 4)
 
+    def test_low_space_leaves_the_existing_copy_untouched(self):
+        from unittest.mock import AsyncMock, patch
+
+        fs = {}
+        v1 = self.lib({'romfs/old.bin': b'old', 'msl/shader': b'x'}, 'v1')
+        self.push(v1, fs)
+        before = dict(fs)
+        v2 = self.lib({'romfs/new.bin': b'much larger data'}, 'v2')
+        with patch.object(FakeAfc, 'get_device_info', AsyncMock(return_value={'FSFreeBytes': 0})):
+            with self.assertRaises(SystemExit) as err:
+                self.push(v2, fs)
+        self.assertEqual(err.exception.code, 4)
+        self.assertEqual(fs, before)
+        self.assertEqual(CountingAfc.opened, [])
+
     def test_status_file(self):
         """push writes push-<pid>.json into NXN_STATUS_DIR for Switch Pad's 背景工作 card"""
         st = os.path.join(self.d, 'status')
@@ -236,7 +262,7 @@ class FileDiffTest(unittest.TestCase):
         with open(os.path.join(st, 'push-%d.json' % os.getpid()), encoding='utf-8') as f: j = json.load(f)
         self.assertEqual((j['kind'], j['state']), ('push', 'done'))
         self.assertEqual(j['sent'], j['total']); self.assertGreater(j['total'], 1000)
-        self.assertEqual(os.listdir(st), ['push-%d.json' % os.getpid()])
+        self.assertEqual(sorted(os.listdir(st)), ['ipad-space.json', 'push-%d.json' % os.getpid()])
 
     def test_cut_short_is_redone(self):
         v1 = {'romfs/a.bin': b'a', 'msl/b-1/x_b.metallib': b'x1', 'msl/b-1/y_b.metallib': b'y1'}
@@ -334,6 +360,106 @@ class RomfsSourceTest(unittest.TestCase):
         with self.assertRaises(rd.Mismatch): self.push(lib, fs)
         self.assertNotIn('games/0100000000010000/romfs', json.loads(fs.get('/Documents/.romfs-id', b'{}')))
         self.assertFalse(os.path.exists(os.path.join(self.d, '_romfs_push_0100000000010000')))
+
+
+class TransferSpaceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_mostly_replaced_folder_goes_whole(self):
+        # 2026-11-20: 300,000 old shader files removed one request each took over an hour; most of a big folder
+        # changing is now one request for the folder and a full copy
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        r = rd
+        folder = 'games/0100000000010000/msl'
+        files = [(None, SimpleNamespace(file_size=10, CRC=i), '%s/new%d' % (folder, i)) for i in range(1000)]
+        old = {'%s/old%d' % (folder, i): (10, i) for i in range(3000)}
+        with patch.object(r, 'read_list', AsyncMock(return_value=old)):
+            send, _, plan, _, growth, released = await r.transfer_changes(None, None, [folder], lambda _: files)
+        self.assertIsNone(plan[folder])
+        self.assertEqual(r.jobs_left(send[folder], ()), (1000, 10000))
+        self.assertEqual(released, 30000)
+        # a few removals in a big folder stay file by file
+        old2 = dict(old); files2 = [(None, SimpleNamespace(file_size=10, CRC=i), '%s/old%d' % (folder, i)) for i in range(2990)]
+        with patch.object(r, 'read_list', AsyncMock(return_value=old2)):
+            _, _, plan2, _, _, _ = await r.transfer_changes(None, None, [folder], lambda _: files2)
+        self.assertEqual(len(plan2[folder][2]), 10)
+
+    async def test_rm_files_reports_progress(self):
+        from types import SimpleNamespace
+        r = rd
+        gone = []
+        async def rm_single(k, force=False): gone.append(k); return True
+        st = SimpleNamespace(d={}, write=lambda now=False: None)
+        await r.rm_files(SimpleNamespace(rm_single=rm_single), ['/a%d' % i for i in range(130)], st, 'X')
+        self.assertEqual(len(gone), 130)
+        self.assertEqual(st.d['phase'], '清掉被換掉的舊檔（X） 130／130')
+
+    async def test_growth_keeps_unchanged_files_and_checks_before_deletion(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        r = rd
+        folder = 'games/0100000000010000/romfs'
+        make = lambda name, size, crc: (None, SimpleNamespace(file_size=size, CRC=crc), folder + '/' + name)
+        files = [make('same', 100, 1), make('grow', 200, 2), make('shrink', 100, 3)]
+        old = {folder + '/' + f: v for f, v in
+               {'same': (100, 1), 'grow': (150, 9), 'shrink': (900, 9), 'removed': (32, 9)}.items()}
+        with patch.object(r, 'read_list', AsyncMock(return_value=old)):
+            send, _, plan, skipped, growth, released = await r.transfer_changes(None, None, [folder], lambda _: files)
+        self.assertEqual(r.jobs_left(send[folder], ()), (2, 300))
+        self.assertEqual(skipped, 1)
+        self.assertEqual(growth, 50)
+        self.assertEqual(released, 32)
+        self.assertEqual(plan[folder][2], [folder + '/removed'])
+        afc = SimpleNamespace(get_device_info=AsyncMock(return_value={'FSFreeBytes': (1 << 30) + 17}))
+        with self.assertRaises(SystemExit) as err:
+            await r.check_transfer_space(afc, 300, growth, released)
+        self.assertEqual(err.exception.code, 4)
+        afc.get_device_info.return_value['FSFreeBytes'] += 1
+        await r.check_transfer_space(afc, 300, growth, released)
+        afc.get_device_info.reset_mock()
+        await r.check_transfer_space(afc, 0, 0)
+        afc.get_device_info.assert_not_called()
+
+    async def test_estimate_counts_a_legacy_size_only_when_the_installed_folder_exists(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        folder = 'games/0100000000010000/romfs'
+        afc = SimpleNamespace(exists=AsyncMock(return_value=True))
+        layout = SimpleNamespace(key=lambda folder: '/Documents/' + folder)
+        with patch.object(rd, 'read_list', AsyncMock(return_value=None)):
+            self.assertEqual(await rd.removable_bytes(afc, layout, {folder: 'old'}, {}, {folder: 1024}), 1024)
+            afc.exists.return_value = False
+            self.assertEqual(await rd.removable_bytes(afc, layout, {folder: 'old'}, {}, {folder: 1024}), 0)
+
+    async def test_old_install_without_list_cannot_claim_space(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        r = rd
+        folder = 'games/0100000000010000/msl'
+        item = (None, SimpleNamespace(file_size=300, CRC=1), folder + '/shader')
+        with patch.object(r, 'read_list', AsyncMock(return_value=None)):
+            _, _, plan, _, growth, released = await r.transfer_changes(None, None, [folder], lambda _: [item])
+            self.assertEqual(await r.removable_bytes(None, None, {folder: 'old'}, {}), 0)
+        self.assertIsNone(plan[folder])
+        self.assertEqual((growth, released), (300, 0))
+
+    def test_split_package_parts_keep_deep_paths(self):
+        import plistlib
+
+        r = rd
+        with tempfile.TemporaryDirectory() as tmp:
+            file = os.path.join(tmp, 'lib.ipa')
+            app = 'Payload/Test.app/'
+            folder = 'games/0100000000010000/romfs'
+            with zipfile.ZipFile(file, 'w') as z:
+                z.writestr(app + 'Info.plist', plistlib.dumps({'DMDataInDocuments': True}))
+                z.writestr(app + folder + '/folder/data', b'file')
+            with zipfile.ZipFile(file) as z:
+                want, jobs = r.transfer_parts(z, r.Sources())
+                self.assertIn(folder, want)
+                self.assertEqual([job[2] for job in jobs(folder)], [folder + '/folder/data'])
 
 
 if __name__ == '__main__':

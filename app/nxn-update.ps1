@@ -1,7 +1,7 @@
-﻿# nxn-update.ps1 - Switch Pad 的安裝和更新：Python、Python 套件、打包器（殼、Windows 工具、原始碼）、plumesign、Switch Pad 自己。
-# 全部從 GitHub 下載：殼和打包器取 Mono0713/ns2ios-shell 最新的 release，Switch Pad 取 Mono0713/Switch-Pad 最新的 release，
+﻿# nxn-update.ps1 - PadSwitch 的安裝和更新：Python、Python 套件、打包器（殼、Windows 工具、原始碼）、plumesign、PadSwitch 自己。
+# 全部從 GitHub 下載：殼和打包器取 Mono0713/ns2ios-shell 最新的 release，PadSwitch 取 Mono0713/Switch-Pad 最新的 release，
 # plumesign 取 Impactor 最新的 release。
-# 已經是最新的部分會跳過，所以重複執行沒關係。Switch Pad 的「安裝」「更新」按鈕就是跑這個。
+# 已經是最新的部分會跳過，所以重複執行沒關係。PadSwitch 的「安裝」「更新」按鈕就是跑這個。
 #
 # 用法：
 #   .\nxn-update.ps1            安裝缺的、更新舊的
@@ -15,9 +15,9 @@ $ProgressPreference = 'SilentlyContinue'
 
 $Repo = 'Mono0713/ns2ios-shell'
 $AppRepo = 'Mono0713/Switch-Pad'
-$PlumeRepo = 'khcrysalis/Impactor'
+$PlumeRepo = 'claration/Impactor'
 $here = $PSScriptRoot
-# 程式檔、work、工具 在 nxn\程式\，遊戲在上一層（舊版全部在同一層，Switch Pad 開起來會自己搬）
+# 程式檔、work、工具 在 nxn\程式\，遊戲在上一層（舊版全部在同一層，PadSwitch 開起來會自己搬）
 $base = if ((Split-Path $here -Leaf) -eq '程式') { Split-Path $here -Parent } else { $here }
 $work = Join-Path $here 'work'
 $toolDir = Join-Path $here '工具'
@@ -41,6 +41,52 @@ function RunExe($exe, $arglist) {
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     return $code
+}
+
+function Get-PlumeVersion($exe) {
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return }
+    try {
+        $v = (& $exe --version 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $v -match '^plumesign (\d+\.\d+\.\d+)$') { return [version]$Matches[1] }
+    } catch { }
+}
+
+function Update-PlumeSign($exe, [switch]$Force) {
+    $installed = Get-PlumeVersion $exe
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$PlumeRepo/releases/latest" -Headers $headers
+    } catch {
+        if (-not $installed -or $Force) { throw }
+        Warn "無法查詢簽章工具新版，沿用 plumesign $installed"
+        return
+    }
+    if ($release.tag_name -notmatch '^v?(\d+\.\d+\.\d+)$') { throw "無法辨識 Impactor 版本：$($release.tag_name)" }
+    $latest = [version]$Matches[1]
+    if (-not $Force -and $installed -and $installed -ge $latest) {
+        Ok "plumesign $installed 已就緒"
+        return
+    }
+
+    $asset = $release.assets | Where-Object { $_.name -eq 'plumesign-windows-x86_64.exe' } | Select-Object -First 1
+    if (-not $asset -or $asset.digest -notmatch '^sha256:([0-9a-f]{64})$') {
+        throw "Impactor $($release.tag_name) 缺少簽章工具或 SHA-256"
+    }
+    $expected = $Matches[1]
+    $staged = Join-Path (Split-Path $exe -Parent) ("plumesign-" + [guid]::NewGuid() + ".exe")
+    try {
+        Download $asset.browser_download_url $staged "plumesign $latest"
+        if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $expected -or (Get-PlumeVersion $staged) -ne $latest) {
+            throw "plumesign $latest 驗證失敗，請重試更新"
+        }
+        if (Test-Path -LiteralPath $exe) {
+            [IO.File]::Replace($staged, $exe, [NullString]::Value)
+        } else {
+            Move-Item -LiteralPath $staged -Destination $exe
+        }
+    } finally {
+        Remove-Item -LiteralPath $staged, "$staged.part" -ErrorAction SilentlyContinue
+    }
+    Ok "plumesign 已更新到 $latest"
 }
 
 try {
@@ -158,21 +204,15 @@ try {
     # ---- plumesign（Impactor 的命令列版）和 Apple 裝置服務 ----
     Step '檢查簽章工具'
     $plume = Join-Path $toolDir 'plumesign.exe'
-    if ($Force -or -not (Test-Path $plume)) {
-        $pr = Invoke-RestMethod -Uri "https://api.github.com/repos/$PlumeRepo/releases/latest" -Headers $headers
-        $pa = $pr.assets | Where-Object { $_.name -eq 'plumesign-windows-x86_64.exe' } | Select-Object -First 1
-        if (-not $pa) { throw "Impactor $($pr.tag_name) 沒有 plumesign-windows-x86_64.exe" }
-        Download $pa.browser_download_url $plume "plumesign $($pr.tag_name)"
-    }
-    Ok 'plumesign 好了'
+    Update-PlumeSign $plume -Force:$Force
     # iPad 要透過 Apple 的裝置服務才連得到（「Apple 裝置」App 或 iTunes 會裝）
     if (-not (Get-Service -Name 'Apple Mobile Device Service' -ErrorAction SilentlyContinue)) {
         Warn '這台電腦沒有 Apple 行動裝置服務，iPad 會連不到。請從 Microsoft Store 安裝「Apple 裝置」（Apple Devices）或 iTunes。'
     }
 
-    # ---- Switch Pad 自己 ----
-    Step '檢查 Switch Pad'
-    # Switch Pad 有自己的 repo；問不到（或還沒有 release）就用殼 release 附的那份
+    # ---- PadSwitch 自己 ----
+    Step '檢查 PadSwitch'
+    # PadSwitch 有自己的 repo；問不到（或還沒有 release）就用殼 release 附的那份
     $appA = $null
     try {
         $ar = Invoke-RestMethod -Uri "https://api.github.com/repos/$AppRepo/releases/latest" -Headers $headers
@@ -181,11 +221,11 @@ try {
     if (-not $appA) { $appA = $rel.assets | Where-Object { $_.name -eq 'SwitchPad.zip' } | Select-Object -First 1 }
     $verFile = Join-Path $work 'app-version.txt'
     $appHave = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { '' }
-    if (-not $appA) { Write-Host '這個 release 沒有附 Switch Pad，跳過' }
-    elseif (-not $Force -and $appHave -eq $appA.updated_at) { Ok 'Switch Pad 已經是最新的' }
+    if (-not $appA) { Write-Host '這個 release 沒有附 PadSwitch，跳過' }
+    elseif (-not $Force -and $appHave -eq $appA.updated_at) { Ok 'PadSwitch 已經是最新的' }
     else {
         $az = Join-Path $work 'SwitchPad.zip'
-        Download $appA.browser_download_url $az 'Switch Pad'
+        Download $appA.browser_download_url $az 'PadSwitch'
         $anew = Join-Path $work 'app-new'
         if (Test-Path $anew) { Remove-Item -Recurse -Force $anew }
         Expand-Archive $az $anew
@@ -196,7 +236,7 @@ try {
         # 程式檔放在這個資料夾（程式\），圖示放到 工具\；遊戲、work、工具 裡的其他東西不碰
         foreach ($f in Get-ChildItem $from -File) {
             $dst = if ($f.Extension -eq '.ico') { Join-Path $toolDir $f.Name } else { Join-Path $here $f.Name }
-            # 沒變的檔案不用蓋（舊版 Switch Pad 開著時會鎖住自己的圖示）；圖示蓋不過去也不算失敗，下次再換
+            # 沒變的檔案不用蓋（舊版 PadSwitch 開著時會鎖住自己的圖示）；圖示蓋不過去也不算失敗，下次再換
             if ((Test-Path -LiteralPath $dst) -and (Get-FileHash -LiteralPath $dst).Hash -eq (Get-FileHash -LiteralPath $f.FullName).Hash) { continue }
             try { Copy-Item -LiteralPath $f.FullName -Destination $dst -Force -ErrorAction Stop }
             catch {
@@ -206,9 +246,9 @@ try {
         }
         Remove-Item -Recurse -Force $anew
         Set-Content $verFile $appA.updated_at
-        # Switch Pad 看到這個檔就會自己重開，換成新版
+        # PadSwitch 看到這個檔就會自己重開，換成新版
         if ($appHave) { Set-Content (Join-Path $work 'app-restart.flag') (Get-Date).ToString('s') }
-        Ok 'Switch Pad 更新好了'
+        Ok 'PadSwitch 更新好了'
     }
 
     Write-Host ''

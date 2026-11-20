@@ -1,5 +1,5 @@
 ﻿# nxn.ps1 - 一鍵：把一個遊戲資料夾打包成 IPA，再簽章並安裝到接著的 iPad。
-# 需要先準備好 work\（打包器、工具、Python 套件）：在 Switch Pad 按「安裝」，或執行 nxn-update.ps1。
+# 需要先準備好 work\（打包器、工具、Python 套件）：在 PadSwitch 按「安裝」，或執行 nxn-update.ps1。
 #
 # 用法：
 #   .\nxn.ps1 -Login                       第一次：登入 Apple ID（之後不用再登）
@@ -32,6 +32,8 @@ param(
     [switch]$GlSync,                 # OpenGL 遊戲：在 iPad 上建好記錄著色器的資料夾，把記下的拿回電腦（-Ipa 是遊戲庫）
     [switch]$ReuseIfFresh,           # 有 -Out 而且它比遊戲檔和記下的著色器都新，就沿用、不重新打包               # 把 App 在 iPad 上的記錄拿回電腦，列出殼還沒做的功能（紅字）
     [switch]$NoSaveBackup,           # 安裝前不自動備份存檔
+    [switch]$SignIfNeeded,           # PadSwitch 的「同步」：App 沒換過、一天內簽過、iPad 上也還在就不重簽，只傳資料、存檔和著色器
+    [string]$OrderFile = '',         # 遊戲順序（title ID 的 JSON 陣列）：傳到 iPad 的 Documents/game-order.json，選遊戲畫面照這個順序排
     [switch]$NoPause
 )
 $ErrorActionPreference = 'Stop'
@@ -50,17 +52,17 @@ function Lap($what) {
     if ($script:stepAt) { $t = New-TimeSpan $script:stepAt (Get-Date); Write-Host ("（{0}花了 {1:m\:ss}）" -f $what, $t) -ForegroundColor DarkGray }
     $script:stepAt = Get-Date
 }
-# 進度狀態檔：work\status\run-<PID>.json，Switch Pad 主視窗的「背景工作」卡片每幾秒讀一次（不管是 Switch Pad 自己開的、
+# 進度狀態檔：work\status\run-<PID>.json，PadSwitch 主視窗的「背景工作」卡片每幾秒讀一次（不管是 PadSwitch 自己開的、
 # 背景佇列 nxn-queue.ps1 開的，還是直接在命令列跑的都看得到）。寫不進去就算了，不影響打包
 $script:stDir = Join-Path $PSScriptRoot 'work\status'
 $env:NXN_STATUS_DIR = $script:stDir   # romfs_data.py push 寫 push-<PID>.json 到同一個資料夾
-$script:st = [ordered]@{ kind = 'run'; pid = $PID; game = ''; dir = ''; what = ''; step = ''; phase = ''; state = 'running'
+$script:st = [ordered]@{ kind = 'run'; pid = $PID; job = "$env:NXN_JOB"; game = ''; dir = ''; what = ''; step = ''; phase = ''; state = 'running'
                          started = (Get-Date).ToString('o'); stepAt = (Get-Date).ToString('o'); updated = ''; ended = ''; message = '' }
 $script:stWrote = [datetime]::MinValue
 $script:lastErr = ''
 function Write-Status([switch]$Now) {
     if (-not $Now -and ((Get-Date) - $script:stWrote).TotalSeconds -lt 2) { return }
-    # Switch Pad 剛好在讀時換不掉檔案：重要的（-Now，換步驟、結束）多試幾次
+    # PadSwitch 剛好在讀時換不掉檔案：重要的（-Now，換步驟、結束）多試幾次
     for ($i = 0; $i -lt $(if ($Now) { 5 } else { 1 }); $i++) {
         try {
             if (-not (Test-Path -LiteralPath $script:stDir)) { New-Item -ItemType Directory -Force -Path $script:stDir | Out-Null }
@@ -116,7 +118,7 @@ $here = $PSScriptRoot
 # 程式檔在 nxn\程式\，遊戲和合包在上一層（舊版全部在同一層）
 $base = if ((Split-Path $here -Leaf) -eq '程式') { Split-Path $here -Parent } else { $here }
 $root = Join-Path $here 'work'
-# prod.keys：Switch Pad 自己的 → Ryujinx → yuzu 系的模擬器，第一個找到的
+# prod.keys：PadSwitch 自己的 → Ryujinx → yuzu 系的模擬器，第一個找到的
 function Find-Keys {
     $c = @((Join-Path $root 'prod.keys'), (Join-Path $base 'prod.keys'), "$env:APPDATA\Ryujinx\system\prod.keys")
     foreach ($emu in 'yuzu', 'suyu', 'sudachi', 'citron', 'eden', 'torzu') { $c += "$env:APPDATA\$emu\keys\prod.keys" }
@@ -214,24 +216,33 @@ try {
     if (-not $GameDir -and -not $Ipa) { throw '請用 -GameDir 或 -Ipa 指定要打包或安裝的東西。' }
     if ($saveMode -and -not $Ipa) { throw '備份或還原存檔要用 -Ipa 指定是哪個 App。' }
 
-    # ---- 先確認登入狀態，不然白打包一小時 ----
-    if (-not $PackOnly -and -not $saveMode) {
+    # ---- 先確認登入狀態，不然白打包一小時（同步時要重簽才查，在連上 iPad 之後） ----
+    function Check-AppleId {
         Step '檢查 Apple ID'
-        # plumesign 的記錄寫在 stderr，Stop 模式下會被當成錯誤，所以這裡改用 Continue 收輸出
-        $ErrorActionPreference = 'Continue'
-        $acct = (& $plume account list 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } }) -join "`n"
-        $acctCode = $LASTEXITCODE
-        $ErrorActionPreference = 'Stop'
-        $mail = [regex]::Match($acct, '[\w.+-]+@[\w-]+(\.[\w-]+)+').Value
-        if ($acctCode -or -not $mail) { Write-Host $acct.Trim(); throw "還沒登入 Apple ID，請先執行：`n  .\nxn.ps1 -Login" }
-        Write-Host "已登入：$mail"
+        # 帳號清單由 plumesign 的 info 記錄輸出到 stderr。
+        $savedLog = $env:RUST_LOG
+        try {
+            $env:RUST_LOG = 'info'
+            $ErrorActionPreference = 'Continue'
+            $acct = (& $plume account list 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } }) -join "`n"
+            $acctCode = $LASTEXITCODE
+        } finally {
+            $env:RUST_LOG = $savedLog
+        }
+        if ($acctCode -ne 0) { throw "無法讀取 Apple ID 登入狀態（結束碼 $acctCode）。" }
+        if ($acct -match 'No accounts found') { throw "還沒登入 Apple ID：按 PadSwitch 右上角的「登入 Apple ID」（命令列：.\nxn.ps1 -Login）" }
+        if ($acct -notmatch '(?im)[\w.+-]+@[\w-]+(?:\.[\w-]+)+[ \t]+\(selected\)[ \t]*\r?$') {
+            throw '簽章工具沒有回報已選用的 Apple ID。請在 PadSwitch 右上角確認目前帳號。'
+        }
+        Write-Host '已確認 Apple ID 登入'
     }
+    if (-not $PackOnly -and -not $saveMode -and -not $SignIfNeeded) { Check-AppleId }
 
     # ---- 打包 ----
     if (-not $Ipa) {
         if (-not (Test-Path $GameDir)) { throw "找不到遊戲資料夾：$GameDir" }
         $GameDir = (Resolve-Path $GameDir).Path
-        if (-not $Keys -or -not (Test-Path $Keys)) { throw "找不到 prod.keys。把它拖進 Switch Pad 的視窗，或用 -Keys 指定。" }
+        if (-not $Keys -or -not (Test-Path $Keys)) { throw "找不到 prod.keys。把它拖進 PadSwitch 的視窗，或用 -Keys 指定。" }
         $Keys = (Resolve-Path $Keys).Path
 
         $srcDir = Join-Path $root 'src'
@@ -269,16 +280,18 @@ try {
         }
         $packer = Join-Path $srcDir 'scripts\nxn_pack.py'
         foreach ($p in @($srcDir, $shellZip, $packer)) {
-            if (-not (Test-Path $p)) { throw "還沒準備好打包器（缺 $p），請先在 Switch Pad 按「安裝」。" }
+            if (-not (Test-Path $p)) { throw "還沒準備好打包器（缺 $p），請先在 PadSwitch 按「安裝」。" }
         }
         $nx = Get-ChildItem (Join-Path $root 'tools') -Recurse -Filter 'nx_extract.exe' | Select-Object -First 1
-        if (-not $nx) { throw "在 $root\tools 找不到 nx_extract.exe，請先在 Switch Pad 按「安裝」。" }
+        if (-not $nx) { throw "在 $root\tools 找不到 nx_extract.exe，請先在 PadSwitch 按「安裝」。" }
 
-        # OpenGL 遊戲、執行時才編譯著色器的遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
+        # OpenGL 遊戲、執行時才編譯著色器的遊戲在 iPad 上記下的著色器（saves_data.py glsync 拿回 遊戲資料夾\著色器紀錄，舊版在 合包\GL著色器\<title ID>）：有就交給打包器翻成 Metal
         $glArg = @(); $glDir = $null
         $tidGuess = Get-ChildItem -LiteralPath $GameDir -File | Where-Object { $_.Name -match '\[(01[0-9A-Fa-f]{11}000)\]' } | Sort-Object Length -Descending | Select-Object -First 1
         if ($tidGuess -and $tidGuess.Name -match '\[(01[0-9A-Fa-f]{11}000)\]') {
-            $glDir = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
+            $glDir = Join-Path $GameDir '著色器紀錄'
+            $glOld = Join-Path $base "合包\GL著色器\$($Matches[1].ToUpper())"
+            if (-not (Test-Path -LiteralPath $glDir) -and (Test-Path -LiteralPath $glOld)) { $glDir = $glOld }
             $glN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.(vert|frag)$' }).Count
             # 執行時才用 GLSLC 編譯著色器的 NVN 遊戲（Unrailed 2）記下的是 <hash>.glslc，放在同一個資料夾
             $glslcN = @(Get-ChildItem -LiteralPath $glDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-f]{16}\.glslc$' }).Count
@@ -456,12 +469,12 @@ try {
     if ($PackOnly) { Finish "打包完成：$Ipa" Green; return }
 
     # ---- 簽章並安裝 ----
-    if ($GlSync) { Step '同步 OpenGL 著色器（iPad 要用 USB 接著並解鎖）' }
+    if ($GlSync) { Step '拿回 iPad 記下的著色器（iPad 要用 USB 接著並解鎖）' }
     elseif ($PullLogs) { Step '讀 iPad 記錄（iPad 要用 USB 接著並解鎖）' }
     elseif ($SaveMigrate) { Step '搬舊 App 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
     elseif ($SaveRestore) { Step '還原 iPad 存檔（iPad 要用 USB 接著並解鎖，遊戲先在 iPad 上關掉）' }
     elseif ($SaveBackup) { Step '備份 iPad 存檔（iPad 要用 USB 接著並解鎖）' }
-    else { Step '簽章並安裝到 iPad（iPad 要用 USB 接著並解鎖；第一次會問要不要信任這台電腦）' }
+    else { Step '連接 iPad（iPad 要用 USB 接著並解鎖；第一次會問要不要信任這台電腦）' }
     # plumesign 的 --udid 其實要的是 Apple 行動裝置服務（usbmuxd）給這次連線的編號（1、2、3…），
     # 不是真的 UDID，所以直接問服務（127.0.0.1:27015）現在接著哪些裝置，免得 plumesign 每次都問「Select a device」
     function Get-MuxDevices {
@@ -594,24 +607,28 @@ try {
         return ''
     }
     # ---- 存檔：裝之前先把 iPad 上的備份到電腦（免費帳號過期、App 被刪掉時還救得回來），或把一份備份還原回去 ----
-    # 遊戲的備份在 <遊戲資料夾>\存檔備份\，合包的在 合包\存檔備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
+    # 遊戲的備份在 <遊戲資料夾>\存檔備份\，遊戲庫的在 備份\iPad存檔\，其他合包在 備份\<合包名稱>\；一樣的存檔不會重複存，最多留 30 份
     $saveTool = Join-Path $here 'saves_data.py'
     $ipaDir = Split-Path $Ipa -Parent
     # 雙向同步的存檔資料夾（saves_data.py sync）：每款遊戲資料夾裡的 存檔\，合包和遊戲庫是 遊戲\ 底下每一款，單款 App 是它自己的資料夾
-    $syncGames = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $base '遊戲' } else { $ipaDir }
-    $saveRoot = if ((Split-Path $ipaDir -Leaf) -eq '合包') { Join-Path $ipaDir ('存檔備份\' + [IO.Path]::GetFileNameWithoutExtension($Ipa)) } else { Join-Path $ipaDir '存檔備份' }
+    $isPack = (Split-Path $ipaDir -Leaf) -in '遊戲庫', '合包'   # 合包\ 是舊名（pc_layout.py 會搬成 遊戲庫\）
+    $syncGames = if ($isPack) { Join-Path $base '遊戲' } else { $ipaDir }
+    $packName = [IO.Path]::GetFileNameWithoutExtension($Ipa)
+    # 自己丟進 桌面\存檔（或 Switch PAD\存檔）的存檔：同步前照遊戲名稱或 title ID 放進各遊戲的 存檔\，再跟著同步到 iPad（saves_data.py import_inbox）
+    $inboxArgs = @(); if ($isPack) { foreach ($ib in @((Join-Path (Split-Path $base -Parent) '存檔'), (Join-Path $base '存檔'))) { if (Test-Path -LiteralPath $ib) { $inboxArgs += @('--inbox', $ib) } } }
+    $saveRoot = if (-not $isPack) { Join-Path $ipaDir '存檔備份' } elseif ($packName -eq '遊戲庫') { Join-Path $base '備份\iPad存檔' } else { Join-Path $base ('備份\' + $packName) }
     if ($saveMode) {
         if (-not (Test-Path $saveTool)) { throw "找不到 $saveTool，請在設定按「更新」或「重新安裝」。" }
         $tpy = Transfer-Python
         if (-not $tpy) { throw '傳檔工具（pymobiledevice3）裝不起來，讀不到 iPad 上的存檔。' }
         if ($GlSync) {
-            $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial)
+            $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--games', (Join-Path $base '遊戲'), '--udid', $dev.Serial)
             if ($c -and $c -ne 3) { Warn "沒拿到 iPad 上記下的著色器（結束碼 $c），照舊打包" }
             Finish '著色器同步好了' Green
             return
         }
         if ($PullLogs) {
-            $logRoot = Join-Path $ipaDir 'iPad記錄'
+            $logRoot = if ($isPack) { Join-Path $base '記錄\iPad記錄' } else { Join-Path $ipaDir 'iPad記錄' }
             $la = @('-I', $saveTool, 'logs', $Ipa, $logRoot, '--udid', $dev.Serial)
             if ($ReportTid) { $la += @('--report', $ReportTid, '--zip', $ReportZip); if ($ReportExtra) { $la += @('--extra', $ReportExtra) } }
             $c = RunExe $tpy $la
@@ -640,7 +657,7 @@ try {
             $c = RunExe $tpy @('-I', $saveTool, 'backup', $Ipa, $saveRoot, '--udid', $dev.Serial)
             if (-not $c) {
                 Step '和電腦的存檔資料夾雙向同步'
-                $sc = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
+                $sc = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--json', (Join-Path $script:stDir 'save-sync.json')) + $inboxArgs + @('--udid', $dev.Serial))
                 if ($sc) { Warn "存檔同步沒做完（結束碼 $sc），備份是好的" }
             }
         }
@@ -649,7 +666,26 @@ try {
         Finish $(if ($SaveRestore) { '存檔還原好了，在 iPad 上打開遊戲就是這份存檔。' } else { "存檔備份在 $saveRoot" }) Green
         return
     }
+    # ---- 要不要重簽：同步時 App 沒換過、一天內簽過、iPad 上也還裝著，就不用（每次同步都簽太花時間，也沒必要） ----
+    $needSign = $true; $signedAt = $null
+    try {
+        $db = Join-Path $root 'installed.json'
+        if (Test-Path $db) {
+            $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -in '遊戲庫', '合包') { $Ipa } else { Split-Path $Ipa -Parent }
+            $rec = (Get-Content $db -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | Where-Object { $_.Name -eq $key } | Select-Object -First 1
+            if ($rec -and $rec.Value.ipa -eq $Ipa) { $signedAt = [datetime]$rec.Value.time }
+        }
+    } catch { }
+    if ($SignIfNeeded -and $signedAt -and $signedAt -ge (Get-Item -LiteralPath $Ipa).LastWriteTime.AddMinutes(-1) -and ((Get-Date) - $signedAt).TotalHours -lt 24) {
+        # 問一下 iPad 上還有沒有這個 App（被刪掉的話要重裝）；順便記下 iPad 的空間給 PadSwitch 的空間圖
+        $tpy = Transfer-Python
+        $sp = $null
+        if ($tpy) { $q = Quiet $tpy @('-I', $dataTool, 'space', $Ipa, '--udid', $dev.Serial); if (-not $q.Code) { try { $sp = $q.Out | ConvertFrom-Json } catch { } } }
+        if ($sp -and $sp.installed) { $needSign = $false }
+    }
+    if ($SignIfNeeded -and $needSign) { Check-AppleId }
     if (-not $NoSaveBackup -and (Test-Path $saveTool)) {
+        Step '備份 iPad 存檔'
         Write-Host '先把 iPad 上的存檔備份到電腦'
         $tpy = Transfer-Python
         if ($tpy) {
@@ -697,6 +733,26 @@ try {
             Lap '做小 App'
         }
     }
+    if ((Test-Path $dataTool) -and (Select-String -LiteralPath $dataTool -SimpleMatch -Quiet -Pattern "add_parser('prune')")) {
+        $tpy = Transfer-Python
+        if ($tpy) {
+            Step '檢查 iPad 空間，先移除遊戲庫已取消的資料'
+            $argsPrune = @('-I', $dataTool, 'prune', $Ipa, '--udid', $dev.Serial)
+            if ($split) { $argsPrune += '--check-transfer' }
+            $c = RunExe $tpy $argsPrune
+            if ($c -eq 4) { throw 'iPad 空間不足。請查看上方的傳輸量、可回收量與差額。' }
+            if ($c -and $split) { throw 'iPad 空間預檢未完成，請解鎖 iPad 後查看記錄再同步。' }
+            if ($c) { Warn "先刪拿掉的遊戲沒做成（結束碼 $c）" }
+            Lap '檢查 iPad 空間'
+        }
+    }
+    $code = 0
+    if (-not $needSign) {
+        Step '重簽'
+        $left = 7 - ((Get-Date) - $signedAt).TotalDays
+        Write-Host ("App 不用重簽：{0:MM/dd HH:mm} 簽過、App 沒換過，還能用 {1:N1} 天" -f $signedAt, $left)
+    } else {
+    Step '簽章並安裝到 iPad'
     $signArgs = @('sign', '--package', $signIpa, '--apple-id', '--register-and-install')
     $code = Run-Sign ($signArgs + @('--udid', $dev.Id))
     if ($code -and $script:signOut -match '(?i)device.{0,20}not found') {
@@ -707,11 +763,14 @@ try {
     }
     Lap '簽章並上傳安裝'
     if ($code -and $script:signOut -match '(?i)no account selected|please login|unauthori[sz]ed|re-?authenticat') {
-        throw "Apple ID 要重新登入：按右上角的「登入 Apple ID」，登入後再按一次安裝。IPA 本身是好的：$Ipa"
+        throw "Apple ID 要重新登入：按右上角的「登入 Apple ID」，登入後再按一次「同步」。IPA 本身是好的：$Ipa"
+    }
     }
     if (-not $code -and $split) {
         Step '傳遊戲資料到 iPad'
-        $c = RunExe $py @('-I', $dataTool, 'push', $Ipa, '--udid', $dev.Serial)
+        $pa = @('-I', $dataTool, 'push', $Ipa, '--udid', $dev.Serial)
+        if ($OrderFile -and (Test-Path -LiteralPath $OrderFile) -and (Select-String -LiteralPath $dataTool -SimpleMatch -Quiet -Pattern "'--order'")) { $pa += @('--order', $OrderFile) }
+        $c = RunExe $py $pa
         if ($c) {
             throw @"
 App 裝好了，但遊戲資料沒傳完（結束碼 $c），現在打開會找不到遊戲檔。
@@ -731,23 +790,23 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
     }
 
     # 記下這個遊戲最後裝的是哪個 IPA，給「全部重簽」用（同一個資料夾只記最新一次）
-    try {
+    if ($needSign) { try {
         $db = Join-Path $root 'installed.json'
         $map = [ordered]@{}
         if (Test-Path $db) {
             (Get-Content $db -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $map[$_.Name] = $_.Value }
         }
         # 合包資料夾裡每包是不同的 App，用 IPA 本身當鍵；遊戲資料夾只記最新一次
-        $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -eq '合包') { $Ipa } else { Split-Path $Ipa -Parent }
+        $key = if ((Split-Path (Split-Path $Ipa -Parent) -Leaf) -in '遊戲庫', '合包') { $Ipa } else { Split-Path $Ipa -Parent }
         $map[$key] = [ordered]@{ ipa = $Ipa; time = (Get-Date).ToString('s') }
         $map | ConvertTo-Json -Depth 3 | Set-Content $db -Encoding UTF8
-    } catch { Warn "記錄安裝紀錄失敗：$($_.Exception.Message)" }
+    } catch { Warn "記錄安裝紀錄失敗：$($_.Exception.Message)" } }
 
     # 拖到遊戲卡的存檔（模擬器、JKSV、Checkpoint 匯出的）：在 <遊戲資料夾>\存檔待傳\，title ID 在 存檔待傳.txt。
     # 裝好後放進 iPad 上那款的存檔（saves_data.py put：先備份 App 的存檔，只換那一款），放好的搬到 存檔備份\已匯入\<時間>，
     # 之後重簽或更新不會再蓋一次。遊戲庫和合包：遊戲\ 裡每款有待傳的都試，不在這個 App 裡的跳過。沒放成功不算安裝失敗，待傳的留著下次再試。
     $saveNote = ''
-    $gameDirs = if ((Split-Path $ipaDir -Leaf) -eq '合包') { @(Get-ChildItem -LiteralPath (Join-Path $base '遊戲') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) } else { @($ipaDir) }
+    $gameDirs = if ($isPack) { @(Get-ChildItem -LiteralPath (Join-Path $base '遊戲') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) } else { @($ipaDir) }
     $pending = @($gameDirs | Where-Object { Test-Path -LiteralPath (Join-Path $_ '存檔待傳') })
     if ($pending.Count -and (Test-Path $saveTool)) {
         $tpy = Transfer-Python
@@ -763,7 +822,7 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
             if ($slot) { $pa += @('--slot', $slot) }
             $c = RunExe $tpy $pa
             if ($c -eq 5) { Write-Host '這個 App 裡沒有這款，跳過'; continue }
-            if ($c) { Warn "存檔沒放進去（結束碼 $c），待傳的還留著，下次裝到 iPad 會再試"; $saveNote = '有存檔沒放進 iPad，看上面的記錄'; continue }
+            if ($c) { Warn "存檔沒放進去（結束碼 $c），待傳的還留著，下次同步會再試"; $saveNote = '有存檔沒放進 iPad，看上面的記錄'; continue }
             $done = Join-Path $gd ('存檔備份\已匯入\' + (Get-Date).ToString('yyyyMMdd-HHmmss'))
             New-Item -ItemType Directory -Force -Path (Split-Path $done -Parent) | Out-Null
             Move-Item -LiteralPath (Join-Path $gd '存檔待傳') -Destination $done
@@ -778,18 +837,19 @@ iPad 保持接著、解鎖，再按一次安裝就會重新傳一次。
         $tpy = Transfer-Python
         if ($tpy) {
             Step '和電腦的存檔資料夾雙向同步'
-            $c = RunExe $tpy @('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--udid', $dev.Serial)
-            if ($c) { Warn "存檔同步沒做完（結束碼 $c），下次裝到 iPad 會再同步"; $saveNote = '存檔同步沒做完，看上面的記錄' }
+            $c = RunExe $tpy (@('-I', $saveTool, 'sync', $Ipa, $syncGames, $saveRoot, '--json', (Join-Path $script:stDir 'save-sync.json')) + $inboxArgs + @('--udid', $dev.Serial))
+            if ($c) { Warn "存檔同步沒做完（結束碼 $c），下次同步會再同步"; $saveNote = '存檔同步沒做完，看上面的記錄' }
         }
     }
 
     # OpenGL 遊戲：先在 iPad 上建好記錄著色器的資料夾（殼只寫進已經有的資料夾），順便拿回上次記下的
     if (Test-Path $saveTool) {
         $tpy = Transfer-Python
-        if ($tpy) { $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--udid', $dev.Serial) }
+        if ($tpy) { Step '拿回 iPad 記下的著色器'; $c = RunExe $tpy @('-I', $saveTool, 'glsync', $Ipa, (Join-Path $ipaDir 'GL著色器'), '--games', (Join-Path $base '遊戲'), '--udid', $dev.Serial) }
     }
     if ($saveNote) { Warn $saveNote }
-    Finish "裝好了：$Ipa 已經在 iPad 上，可以直接開。（免費帳號 7 天後要重簽）" Green
+    if ($needSign) { Finish "裝好了：$Ipa 已經在 iPad 上，可以直接開。（免費帳號 7 天後要重簽）" Green }
+    else { Finish ("同步好了（App 不用重簽，還能用 {0:N1} 天）" -f (7 - ((Get-Date) - $signedAt).TotalDays)) Green }
 } catch {
     Finish "出錯了：$($_.Exception.Message)" Red
     exit 1

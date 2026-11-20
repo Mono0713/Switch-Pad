@@ -1,4 +1,4 @@
-"""Read a game's icon straight out of its NSP / XCI / NSZ / XCZ, so a game dropped into Switch Pad shows its picture in a
+"""Read a game's icon straight out of its NSP / XCI / NSZ / XCZ, so a game dropped into PadSwitch shows its picture in a
 second or two instead of after it has been unpacked.
 
 Only the Control NCA is opened (it is small, a few hundred KB, and NSZ leaves it uncompressed): its header is decrypted with

@@ -16,7 +16,7 @@ backed up first, so a copy in the wrong direction loses nothing.
   saves_data.py logs    <ipa> <logs folder> [--udid UDID] [--report TITLEID --zip FILE [--extra DIR]]
   saves_data.py glsync  <ipa> <shaders folder> [--udid UDID]
 
-put places one game's save from the PC (what Switch Pad takes when a save is dropped on a game card: an emulator's, JKSV's or
+put places one game's save from the PC (what PadSwitch takes when a save is dropped on a game card: an emulator's, JKSV's or
 Checkpoint's export, which are the same plain tree the shell keeps) as that game's save: save/ in a one-game app, save/<title
 ID> in the library or a package, which must have that game (exit 5 when it does not). The app's saves are backed up first, as
 restore does, and only that one game's folder (and its .work / .new) is replaced. With --slot the save in use is not touched: the
@@ -46,7 +46,7 @@ last two runs in Documents/logs/) to <logs folder>/<time>/ and prints what the h
 does not have yet are what a game stops on, and this is the list to implement next (Ryujinx's HLE, MIT, is the reference).
 With --report it then packs one game's problem report into --zip: that game's logs from this pull (its last two runs, its last two
 crashes kept apart by the shell as logs/<title ID>.crash*.txt, and log.txt / log.prev.txt when that game ran last), a summary of
-their red lines and crash lines, and the files in --extra (Switch Pad's diagnostics, the packing log, the game profile). E-mail
+their red lines and crash lines, and the files in --extra (PadSwitch's diagnostics, the packing log, the game profile). E-mail
 addresses are masked in every text file. Nothing else from the iPad, no save, key or game file, goes into it.
 
 migrate moves saves from the apps made before the game library (one app per game, org.nxnative.<title ID>, and the merged
@@ -72,6 +72,9 @@ import re
 import shutil
 import sys
 import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ipad_layout as IL  # noqa: E402
 
 FOLDERS = ('save', 'save_device', 'save.slots')
 DIGEST = '.digest'
@@ -107,11 +110,28 @@ def digest_of(folder):
     return h.hexdigest()
 
 
+STAMP = re.compile(r'(\d{8}-\d{6})|(\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2})')
+TAGS = {'before-sync': '同步前', 'before-import': '匯入前', 'before-restore': '還原前', 'before-migrate': '搬舊App前'}
+LAYOUT_MARK = '.layout'   # in a backup of the new layout (存檔/<game>/<save>/ at its top): "2"
+
+
+def backup_time(name):
+    m = STAMP.match(name)
+    if not m: return None
+    return datetime.datetime.strptime(m.group(0), '%Y%m%d-%H%M%S' if m.group(1) else '%Y-%m-%d %H.%M.%S')
+
+
+def stamp_name(now, tag=''):
+    """A backup folder's name a person can read: 2026-11-20 11.30.05 同步前"""
+    t = TAGS.get(tag, re.sub(r'[\\/:*?"<>|]', '_', tag))
+    return now.strftime('%Y-%m-%d %H.%M.%S') + (' ' + t if t else '')
+
+
 def backups(root):
-    """The finished backups in root, oldest first."""
+    """The finished backups in root, oldest first (both the old 20261101-012757 names and the new ones)."""
     if not os.path.isdir(root): return []
-    return sorted(d for d in os.listdir(root) if re.match(r'\d{8}-\d{6}', d) and not d.endswith('.part')
-                  and os.path.isdir(os.path.join(root, d)))
+    return sorted((d for d in os.listdir(root) if backup_time(d) and not d.endswith('.part') and os.path.isdir(os.path.join(root, d))),
+                  key=lambda d: (backup_time(d), d))
 
 
 def stamp_of(st):
@@ -157,17 +177,22 @@ async def docs_base(afc):
 
 
 async def backup(afc, root, keep=30, tag='', now=None):
-    """Copy the app's saves into a new folder under root. Returns its path, or None when there was nothing new."""
+    """Copy the app's saves into a new folder under root. Returns its path, or None when there was nothing new. In the new
+    layout the folder looks like the iPad's 存檔/: <game>/<save>/ (and a hidden .layout saying so)."""
     base = await docs_base(afc)
+    L = await IL.IPad.load(afc)
     present = [f for f in FOLDERS if await afc.exists(base + '/' + f)]
+    if L.v2 and await afc.exists(L.p(IL.SAVE)): present.append(IL.SAVE)
     if not present:
         print('iPad 上還沒有這款的存檔')
         return None
-    stamp = (now or datetime.datetime.now()).strftime('%Y%m%d-%H%M%S') + ('-' + re.sub(r'[^\w-]', '_', tag) if tag else '')
+    stamp = stamp_name(now or datetime.datetime.now(), tag)
     part = os.path.join(root, stamp + '.part')
     shutil.rmtree(part, ignore_errors=True)
     n = 0
-    for f in present: n += await pull_tree(afc, base + '/' + f, os.path.join(part, f))
+    for f in present: n += await pull_tree(afc, base + '/' + f, part if f == IL.SAVE else os.path.join(part, f))
+    if IL.SAVE in present:
+        with open(os.path.join(part, LAYOUT_MARK), 'w') as fh: fh.write('2')
     dg = digest_of(part)
     old = backups(root)
     if old and os.path.isfile(os.path.join(root, old[-1], DIGEST)):
@@ -179,7 +204,7 @@ async def backup(afc, root, keep=30, tag='', now=None):
     with open(os.path.join(part, DIGEST), 'w') as fh: fh.write(dg)
     final = os.path.join(root, stamp)
     k = 1
-    while os.path.exists(final): k += 1; final = os.path.join(root, '%s-%d' % (stamp, k))
+    while os.path.exists(final): k += 1; final = os.path.join(root, '%s (%d)' % (stamp, k))
     os.replace(part, final)
     print('存檔備份好了：%s（%d 個檔案）' % (final, n))
     # keep the newest `keep`; a backup made before a restore is kept like any other
@@ -191,16 +216,28 @@ async def backup(afc, root, keep=30, tag='', now=None):
 async def restore(afc, src, root, now=None):
     """Put the backup folder src back on the iPad, after backing up what is there now."""
     have = [f for f in FOLDERS if os.path.isdir(os.path.join(src, f))]
-    if not have: raise SystemExit('這個資料夾裡沒有存檔（save\\）：%s' % src)
+    new = os.path.isfile(os.path.join(src, LAYOUT_MARK))
+    if not have and not new: raise SystemExit('這個資料夾裡沒有存檔：%s' % src)
+    L = await IL.IPad.load(afc)
+    if new and not L.v2:
+        raise SystemExit('這份備份是新版 SwitchPad 的存檔資料夾，iPad 上還是舊版：先在 iPad 打開一次新版 SwitchPad 再還原')
     await backup(afc, root, keep=0, tag='before-restore', now=now)
     base = await docs_base(afc)
+    if L.v2 and await afc.exists(L.p(IL.SAVE)): await afc.rm(L.p(IL.SAVE), force=True)
+    if new:
+        n = 0
+        for g in sorted(os.listdir(src)):
+            if os.path.isdir(os.path.join(src, g)): n += await push_tree(afc, os.path.join(src, g), L.p(IL.SAVE, g))
+        print('存檔還原好了：%s（%d 個檔案）' % (os.path.basename(os.path.normpath(src)), n))
+        return
+    # an old backup (save/<title ID>...): put back where an old shell kept it; the new shell moves it into 存檔/ when it opens
     for f in FOLDERS:
         p = base + '/' + f
         for leftover in (p, p + '.work', p + '.new'):
             if await afc.exists(leftover): await afc.rm(leftover, force=True)
     n = 0
     for f in have: n += await push_tree(afc, os.path.join(src, f), base + '/' + f)
-    print('存檔還原好了：%s（%d 個檔案）' % (os.path.basename(os.path.normpath(src)), n))
+    print('存檔還原好了：%s（%d 個檔案）%s' % (os.path.basename(os.path.normpath(src)), n, '，在 iPad 打開一次 SwitchPad 就會出現在 存檔/ 裡' if L.v2 else ''))
 
 
 def save_dest(ipa, tid):
@@ -248,13 +285,27 @@ def next_slot(data, names):
     return max(ids + [int(data.get('active', 1) or 1)]) + 1
 
 
-async def put(afc, src, root, dest, slot='', now=None):
+async def put(afc, src, root, dest, slot='', now=None, tid='', names=None):
     """Replace the save folder dest (relative to Documents) with the PC folder src, after backing up the app's saves; with slot,
     add src as a new save slot of that game named slot instead, leaving the save in use as it is."""
     files = local_files(src)
     if not files: raise SystemExit('這個資料夾裡沒有檔案：%s' % src)
     await backup(afc, root, keep=0, tag='before-import', now=now)
     base = await docs_base(afc)
+    L = await IL.IPad.load(afc, names)
+    if L.v2 and tid:   # 存檔/<game>/<save>/: a new save is a new folder; else the save in use is replaced
+        g = L.saves(tid); await L.save_folders()
+        if slot:
+            n = IL.free_name(slot, await IL.save_names(afc, g))
+            k = await push_slot(afc, src, g + '/' + n)
+            await IL.write_state(afc, g, add=[n])
+            print('存檔放進 iPad 了：%d 個檔案 → 存檔/%s/%s（在遊戲開始前的設定畫面「存檔」裡切換）' % (k, L.folder(tid), n))
+        else:
+            n = await IL.save_in_use(afc, g) or '存檔 1'
+            k = await push_slot(afc, src, g + '/' + n)
+            await IL.write_state(afc, g, active=n, add=[n])
+            print('存檔放進 iPad 了：%d 個檔案 → 存檔/%s/%s（取代使用中的存檔）' % (k, L.folder(tid), n))
+        return
     if slot:
         sd = base + '/' + dest + SLOTS
         data = await read_slots(afc, sd)
@@ -278,7 +329,7 @@ async def put(afc, src, root, dest, slot='', now=None):
 SYNC_DIR = '存檔'
 SYNC_PARTIAL = 6
 SYNC_STATE = '.sync.json'
-JUNK = ('desktop.ini', 'thumbs.db', '.ds_store')
+JUNK = ('desktop.ini', 'thumbs.db', '.ds_store', 'edizon_save_metadata.json')
 
 
 def clean_files(folder):
@@ -483,12 +534,55 @@ async def sync_game(afc, base, dest, gdir, root, scratch, now, backed):
     return n_up, n_down, busy
 
 
-async def sync(afc, ipa, games, root, now=None):
+def write_sync_summary(path, games, up, down, failed, actions=()):
+    if not path:
+        return
+    temp = path + '.tmp'
+    try:
+        with open(temp, 'w', encoding='utf-8') as fh:
+            json.dump({'games': games, 'to_ipad': up, 'to_pc': down, 'failed': failed, 'actions': actions},
+                      fh, ensure_ascii=False, indent=1)
+        os.replace(temp, path)
+    except OSError as exc:
+        print('[!] 無法儲存這次的同步摘要：%s' % exc)
+
+
+async def sync_v2(afc, L, ipa, games, now, backed, json_out=None):
+    import tempfile
+    del ACTIONS[:]
+    if [n for n in await IL._listdir(afc, L.p('save')) if IL.TID.match(n[:16])]:
+        # saves an older Switch Pad or a restore put in the old place: the shell moves them into 存檔/ when it opens
+        print('iPad 上還有舊位置的存檔（save/）等 SwitchPad 搬：先在 iPad 打開一次 SwitchPad，再同步存檔')
+        return SYNC_PARTIAL
+    pairs = game_folders(ipa, games)
+    up = down = 0
+    failed = []
+    for tid, g in pairs:
+        with tempfile.TemporaryDirectory() as scratch:
+            try: a, b, busy = await sync_game_v2(afc, L, tid, g, scratch, now, backed)
+            except (OSError, ValueError) as e:
+                print('%s 同步失敗：%s' % (os.path.basename(g), e)); failed.append(os.path.basename(g)); act(L.folder(tid), '', 'failed', error=str(e)); continue
+            up += a; down += b
+            if busy: failed.append(os.path.basename(g))
+    await L.save_folders()
+    print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
+    write_sync_summary(json_out, len(pairs), up, down, failed, ACTIONS)
+    if failed:
+        print('沒同步完的：%s' % '、'.join(failed))
+        return SYNC_PARTIAL
+    return 0
+
+
+async def sync(afc, ipa, games, root, now=None, json_out=None):
     now = now or datetime.datetime.now()
     base = await docs_base(afc)
     done = []
     async def backed():
         if not done: await backup(afc, root, keep=0, tag='before-sync', now=now); done.append(1)
+    if save_dest(ipa, '') != 'save':
+        L = await IL.IPad.load(afc, IL.game_names(ipa))
+        if L.v2:
+            return await sync_v2(afc, L, ipa, games, now, backed, json_out)
     if save_dest(ipa, '') == 'save':   # a one-game app: games is its own folder
         pairs = [('save', games)]
     else:
@@ -509,10 +603,297 @@ async def sync(afc, ipa, games, root, now=None):
             up += a; down += b
             if busy: failed.append(os.path.basename(g))
     print('存檔同步好了：%d 款遊戲，%d 份放進 iPad，%d 份存到電腦（各遊戲資料夾的「%s」）' % (len(pairs), up, down, SYNC_DIR))
-    if failed:   # the rest are done; a nonzero exit makes Switch Pad say so (nxn.ps1)
+    write_sync_summary(json_out, len(pairs), up, down, failed)
+    if failed:   # the rest are done; a nonzero exit makes PadSwitch say so (nxn.ps1)
         print('沒同步完的：%s' % '、'.join(failed))
         return SYNC_PARTIAL
     return 0
+
+
+# ---- saves a person drops in a folder (桌面\存檔): sorted into each game's 存檔\ before a sync, which then takes them to the iPad ----
+INBOX_SEEN = '桌面存檔已匯入.json'   # in the games' parent's 程式\work: digests already taken, so a save deleted later does not come back
+TID_IN = re.compile(r'(?<![0-9A-Fa-f])(01[0-9A-Fa-f]{14})(?![0-9A-Fa-f])')
+
+
+def _key(name):
+    return ''.join(c for c in name.lower() if c.isalnum())
+
+
+def _files_here(d):
+    return [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and not f.startswith('.') and f.lower() not in JUNK]
+
+
+def _dirs_here(d):
+    return sorted(f for f in os.listdir(d) if os.path.isdir(os.path.join(d, f)) and not f.startswith('.'))
+
+
+TOOL_FILES = ('.dbi_*', 'edizon_save_metadata.json', 'desktop.ini', 'Thumbs.db', '.DS_Store')   # what a save tool adds beside the game's own files
+SAVE_LIKE = re.compile(r'\d| - ')   # JKSV「user - 2026-11-20」, Checkpoint「2026-11-20 120000」, 存檔 1
+
+
+def inbox_saves(d, label):
+    """[(save name, folder)] in one game's folder of the inbox. Mostly the folder itself (a save copied as is: its files, and
+    folders such as Smash's mii\\ or Galaxy's MarioGalaxy\\, are the save's root); a lone 0\\ (Ryujinx) is the save's own
+    contents; only a folder of nothing but folders named like saves (JKSV, Checkpoint) holds one save in each."""
+    if _files_here(d) or os.path.exists(os.path.join(d, '.dbi_save_info.ini')): return [(label, d)]
+    subs = _dirs_here(d)
+    if subs in (['0'], ['0', '1']): return [(label, os.path.join(d, '0'))]
+    if subs and all(SAVE_LIKE.search(n) for n in subs): return [(n, os.path.join(d, n)) for n in subs if clean_files(os.path.join(d, n))]
+    return [(label, d)] if clean_files(d) else []
+
+
+def inbox_match(name, path_tids, games):
+    """The title ID of games ({tid: [names]}) that an inbox folder is for: a title ID in its path, else its name"""
+    for t in path_tids:
+        for c in (t, t[:-3] + '000'):
+            if c in games: return c
+    k = _key(name)
+    if not k: return None
+    hits = [t for t, ns in games.items() if any(_key(n) == k for n in ns)]
+    if not hits:   # 「Kirby Star Allies True Files」: the game's name and more (the longest name wins: Galaxy 2 before Galaxy)
+        part = sorted(((max(len(_key(n)) for n in ns if _key(n) and _key(n) in k), t) for t, ns in games.items()
+                       if len(k) >= 5 and any(len(_key(n)) >= 5 and _key(n) in k for n in ns)), reverse=True)
+        if part and (len(part) == 1 or part[0][0] > part[1][0]): return part[0][1]
+        hits = [t for t, ns in games.items() if len(k) >= 5 and any(len(_key(n)) >= 5 and k in _key(n) for n in ns)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def import_inbox(src, pairs, names, seen_file, out=print):
+    """Copy each save in src into its game's 存檔\\ (pairs [(tid, game folder)], names {tid: name}). A save already there with the
+    same files, or taken before (seen_file), is skipped. Returns (copied, [folders no game was found for])."""
+    games = {t: [names.get(t, ''), os.path.basename(g)] for t, g in pairs}
+    gdir = dict(pairs)
+    seen = {}
+    with contextlib.suppress(OSError, ValueError):
+        with open(seen_file, encoding='utf-8') as fh: seen = json.load(fh)
+    copied, unknown = 0, []
+
+    def walk(d, depth, tids):
+        nonlocal copied
+        for n in _dirs_here(d):
+            p = os.path.join(d, n)
+            t_here = [m.upper() for m in TID_IN.findall(n)] + tids
+            t = inbox_match(n, t_here, games)
+            if not t:
+                if depth < 5 and _dirs_here(p) and not _files_here(p): walk(p, depth + 1, t_here)   # nand\user\save\...\<title ID>
+                elif clean_files(p): unknown.append(os.path.relpath(p, src))
+                continue
+            sd = os.path.join(gdir[t], SYNC_DIR)
+            os.makedirs(sd, exist_ok=True)
+            have = {tree_digest(os.path.join(sd, x)) for x in _dirs_here(sd)}
+            label = '桌面存檔' if TID_IN.fullmatch(n) or _key(n) in (_key(x) for x in games[t]) else n
+            for sname, sdir in inbox_saves(p, label):
+                dg = tree_digest(sdir)
+                if dg in have or dg in seen: continue
+                dest = unique_dir(sd, sname)
+                shutil.copytree(sdir, dest, ignore=shutil.ignore_patterns(*TOOL_FILES))
+                have.add(dg); seen[dg] = os.path.relpath(dest, os.path.dirname(gdir[t])); copied += 1
+                out('%s：桌面的「%s」放進電腦的存檔，同步時會傳到 iPad（存檔名稱「%s」）' % (names.get(t) or os.path.basename(gdir[t]), os.path.relpath(sdir, src), os.path.basename(dest)))
+
+    if os.path.isdir(src): walk(src, 0, [])
+    if copied:
+        os.makedirs(os.path.dirname(seen_file), exist_ok=True)
+        with open(seen_file, 'w', encoding='utf-8') as fh: json.dump(seen, fh, ensure_ascii=False, indent=1)
+    for u in unknown: out('[!] %s：遊戲庫裡沒有對應的遊戲（不在遊戲庫，或資料夾名稱不是遊戲英文名／title ID），這份沒傳' % os.path.join(os.path.basename(src), u))
+    return copied, unknown
+
+
+# ---- the new layout: 存檔/<game>/<save>/ on the iPad is <game folder>/存檔/<save>/ on the PC, by name ----
+ACTIONS = []   # what sync did, for --json: {'game', 'save', 'action', ...}
+
+
+def act(game, save, action, **kw):
+    ACTIONS.append(dict(game=game, save=save, action=action, **kw))
+
+
+def newest_time(folder):
+    t = 0.0
+    for rel in clean_files(folder) if os.path.isdir(folder) else []:
+        t = max(t, os.path.getmtime(os.path.join(folder, *rel.split('/'))))
+    return t
+
+
+def read_sync_state(sd):
+    try:
+        with open(os.path.join(sd, SYNC_STATE), encoding='utf-8') as fh: return json.load(fh)
+    except (OSError, ValueError): return {}
+
+
+async def look(afc, L, tid, gdir, scratch):
+    """Both sides of one game's saves: (iPad folder, {name: {'dir', 'digest'}} pulled to scratch, the save in use, {name: digest} on
+    the PC, {name: digest} at the last sync)"""
+    sd = os.path.join(gdir, SYNC_DIR)
+    g = L.saves(tid)
+    dev = {}
+    for i, n in enumerate(await IL.save_names(afc, g)):
+        tmp = os.path.join(scratch, 'ipad-%d' % i)
+        await pull_slot(afc, g + '/' + n, tmp)
+        dev[n] = {'dir': tmp, 'digest': tree_digest(tmp)}
+    active = await IL.save_in_use(afc, g)
+    pc = {n: tree_digest(os.path.join(sd, n)) for n in (os.listdir(sd) if os.path.isdir(sd) else [])
+          if not n.startswith('.') and os.path.isdir(os.path.join(sd, n))}
+    raw = read_sync_state(sd)
+    if raw.get('layout') == 2: last = {k: v for k, v in raw.get('saves', {}).items() if isinstance(v, str)}
+    else:   # the old record, by slot number: a PC folder counts only when the iPad has a save of that name
+        last = {v['folder']: v['digest'] for v in raw.get('slots', {}).values() if isinstance(v, dict) and v.get('folder') in dev and v.get('digest')}
+    return g, dev, active, pc, last
+
+
+def state_of(n, pc, dev, last):
+    """How one save stands: same, ipad-newer, pc-newer, both-changed, only-ipad, only-pc, deleted-on-pc, deleted-on-ipad"""
+    was = last.get(n)
+    if n in pc and n in dev:
+        gp, gd = pc[n], dev[n]['digest']
+        if gp == gd: return 'same'
+        if was == gp: return 'ipad-newer'
+        if was == gd: return 'pc-newer'
+        return 'both-changed'
+    if n in dev: return 'deleted-on-pc' if was == dev[n]['digest'] else 'only-ipad'
+    return 'deleted-on-ipad' if was == pc[n] else 'only-pc'
+
+
+async def sync_game_v2(afc, L, tid, gdir, scratch, now, backed):
+    """Two-way sync of one game's saves, by name. Nothing is overwritten that was not the last synced copy: a save changed on
+    both sides is kept twice (the PC's as「<name>（電腦版）」), a save deleted on one side is deleted on the other only when the
+    other was not changed since, and what is deleted or replaced is copied to <game folder>/存檔備份/<time> <reason>/ first."""
+    sd = os.path.join(gdir, SYNC_DIR)
+    os.makedirs(sd, exist_ok=True)
+    tidy_pc(sd, now)
+    game = L.folder(tid)
+    g, dev, active, pc, last = await look(afc, L, tid, gdir, scratch)
+    if last and (not pc or not dev):   # a whole side empty (the 存檔 folder lost, the app reinstalled): not every save deleted
+        last = {}
+    up = down = busy = 0
+    keep_dir = lambda why: os.path.join(gdir, '存檔備份', stamp_name(now, why))
+
+    def keep(src, why, n):
+        if not os.path.isdir(src) or not clean_files(src): return
+        d = keep_dir(why); os.makedirs(d, exist_ok=True)
+        shutil.copytree(src, unique_dir(d, n))
+
+    def to_pc(n):
+        nonlocal down
+        p = os.path.join(sd, n)
+        if os.path.isdir(p) and pc.get(n) != last.get(n): keep(p, '電腦版被取代前', n)
+        shutil.rmtree(p, ignore_errors=True); shutil.copytree(dev[n]['dir'], p)
+        pc[n] = dev[n]['digest']; down += 1
+
+    async def to_ipad(n, as_name=None):
+        nonlocal up, busy
+        dst = as_name or n
+        if dst == active and (await afc.exists(g + '/' + dst + '.work') or await afc.exists(g + '/' + dst + '.new')):
+            # the game is open on the iPad (or was killed while saving): its .work is this session's save, which no backup holds
+            print('%s：「%s」電腦上比較新，但遊戲在 iPad 上還開著，這次先不換；把遊戲關掉再同步一次' % (game, dst))
+            act(game, dst, 'busy'); busy += 1
+            return False
+        await backed()
+        await push_slot(afc, os.path.join(sd, n), g + '/' + dst)
+        await IL.write_state(afc, g, add=[dst])
+        dev[dst] = {'dir': os.path.join(sd, n), 'digest': pc[n]}
+        up += 1
+        return True
+
+    # renamed on one side since the last sync: the old name gone there, a new name with the files it had
+    for side, other in (('pc', 'dev'), ('dev', 'pc')):
+        mine = pc if side == 'pc' else {k: v['digest'] for k, v in dev.items()}
+        theirs = dev if side == 'pc' else pc
+        for old in [n for n in last if n not in mine and n in theirs]:
+            twin = next((m for m, dg in mine.items() if m not in last and m not in theirs and dg == last[old]), None)
+            if not twin: continue
+            if side == 'pc':   # renamed on the PC: rename on the iPad
+                await backed()
+                await afc.rename(g + '/' + old, g + '/' + twin)
+                if await afc.exists(g + '/' + IL.DEVICE + '/' + old): await afc.rename(g + '/' + IL.DEVICE + '/' + old, g + '/' + IL.DEVICE + '/' + twin)
+                st = await IL._read_json(afc, g + '/' + IL.STATE) or {}
+                order = [twin if x == old else x for x in st.get('order', [])] if isinstance(st.get('order'), list) else []
+                await IL.write_state(afc, g, active=twin if active == old else None, add=order + [twin])
+                if active == old: active = twin
+                dev[twin] = dev.pop(old)
+            else:              # renamed on the iPad: rename the PC folder
+                os.rename(os.path.join(sd, old), os.path.join(sd, twin)); pc[twin] = pc.pop(old)
+            last[twin] = last.pop(old)
+            print('%s：「%s」改名成「%s」，另一邊跟著改' % (game, old, twin)); act(game, twin, 'renamed', was=old)
+    # the first sync of two sides that already hold the same files under different names: one save, the iPad's name
+    for m in [n for n in pc if n not in dev and n not in last]:
+        twin = next((k for k, v in dev.items() if k not in pc and k not in last and v['digest'] == pc[m]), None)
+        if twin:
+            os.rename(os.path.join(sd, m), os.path.join(sd, twin)); pc[twin] = pc.pop(m)
+            print('%s：電腦的「%s」跟 iPad 的「%s」一樣，電腦這份改叫「%s」' % (game, m, twin, twin))
+
+    state = {}
+    for n in sorted(set(pc) | set(dev), key=str.lower):
+        s = state_of(n, pc, dev, last)
+        if s == 'same': state[n] = pc[n]
+        elif s in ('ipad-newer', 'only-ipad'):
+            to_pc(n); state[n] = pc[n]
+            print('%s：iPad 的「%s」%s' % (game, n, '比較新，更新電腦這份' if s == 'ipad-newer' else '存到電腦')); act(game, n, 'to-pc')
+        elif s in ('pc-newer', 'only-pc'):
+            if s == 'pc-newer': keep(dev[n]['dir'], 'iPad版被取代前', n)
+            if await to_ipad(n): state[n] = pc[n]; print('%s：電腦的「%s」%s' % (game, n, '比較新，更新 iPad 那份' if s == 'pc-newer' else '放進 iPad')); act(game, n, 'to-ipad')
+            elif n in last: state[n] = last[n]   # tried again next time
+        elif s == 'both-changed':
+            other = os.path.basename(unique_dir(sd, n + '（電腦版）'))
+            os.rename(os.path.join(sd, n), os.path.join(sd, other)); pc[other] = pc.pop(n)
+            to_pc(n); state[n] = pc[n]
+            if await to_ipad(other): state[other] = pc[other]
+            print('%s：「%s」兩邊都改過，兩份都留著（電腦改的那份叫「%s」）' % (game, n, other)); act(game, n, 'both-kept', pc_copy=other)
+        elif s == 'deleted-on-pc':
+            if n == active:   # the save in use is not deleted from under the player: back to the PC
+                to_pc(n); state[n] = pc[n]
+                print('%s：電腦上刪掉的「%s」是 iPad 正在用的存檔，沒有刪，放回電腦（要刪請先在 iPad 換用別的存檔）' % (game, n)); act(game, n, 'kept-in-use')
+                continue
+            keep(dev[n]['dir'], '刪除前', n)
+            await backed()
+            await afc.rm(g + '/' + n, force=True)
+            if await afc.exists(g + '/' + IL.DEVICE + '/' + n): await afc.rm(g + '/' + IL.DEVICE + '/' + n, force=True)
+            dev.pop(n)
+            print('%s：「%s」在電腦上刪掉了，iPad 上也刪（留了一份在 存檔備份）' % (game, n)); act(game, n, 'deleted-ipad')
+        elif s == 'deleted-on-ipad':
+            keep(os.path.join(sd, n), 'iPad已刪除', n)
+            shutil.rmtree(os.path.join(sd, n)); pc.pop(n)
+            print('%s：「%s」在 iPad 上刪掉了，電腦這份移到 存檔備份' % (game, n)); act(game, n, 'deleted-pc')
+    with open(os.path.join(sd, SYNC_STATE), 'w', encoding='utf-8') as fh:
+        json.dump({'layout': 2, 'saves': state}, fh, ensure_ascii=False, indent=1)
+    return up, down, busy
+
+
+async def status(afc, ipa, games, out=None, title_id=''):
+    """Each game's saves on both sides and how they stand, as JSON for PadSwitch's save panel (nothing is changed):
+    [{'tid', 'game', 'folder', 'saves': [{'name', 'state', 'in_use', 'ipad_time', 'pc_time', 'files'}]}]"""
+    import tempfile
+    L = await IL.IPad.load(afc, IL.game_names(ipa))
+    res = []
+    for tid, gdir in game_folders(ipa, games):
+        if title_id and tid != title_id.upper():
+            continue
+        with tempfile.TemporaryDirectory() as scratch:
+            if not L.v2:
+                res.append({'tid': tid, 'game': L.names.get(tid, tid), 'folder': gdir, 'saves': [], 'note': '新版 SwitchPad 還沒在 iPad 上開過'}); continue
+            g, dev, active, pc, last = await look(afc, L, tid, gdir, scratch)
+            saves = []
+            for n in sorted(set(pc) | set(dev), key=str.lower):
+                saves.append({'name': n, 'state': state_of(n, pc, dev, last), 'in_use': n == active,
+                              'ipad_time': newest_time(dev[n]['dir']) if n in dev else None,
+                              'pc_time': newest_time(os.path.join(gdir, SYNC_DIR, n)) if n in pc else None,
+                              'files': len(clean_files(dev[n]['dir'] if n in dev else os.path.join(gdir, SYNC_DIR, n)))})
+            res.append({'tid': tid, 'game': L.folder(tid), 'folder': gdir, 'saves': saves})
+    txt = json.dumps(res, ensure_ascii=False, indent=1)
+    if out:
+        with open(out, 'w', encoding='utf-8') as fh: fh.write(txt)
+    else: print(txt)
+    return 0
+
+
+def game_folders(ipa, games):
+    """[(title ID, game folder)] of the library's games that have a folder in games"""
+    tids = library_tids(ipa)
+    out = []
+    for n in sorted(os.listdir(games)) if os.path.isdir(games) else []:
+        g = os.path.join(games, n)
+        if not os.path.isdir(g): continue
+        t = game_tid(g, tids)
+        if t: out.append((t, g))
+    return out
 
 
 SINGLE = re.compile(r'org\.nxnative\.([0-9a-fA-F]{16})(?:\.|$)')
@@ -677,21 +1058,36 @@ def gl_games(ipa):
             if not m: continue
             for line in z.read(n).decode('utf-8', 'replace').splitlines():
                 k, _, v = line.partition('=')
-                if k.strip() in ('DM_GL_CAPTURE', 'DM_GLSLC_CAPTURE', 'DM_SHADER_RECORD', 'DM_VK_CAPTURE') and v.strip() and not v.strip().startswith('/'): out[m.group(1).upper()] = v.strip()
+                if k.strip() in ('DM_GL_CAPTURE', 'DM_GLSLC_CAPTURE', 'DM_SHADER_RECORD', 'DM_VK_CAPTURE') and v.strip() and not v.strip().startswith('/'):
+                    out[m.group(1).upper()] = v.strip()
+                    GL_KIND[m.group(1).upper()] = k.strip()
+        for n in z.namelist():   # each game's name, for the lines PadSwitch shows (「Super Mario Galaxy：Vulkan 著色器 3,089 個」)
+            m = re.match(r'Payload/[^/]+\.app/games/([0-9A-Fa-f]{16})/game\.json$', n)
+            if m and m.group(1).upper() in out:
+                try: GL_NAME[m.group(1).upper()] = json.loads(z.read(n).decode('utf-8')).get('name') or ''
+                except Exception: pass
     return out
+
+
+GL_KIND, GL_NAME = {}, {}
+GL_WHAT = {'DM_GL_CAPTURE': 'OpenGL 著色器', 'DM_GLSLC_CAPTURE': '執行時編譯的著色器', 'DM_SHADER_RECORD': '缺的著色器', 'DM_VK_CAPTURE': 'Vulkan 著色器'}
 
 
 SHADER_FILE = re.compile(r'[0-9a-f]{16}\.(vert|frag|glslc|keys|spv)')   # what the host writes: <key>.vert / .frag (hle_gl.m), <hash>.glslc (hle_glslc.c), <run>.keys (nvn_mtl.m shader_record_miss), <key>.spv (hle_vk.m)
 
 
-async def gl_sync(afc, games, root):
-    """Make each recording folder on the iPad and copy the shaders not yet on the computer. Returns {title ID: total}."""
+
+
+async def gl_sync(afc, games, root, names=None, game_dirs=None):
+    """Make each recording folder on the iPad and copy the shaders not yet on the computer. Returns {title ID: total}.
+    With game_dirs ({title ID: game folder}), a game's recordings go to <game folder>/著色器紀錄/ instead of <root>/<title ID>."""
     base = await docs_base(afc)
+    L = await IL.IPad.load(afc, names)
     totals = {}
     for tid, rel in sorted(games.items()):
-        d = base + '/' + rel
+        d = L.shaders(tid) if L.v2 else base + '/' + rel   # 著色器紀錄/<game>/ holds every kind
         await afc.makedirs(d)
-        dest = os.path.join(root, tid)
+        dest = os.path.join(game_dirs[tid], '著色器紀錄') if game_dirs and tid in game_dirs else os.path.join(root, tid)
         os.makedirs(dest, exist_ok=True)
         new = 0
         for name in await afc.listdir(d):
@@ -710,8 +1106,11 @@ async def gl_sync(afc, games, root):
             if n.endswith('.keys'):
                 with open(os.path.join(dest, n), encoding='utf-8', errors='replace') as f: keys.update(l.strip() for l in f if len(l.strip()) == 16)
         totals[tid] = len(keys) + len([n for n in names if not n.endswith('.keys')])
-        print('%s：iPad 記下的著色器 %d 個（這次新拿回 %d 個檔案）' % (tid, totals[tid], new) if totals[tid]
-              else '%s：還沒記下著色器，在 iPad 上打開這款玩一下' % tid)
+        who = '%s（%s）' % (GL_NAME[tid], tid) if GL_NAME.get(tid) else tid
+        what = GL_WHAT.get(GL_KIND.get(tid, ''), '著色器')
+        if not totals[tid]: print('著色器紀錄｜%s｜%s：還沒記下，在 iPad 上打開這款玩一下' % (who, what))
+        elif new: print('著色器紀錄｜%s｜%s：iPad 記下 %s 個，這次新拿回 %d 個檔（下次同步會重新轉檔把它們加進去）' % (who, what, format(totals[tid], ','), new))
+        else: print('著色器紀錄｜%s｜%s：iPad 記下 %s 個，沒有新的' % (who, what, format(totals[tid], ',')))
     return totals
 
 
@@ -748,8 +1147,13 @@ async def fetch_log(afc, src, dst):
 
 async def pull_logs(afc, root, now=None):
     base = await docs_base(afc)
-    dest = os.path.join(root, (now or datetime.datetime.now()).strftime('%Y%m%d-%H%M%S'))
+    L = await IL.IPad.load(afc)
+    dest = os.path.join(root, stamp_name(now or datetime.datetime.now()))
     got = []
+    if L.v2:   # 記錄/: log.txt, log.prev.txt and each game's <game>.txt, .prev.txt, .crash.txt, .crash.prev.txt
+        for name in sorted(await IL._listdir(afc, L.logs())):
+            if LOG_FILES.match(name) and await fetch_log(afc, L.logs() + '/' + name, os.path.join(dest, name)): got.append(name)
+        return report_pulled(dest, got, [n for n in got if n not in ('log.txt', 'log.prev.txt')])
     for name in await afc.listdir(base or '/'):
         if not LOG_FILES.match(name): continue
         p = base + '/' + name
@@ -763,6 +1167,10 @@ async def pull_logs(afc, root, now=None):
         if not LOG_FILES.match(name): continue
         if await fetch_log(afc, (base or '') + '/logs/' + name, os.path.join(dest, 'logs', name)): per_game.append('logs/' + name)
     got += per_game
+    return report_pulled(dest, got, per_game)
+
+
+def report_pulled(dest, got, per_game):
     if not got:
         print('iPad 上有記錄但一個都讀不到（見上面）' if unreadable else 'iPad 上還沒有記錄：先在 iPad 上打開遊戲一次')
         return None
@@ -789,22 +1197,23 @@ def last_game(text):
     return m[-1].upper() if m else ''
 
 
-def make_report(dest, tid, zip_path, extra=None):
+def make_report(dest, tid, zip_path, extra=None, game=None):
     """One game's problem report from a pulled log folder (pull_logs's dest): a zip of that game's logs, a summary and the extra
-    files. Returns the names put in, or None when nothing of that game was pulled."""
+    files. Returns the names put in, or None when nothing of that game was pulled. game: its name in 記錄/ (the new layout)."""
     import zipfile
     tid = tid.upper()
     picks = []
     for name in ('%s.txt', '%s.prev.txt', '%s.crash.txt', '%s.crash.prev.txt'):
-        f = os.path.join(dest, 'logs', name % tid)
-        if os.path.isfile(f): picks.append(('iPad/logs/' + name % tid, f))
+        for f, arc in ((os.path.join(dest, 'logs', name % tid), 'iPad/logs/' + name % tid),
+                       (os.path.join(dest, name % game) if game else '', 'iPad/記錄/' + name % (game or ''))):
+            if f and os.path.isfile(f): picks.append((arc, f))
     for name in ('log.txt', 'log.prev.txt'):
         f = os.path.join(dest, name)
         if os.path.isfile(f):
             with open(f, encoding='utf-8', errors='replace') as fh:
                 if last_game(fh.read()) == tid: picks.append(('iPad/' + name, f))
     if not picks: return None
-    summary = ['Switch Pad 問題回報：%s（%s）' % (tid, datetime.datetime.now().strftime('%Y-%m-%d %H:%M')), '']
+    summary = ['PadSwitch 問題回報：%s（%s）' % (tid, datetime.datetime.now().strftime('%Y-%m-%d %H:%M')), '']
     os.makedirs(os.path.dirname(os.path.abspath(zip_path)), exist_ok=True)
     put = []
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -857,11 +1266,21 @@ def main():
     p = sub.add_parser('migrate'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--overwrite', action='store_true')
     p = sub.add_parser('logs'); p.add_argument('ipa'); p.add_argument('root')
     p.add_argument('--report', default=''); p.add_argument('--zip', default=''); p.add_argument('--extra', default='')
-    p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root')
-    p = sub.add_parser('sync'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('root')
+    p = sub.add_parser('glsync'); p.add_argument('ipa'); p.add_argument('root'); p.add_argument('--games', default='')
+    p = sub.add_parser('sync'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('root'); p.add_argument('--json', default='')
+    p.add_argument('--inbox', action='append', default=[])
+    p = sub.add_parser('inbox'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('src', nargs='+')
+    p = sub.add_parser('status'); p.add_argument('ipa'); p.add_argument('games'); p.add_argument('--json', default='')
+    p.add_argument('--tid', default='')
     p = sub.add_parser('put'); p.add_argument('ipa'); p.add_argument('src'); p.add_argument('root'); p.add_argument('--tid', default=''); p.add_argument('--slot', default='')
     for p in sub.choices.values(): p.add_argument('--udid', default='')
     a = ap.parse_args()
+    if a.cmd in ('sync', 'inbox'):
+        for src in (a.inbox if a.cmd == 'sync' else a.src):
+            if os.path.isdir(src) and save_dest(a.ipa, '') != 'save':
+                import_inbox(src, game_folders(a.ipa, a.games), IL.game_names(a.ipa),
+                             os.path.join(os.path.dirname(os.path.abspath(a.games)), '程式', 'work', INBOX_SEEN))
+        if a.cmd == 'inbox': return 0
     try: import pymobiledevice3  # noqa: F401
     except ImportError: raise SystemExit('pymobiledevice3 is not installed')
     if a.cmd == 'migrate': return asyncio.run(migrate_on_device(a))
@@ -875,14 +1294,17 @@ def main():
                 if n.upper() not in games and os.path.isdir(d) and not os.listdir(d):
                     os.rmdir(d); print('%s：不用在 iPad 上記著色器了，拿掉空的記錄資料夾' % n)
         if not games: return 0
-        work = lambda afc: gl_sync(afc, games, a.root)
-    elif a.cmd == 'sync': work = lambda afc: sync(afc, a.ipa, a.games, a.root)
+        dirs = dict(game_folders(a.ipa, a.games)) if a.games else None
+        work = lambda afc: gl_sync(afc, games, a.root, IL.game_names(a.ipa), dirs)
+    elif a.cmd == 'sync': work = lambda afc: sync(afc, a.ipa, a.games, a.root, json_out=a.json or None)
+    elif a.cmd == 'status': work = lambda afc: status(afc, a.ipa, a.games, a.json or None, a.tid)
     elif a.cmd == 'logs':
         if a.report:
             async def work(afc):
                 dest = await pull_logs(afc, a.root)
                 if not dest: return
-                put = make_report(dest, a.report, a.zip, a.extra)
+                L = await IL.IPad.load(afc, IL.game_names(a.ipa))
+                put = make_report(dest, a.report, a.zip, a.extra, L.folder(a.report) if L.v2 else None)
                 if put: print('\n問題回報存到 %s：%s' % (a.zip, '、'.join(put)))
                 else: print('\niPad 上沒有 %s 這款的記錄：先在 iPad 上打開它一次（打不開也算），再按一次' % a.report.upper()); a.no_report = True
             a.no_report = False
@@ -894,7 +1316,7 @@ def main():
         if not dest:
             print('這個 App 裡沒有 %s 這款' % (a.tid or '這'))
             return NOT_IN_APP
-        work = lambda afc: put(afc, a.src, a.root, dest, a.slot)
+        work = lambda afc: put(afc, a.src, a.root, dest, a.slot, tid=a.tid, names=IL.game_names(a.ipa))
     elif a.cmd == 'backup': work = lambda afc: backup(afc, a.root, a.keep, a.tag)
     else: work = lambda afc: restore(afc, a.src, a.root)
     return asyncio.run(on_device(a, work))
