@@ -36,6 +36,10 @@ import time
 import zipfile
 import zlib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ipad_layout  # noqa: E402
+import pc_layout  # noqa: E402
+
 MIN_BYTES = 64 << 20       # below this a separate copy saves nothing worth the extra step (ANIMAL WELL's RomFS is one placeholder)
 MARK = '.romfs-id'
 
@@ -128,7 +132,7 @@ class Sources:
 def linked_files(srcs, app, d, r):
     """[(zip, ZipInfo, path under Documents)] of one linked folder, read from the game package nxn_merge.py recorded
     (a FromNsp for a RomFS that package left in the NSP)"""
-    p = r['ipa']
+    p = r['ipa'] = pc_layout.moved(r['ipa'])   # a game folder renamed or its package moved into 轉檔結果/ since the merge
     if not os.path.isfile(p):
         raise SystemExit('找不到遊戲包 %s（遊戲庫裡 %s 的資料在那裡）：請再按一次「放進遊戲庫」' % (p, d))
     z = srcs.get(p)
@@ -179,6 +183,7 @@ class FromNsp:
             raise SystemExit('遊戲包 %s 在合成遊戲庫之後改過了（%s 對不上）：請再按一次「放進遊戲庫」' % (os.path.basename(z.filename), d))
         self.nsps = [x for x in (rec['base'], rec.get('update')) if x]
         for x in self.nsps:
+            x['path'] = pc_layout.moved(x['path'])   # the NSP moved into 原始檔/ (pc_layout.py) since the pack
             if not os.path.isfile(x['path']):
                 raise SystemExit('找不到 %s（%s 的 RomFS 要從它解出來）：遊戲檔搬走了的話，請再按一次「放進遊戲庫」' % (x['path'], d))
             if os.path.getsize(x['path']) != x['size']:
@@ -254,26 +259,26 @@ def listing_of(x):
     return {dst: (i.file_size, i.CRC) for _, i, dst in x}
 
 
-def list_path(base, d): return '%s/%s/%s.json' % (base, LIST_DIR, d.replace('/', '~'))
+def list_path(L, d): return '%s/%s.json' % (L.sys(LIST_DIR), d.replace('/', '~'))
 
 
-async def read_list(afc, base, d):
-    p = list_path(base, d)
+async def read_list(afc, L, d):
+    p = list_path(L, d)
     try:
         if not await afc.exists(p): return None
         return {k: tuple(v) for k, v in json.loads((await afc.get_file_contents(p)).decode('utf-8'))['files'].items()}
     except Exception: return None
 
 
-async def write_list(afc, base, d, files):
-    await afc.makedirs(base + '/' + LIST_DIR)
-    await afc.set_file_contents(list_path(base, d), json.dumps({'files': {k: list(v) for k, v in sorted(files.items())}},
+async def write_list(afc, L, d, files):
+    await afc.makedirs(L.sys(LIST_DIR))
+    await afc.set_file_contents(list_path(L, d), json.dumps({'files': {k: list(v) for k, v in sorted(files.items())}},
                                                                separators=(',', ':')).encode('utf-8'))
 
 
-async def drop_list(afc, base, d):
+async def drop_list(afc, L, d):
     try:
-        if await afc.exists(list_path(base, d)): await afc.rm(list_path(base, d), force=True)
+        if await afc.exists(list_path(L, d)): await afc.rm(list_path(L, d), force=True)
     except Exception: pass
 
 
@@ -378,8 +383,16 @@ async def _push(a, opened):
         bid = ids[0]
         print('app on the iPad: %s' % bid)
         async with await HouseArrestService.create(lockdown=ld, bundle_id=bid, documents_only=True) as afc:
-            base = '/Documents' if await afc.exists('/Documents') else ''
-            mark = base + '/' + MARK
+            # the game library's Documents by game name (ipad_layout.py): data paths are kept as before in the records
+            # (games/<title ID>/romfs), L.key() says where each is on this iPad now
+            names = ipad_layout.game_names(a.ipa) if several else {}
+            if several and ipad_layout.shell_layout(a.ipa) < 2:   # an older shell (退回上一版) only knows the old places
+                for n in await ipad_layout.to_old(afc): print(n)
+            L = await ipad_layout.IPad.load(afc, names)
+            for t in names: L.folder(t)
+            await L.save_folders()
+            base = L.base
+            mark = L.sys(MARK)
             have = {}
             if await afc.exists(mark):
                 try:
@@ -390,12 +403,12 @@ async def _push(a, opened):
             # a game taken out of a package: its folders go too (they would only take space)
             gone = [d for d in have if d not in want and d.startswith('games/')]
             for d in gone:
-                if await afc.exists(base + '/' + d): await afc.rm(base + '/' + d, force=True)
-                await drop_list(afc, base, d)
+                if await afc.exists(L.key(d)): await afc.rm(L.key(d), force=True)
+                await drop_list(afc, L, d)
                 print('removed %s (no longer in this package)' % d)
             if not todo:
                 if gone: await afc.set_file_contents(mark, json.dumps(want).encode())
-                await list_missing(afc, base, want, jobs_of)
+                await list_missing(afc, L, want, jobs_of)
                 print('game files already on the iPad')
                 return
             send = {d: jobs_of(d) for d in todo}   # (a linked folder whose game package changed stops here, before anything is removed)
@@ -403,7 +416,7 @@ async def _push(a, opened):
             # a folder the iPad has an older copy of (with its file list): only the files that differ
             plan, skipped = {}, 0
             for d in todo:
-                old = None if a.force else await read_list(afc, base, d)
+                old = None if a.force else await read_list(afc, L, d)
                 if old is None: plan[d] = None; continue
                 changed = {k for k, v in lists[d].items() if old.get(k) != v}
                 plan[d] = (old, changed, [k for k in old if k not in lists[d]])
@@ -420,13 +433,13 @@ async def _push(a, opened):
             await afc.set_file_contents(mark, json.dumps(keep).encode())
             for d in todo:
                 if plan[d] is None:
-                    await drop_list(afc, base, d)
-                    if await afc.exists(base + '/' + d): await afc.rm(base + '/' + d, force=True)
+                    await drop_list(afc, L, d)
+                    if await afc.exists(L.key(d)): await afc.rm(L.key(d), force=True)
                     continue
                 old, changed, removed = plan[d]
-                await write_list(afc, base, d, {k: v for k, v in old.items() if k not in changed and k in lists[d]})
+                await write_list(afc, L, d, {k: v for k, v in old.items() if k not in changed and k in lists[d]})
                 for k in removed:
-                    if await afc.exists(base + '/' + k): await afc.rm(base + '/' + k, force=True)
+                    if await afc.exists(L.key(k)): await afc.rm(L.key(k), force=True)
                 if removed: print('%s: removed %d files the new version no longer has' % (d, len(removed)))
 
             # 先刪後傳：拿掉的遊戲和要整個換掉的資料夾上面已經刪了，這時 iPad 剩的空間不夠就先停，不要傳到一半才失敗
@@ -451,7 +464,7 @@ async def _push(a, opened):
             try:
                 for attempt in range(1, tries + 1):
                     try:
-                        nconn = await send_round(ld if attempt == 1 else None, a, bid, base, mark, todo, send, keep, want, done, state, total, lists)
+                        nconn = await send_round(ld if attempt == 1 else None, a, bid, L, mark, todo, send, keep, want, done, state, total, lists)
                         break
                     except Exception as e:
                         if attempt == tries or not is_disconnect(e): raise
@@ -465,19 +478,19 @@ async def _push(a, opened):
                 for x in send.values():
                     if isinstance(x, FromNsp): x.cleanup()
 
-            await list_missing(afc, base, want, jobs_of, skip=todo)
+            await list_missing(afc, L, want, jobs_of, skip=todo)
             el = max(time.time() - t0, 0.001)
             print('game files in place (%d files, %d MB in %.0f s over %d connections, %.1f MB/s)' % (nfiles, total >> 20, el, nconn, total / el / 2**20))
 
 
-async def list_missing(afc, base, want, jobs_of, skip=()):
+async def list_missing(afc, L, want, jobs_of, skip=()):
     """Write the file list of each folder the iPad has whole but no list for (sent by an older Switch Pad), so its next
     change sends only what changed. Best effort: a folder whose source cannot be read now is left without one."""
     for d in want:
         if d in skip: continue
         try:
-            if await afc.exists(list_path(base, d)): continue
-            await write_list(afc, base, d, listing_of(jobs_of(d)))
+            if await afc.exists(list_path(L, d)): continue
+            await write_list(afc, L, d, listing_of(jobs_of(d)))
         except (Exception, SystemExit): pass
 
 
@@ -489,7 +502,7 @@ def is_disconnect(e):
                          'DeviceNotFoundError', 'IncompleteReadError', 'TimeoutError', 'OSError'})
 
 
-async def send_round(ld, a, bid, base, mark, todo, send, keep, want, done, state, total, lists):
+async def send_round(ld, a, bid, L, mark, todo, send, keep, want, done, state, total, lists):
     """One pass over the files not yet in `done`, over fresh connections when `ld` is None (after a drop). Returns the number
     of connections used."""
     from pymobiledevice3.lockdown import create_using_usbmux
@@ -517,7 +530,7 @@ async def send_round(ld, a, bid, base, mark, todo, send, keep, want, done, state
             for d in todo:
                 if keep.get(d) == want[d]: continue
                 js = [j for j in (send[d].get() if isinstance(send[d], FromNsp) else send[d]) if j[2] not in done]
-                for dd in sorted({(base + '/' + dst).rsplit('/', 1)[0] for _, _, dst in js}):
+                for dd in sorted({L.key(dst).rsplit('/', 1)[0] for _, _, dst in js}):
                     await afc.makedirs(dd)
                 queue = asyncio.Queue()
                 for job in sorted(js, key=lambda j: -j[1].file_size): queue.put_nowait(job)   # big files first, so none is left alone at the end
@@ -526,7 +539,7 @@ async def send_round(ld, a, bid, base, mark, todo, send, keep, want, done, state
                     while True:
                         try: zz, i, dst = queue.get_nowait()
                         except asyncio.QueueEmpty: return
-                        h = await c.fopen(base + '/' + dst, 'w')
+                        h = await c.fopen(L.key(dst), 'w')
                         got = 0
                         crc = 0
                         check = isinstance(i, DiskFile)   # a file extracted from the NSP: its CRC must be the one the list has
@@ -557,7 +570,7 @@ async def send_round(ld, a, bid, base, mark, todo, send, keep, want, done, state
                     for t in tasks: t.cancel()   # one connection dropped: stop the others before reconnecting
                     await asyncio.gather(*tasks, return_exceptions=True)
                     raise
-                await write_list(afc, base, d, lists[d])
+                await write_list(afc, L, d, lists[d])
                 keep[d] = want[d]
                 await afc.set_file_contents(mark, json.dumps(keep).encode())
                 if isinstance(send[d], FromNsp): send[d].cleanup()   # on the iPad now: the extraction can go

@@ -61,7 +61,7 @@ class Saves(unittest.TestCase):
 
     def test_backup_copies_saves_only(self):
         b = self.run_(sd.backup(self.afc, self.root, now=at(0)))
-        self.assertEqual(os.path.basename(b), '20261030-120000')
+        self.assertEqual(os.path.basename(b), '2026-10-30 12.00.00')
         got = sorted(os.path.relpath(os.path.join(r, f), b).replace(os.sep, '/') for r, _, fs in os.walk(b) for f in fs)
         self.assertEqual(got, ['.digest', 'save/0/progress.bin', 'save_device/common.bin'])
 
@@ -70,13 +70,13 @@ class Saves(unittest.TestCase):
         self.assertIsNone(self.run_(sd.backup(self.afc, self.root, now=at(1))))
         write(os.path.join(self.docs, 'save', '0', 'progress.bin'), b'two')
         self.assertIsNotNone(self.run_(sd.backup(self.afc, self.root, now=at(2))))
-        self.assertEqual(sd.backups(self.root), ['20261030-120000', '20261030-120002'])
+        self.assertEqual(sd.backups(self.root), ['2026-10-30 12.00.00', '2026-10-30 12.00.02'])
 
     def test_keep_prunes_oldest(self):
         for i in range(4):
             write(os.path.join(self.docs, 'save', '0', 'progress.bin'), bytes([i]))
             self.run_(sd.backup(self.afc, self.root, keep=2, now=at(i)))
-        self.assertEqual(sd.backups(self.root), ['20261030-120002', '20261030-120003'])
+        self.assertEqual(sd.backups(self.root), ['2026-10-30 12.00.02', '2026-10-30 12.00.03'])
 
     def test_nothing_on_device(self):
         shutil.rmtree(os.path.join(self.docs, 'save')); shutil.rmtree(os.path.join(self.docs, 'save_device'))
@@ -91,7 +91,7 @@ class Saves(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.docs, 'save', '0', 'extra.bin')))
         self.assertFalse(os.path.exists(os.path.join(self.docs, 'save.work')))
         self.assertTrue(os.path.exists(os.path.join(self.docs, 'romfs', 'big')))
-        before = os.path.join(self.root, '20261030-120005-before-restore', 'save', '0', 'progress.bin')
+        before = os.path.join(self.root, '2026-10-30 12.00.05 還原前', 'save', '0', 'progress.bin')
         with open(before, 'rb') as f: self.assertEqual(f.read(), b'newer')
 
 
@@ -143,7 +143,7 @@ class Migrate(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.lib, 'save', C)))
         self.assertEqual(self.read('save', 'FFFF000000000000', 'z.bin'), b'other game')
         self.assertTrue(os.path.isfile(os.path.join(made[1], 'save', C, 'c.bin')))   # kept on the computer
-        self.assertTrue(os.path.isdir(os.path.join(self.root, '20261030-120001-before-migrate')))
+        self.assertTrue(os.path.isdir(os.path.join(self.root, '2026-10-30 12.00.01 搬舊App前')))
 
     def test_pack_newer_wins(self):
         self.age(self.one, 1_000_000); self.age(self.pack, 2_000_000)
@@ -205,7 +205,7 @@ class Put(unittest.TestCase):
         self.assertFalse(os.path.exists(game + '.work'))
         with open(os.path.join(self.docs, 'save', '0100BBBB00000000', 'other.bin'), 'rb') as f: self.assertEqual(f.read(), b'keep')
         b = os.path.join(self.root, sd.backups(self.root)[-1])
-        self.assertTrue(b.endswith('-before-import'))
+        self.assertTrue(b.endswith(' 匯入前'))
         self.assertTrue(os.path.isfile(os.path.join(b, 'save', '0100AAAA00000000', 'old.bin')))
 
 
@@ -268,7 +268,7 @@ class Sync(unittest.TestCase):
         before = len(sd.backups(self.root))
         self.sync()                                                          # nothing changed: nothing written
         self.assertEqual(len(sd.backups(self.root)), before)
-        self.assertTrue(all(b.endswith('-before-sync') for b in sd.backups(self.root)))
+        self.assertTrue(all(b.endswith(' 同步前') for b in sd.backups(self.root)))
 
     def test_deleted_on_ipad_and_renamed_on_pc(self):
         write(self.pc('朋友的', 'a.bin'), b'friend'); write(self.pc('舊的', 'a.bin'), b'old')
