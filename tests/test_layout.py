@@ -306,6 +306,19 @@ class PcFolders(unittest.TestCase):
         self.assertEqual(pcl.moved(self.old_nsp, r), os.path.normcase(os.path.join(s, os.path.basename(self.old_nsp))))
         self.assertEqual(pcl.plan(r), [])   # done once
 
+    def test_undo(self):
+        r = self.r; j = lambda *p: os.path.join(r, *p)
+        with open(j('程式', 'work', 'app-settings.json'), encoding='utf-8') as f: before = json.load(f)
+        pcl.migrate(r, out=lambda *_: None)
+        self.assertEqual(pcl.undo(r, out=lambda *_: None), 0)
+        self.assertTrue(os.path.isfile(j('合包', '遊戲庫.ipa')))
+        self.assertTrue(os.path.isfile(j('合包', 'GL著色器', T2, 'k.keys')))
+        self.assertTrue(os.path.isfile(j('合包', '存檔備份', '遊戲庫', '20261101-012757', 'save', T1, 'x')))
+        self.assertTrue(os.path.isfile(self.old_nsp))
+        self.assertTrue(os.path.isdir(j('程式', 'backup-before-abc')))
+        self.assertFalse(os.path.exists(j('遊戲庫')))
+        with open(j('程式', 'work', 'app-settings.json'), encoding='utf-8') as f: self.assertEqual(json.load(f), before)
+
     def test_busy_waits(self):
         write(os.path.join(self.r, '程式', 'work', 'status', 'run-1.json'), json.dumps({'state': 'running', 'pid': os.getpid()}).encode())
         self.assertEqual(pcl.migrate(self.r, out=lambda *_: None), 4)

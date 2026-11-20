@@ -234,25 +234,61 @@ def migrate(root, dry=False, out=print):
     os.makedirs(os.path.dirname(rec), exist_ok=True)
     with open(rec, 'w', encoding='utf-8') as f:
         json.dump({'updated': datetime.datetime.now().isoformat(timespec='seconds'), 'moves': old + [list(m) for m in done]}, f, ensure_ascii=False, indent=1)
+    rewrite_settings(root, done)
+    out('搬好了：%d 項（記錄在 %s）' % (len(done), MOVES))
+    return 0
+
+
+def rewrite_settings(root, moves):
     for n in ('app-settings.json', 'installed.json', 'pack-times.json'):
         p = os.path.join(root, PROGRAM, 'work', n)
         try:
             with open(p, encoding='utf-8-sig') as f: d = json.load(f)
         except (OSError, ValueError): continue
-        d2 = rewrite_paths(d, done)
-        if isinstance(d2, dict) and n == 'installed.json': d2 = {rewrite_paths(k, done): v for k, v in d2.items()}
+        d2 = rewrite_paths(d, moves)
+        if isinstance(d2, dict) and n == 'installed.json': d2 = {rewrite_paths(k, moves): v for k, v in d2.items()}
         if d2 != d:
             with open(p + '.tmp', 'w', encoding='utf-8') as f: json.dump(d2, f, ensure_ascii=False, indent=2)
             os.replace(p + '.tmp', p)
-    out('搬好了：%d 項（記錄在 %s）' % (len(done), MOVES))
+
+
+def undo(root, out=print):
+    """Put everything 搬家紀錄.json records back where it was, newest first (for going back to an older PadSwitch).
+    A move whose old place is taken again, or whose new place is gone, is left as it is and named."""
+    root = os.path.abspath(root)
+    b = busy(root)
+    if b:
+        out('有轉檔或傳送正在跑（%s），等它結束再還原' % b); return 4
+    rec = os.path.join(root, MOVES)
+    try:
+        with open(rec, encoding='utf-8') as f: moves = [tuple(m) for m in json.load(f).get('moves', [])]
+    except (OSError, ValueError):
+        out('沒有搬家紀錄，不用還原'); return 0
+    back, left = [], []
+    for a, b2 in reversed(moves):
+        if not os.path.exists(b2) or os.path.exists(a):
+            out('沒還原：%s → %s' % (os.path.relpath(b2, root), os.path.relpath(a, root))); left.append((a, b2)); continue
+        os.makedirs(os.path.dirname(a), exist_ok=True)
+        try: os.rename(b2, a)
+        except OSError as e: out('[x] 搬不動 %s：%s（可能有檔案開著）' % (os.path.relpath(b2, root), e)); left.append((a, b2)); continue
+        back.append((b2, a))
+    for p in (os.path.join(root, IPAD_SAVES), os.path.join(root, IPAD_LOGS), os.path.join(root, LIBRARY)):
+        for d, _, _ in sorted(os.walk(p), key=lambda w: -len(w[0])) if os.path.isdir(p) else []:
+            try: os.rmdir(d)   # only the empty ones
+            except OSError: pass
+    rewrite_settings(root, back)
+    with open(rec, 'w', encoding='utf-8') as f:
+        json.dump({'updated': datetime.datetime.now().isoformat(timespec='seconds'), 'moves': [list(m) for m in reversed(left)]}, f, ensure_ascii=False, indent=1)
+    out('還原好了：%d 項%s' % (len(back), '，%d 項沒還原' % len(left) if left else ''))
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
-    for c in ('plan', 'migrate'): sub.add_parser(c).add_argument('root', nargs='?', default=root_of_program())
+    for c in ('plan', 'migrate', 'undo'): sub.add_parser(c).add_argument('root', nargs='?', default=root_of_program())
     a = ap.parse_args()
+    if a.cmd == 'undo': sys.exit(undo(a.root))
     sys.exit(migrate(a.root, dry=a.cmd == 'plan'))
 
 
